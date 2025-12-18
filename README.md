@@ -32,7 +32,7 @@
 
 
 # AetherLoom - Cloud AI Apps / ComfyUI Workflows Local Interactive Interface and View Management
-# 爱思络 —— 云端AI应用/comfyui工作流本地交互界面与视图管理
+# - 云端AI应用/comfyui工作流本地交互界面与视图管理
 
 
 本应用程序旨在通过利用API访问在线模型/工作流来减轻部署本地模型的计算负担，同时提供一个用户友好的本地界面，便于使用。
@@ -53,4 +53,48 @@ Currently implemented features:
 3. GRC Local decoding.
 
    
+# alpha版部分功能展示
+# Some Features in Alpha ver.
+
+
+<img width="3154" height="1809" alt="image" src="https://github.com/user-attachments/assets/abdec026-3aa1-49f0-932b-3b5e9864be2f" />
+
+输入你的Runninghub网站apikey，然后添加Runninghub的任意AI应用网址（支持一键添加所有作者推荐应用，作者会保持更新），自动生成对应的应用和节点卡片;在应用内，导入需要的本地文件或自由调整节点卡后点击运行（可设置批次，上限99，并行数量取决于你的apikey类型），调用api自动上传文件并创建任务卡片，不断征询任务进度直到返回结果并展示在右侧输出预览里。
+
+Enter your Runninghub API key, then add any AI app URL from Runninghub (supports one-click addition of all author-recommended apps, which the author keeps updated), and it automatically generates the corresponding apps and node cards. Inside the app, import any required local files or freely adjust the node cards, then click Run (you can set batches, up to 99; the number of parallel runs depends on your API key type). It calls the API to upload your files and create task cards, then continuously polls the task progress until results are placed, and displays them in the output preview on the right panel.
+
+<img width="3154" height="1809" alt="image" src="https://github.com/user-attachments/assets/fb622e78-eb78-48e3-89ac-cb71868e4e39" />
+
+<img width="3154" height="1809" alt="image" src="https://github.com/user-attachments/assets/806a0280-a4a0-4070-8af5-87e064eb566b" />
+
+
+
+支持多个应用同时运行，并将所有任务的进度实时展示在应用界面内。
+
+Running multiple applications simultaneously is possible, with the progress of all tasks displayed in real time within the application interface.
+
+<img width="3154" height="1809" alt="image" src="https://github.com/user-attachments/assets/aa885bae-6b60-4c6f-93f6-29fb3377beb9" />
+
+
+
+支持隐私保护，你可以将AI应用在线生成的视图加密后下载到本地再进行解码，防止线上个人隐私泄露；在应用界面右上角勾选本地解码可以在任务完成同时解码返回的文件，并展示解码后预览。
+
+Support privacy protection: you can encrypt views generated online by AI applications and download them to your local machine for decoding to prevent leakage of personal privacy online; Check the Local Decode option in the upper-right corner of the application interface to enable direct decoding of returned files upon task completion and displaying a decoded preview.
+
+<img width="3154" height="1809" alt="image" src="https://github.com/user-attachments/assets/22931105-aedf-44ea-8aed-bc4108797c01" />
+
+
+
+支持本地视图管理，拥有丰富的筛选功能，以及XY图表比较功能（支持手动修改排版和添加XY标注，并且支持预览图同步缩放）
+
+Support local view management with rich filtering capabilities and XY chart comparison (supports manual layout editing and XY annotations, plus synchronized preview zoom).
+
+<img width="3154" height="1809" alt="image" src="https://github.com/user-attachments/assets/edc8d7c7-4d07-479b-9298-d206c178134e" />
+
+<img width="3148" height="1734" alt="image" src="https://github.com/user-attachments/assets/440c9927-f809-4d10-bfb0-70ac8bdc63fa" />
+
+
+点击我的 Runninghub 邀请链接：https://www.runninghub.ai/?inviteCode=conlp00n. 注册互得免费RH币。
+
+Open my Runninghub invitation link: https://www.runninghub.ai/?inviteCode=conlp00n. Register and get free RH coins for each other.
 
