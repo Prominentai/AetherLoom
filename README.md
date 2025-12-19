@@ -34,6 +34,9 @@
 # AetherLoom - Cloud AI Apps / ComfyUI Workflows Local Interactive Interface and View Management
 # - 云端AI应用/comfyui工作流本地交互界面与视图管理
 
+<img width="3154" height="1809" alt="image" src="https://github.com/user-attachments/assets/806a0280-a4a0-4070-8af5-87e064eb566b" />
+
+
 国内下载链接：https://pan.quark.cn/s/f9ff30831d74
 
 本应用程序旨在通过利用API访问在线模型/工作流来减轻部署本地模型的计算负担，同时提供一个用户友好的本地界面，便于使用。
@@ -56,8 +59,6 @@ Currently implemented features:
    
 # alpha版部分功能展示
 # Some Features in Alpha ver.
-
-<img width="3154" height="1809" alt="image" src="https://github.com/user-attachments/assets/806a0280-a4a0-4070-8af5-87e064eb566b" />
 
 
 输入你的Runninghub网站apikey，然后添加Runninghub的任意AI应用网址（支持一键添加所有作者推荐应用，作者会保持更新，具体应用详见我的主页: [https://www.runninghub.cn/user-center/1911823721911500801/webapp?inviteCode=rh-v1380](https://www.runninghub.cn/user-center/1911823721911500801/webapp?inviteCode=rh-v1380)），自动生成对应的应用和节点卡片;
