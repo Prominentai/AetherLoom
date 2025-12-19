@@ -34,7 +34,7 @@
 # AetherLoom - Cloud AI Apps / ComfyUI Workflows Local Interactive Interface and View Management
 # - 云端AI应用/comfyui工作流本地交互界面与视图管理
 
-
+国内下载链接：https://pan.quark.cn/s/f9ff30831d74
 本应用程序旨在通过利用API访问在线模型/工作流来减轻部署本地模型的计算负担，同时提供一个用户友好的本地界面，便于使用。
 
 目前已实现的功能：
