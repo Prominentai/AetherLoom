@@ -37,7 +37,7 @@
 <img width="3154" height="1809" alt="image" src="https://github.com/user-attachments/assets/806a0280-a4a0-4070-8af5-87e064eb566b" />
 
 
-国内下载链接：https://pan.quark.cn/s/f9ff30831d74
+国内下载链接：https://pan.quark.cn/s/f0a699748a8e
 
 本应用程序旨在通过利用API访问在线模型/工作流来减轻部署本地模型的计算负担，同时提供一个用户友好的本地界面，便于使用。
 
