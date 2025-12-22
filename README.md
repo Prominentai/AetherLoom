@@ -39,7 +39,7 @@
 
 国内下载链接：https://pan.quark.cn/s/f0a699748a8e
 
-本应用程序旨在通过利用API访问在线模型/工作流来减轻部署本地模型的计算负担，同时提供一个用户友好的本地界面，便于使用。
+本应用程序旨在通过利用API访问在线模型/工作流来减轻部署本地模型的计算负担，并提供一个用户友好的本地交互界面，尽可能在简化操作的同时丰富AI画图功能。
 
 目前已实现的功能：
 
@@ -51,7 +51,7 @@
 6. 图像反推（支持批量）
 
 
-This application is designed to reduce the computational burden on deploying local models by utilizing APIs to access online models/workflows, while providing a user-friendly local interface for easier use.
+This application aims to reduce the computational burden of deploying local models by leveraging APIs to access online models/workflows, while providing a user-friendly local interface that enriches AI painting capabilities and simplifies operations as much as possible.
 
 Currently implemented features:
 
