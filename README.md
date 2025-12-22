@@ -43,22 +43,28 @@
 
 目前已实现的功能：
 
-1. 输入Runninghub AI应用网址生成本地UI界面进行使用，并可以自由上传文件
+1. 输入Runninghub AI应用网址生成本地UI界面，任意修改参数与上传文件进行工作流运行
 2. 本地视图管理
 3. 本地视图GRC解码
+4. 提示词自动补全
+5. 提示词翻译与扩写
+6. 图像反推（支持批量）
 
 
 This application is designed to reduce the computational burden on deploying local models by utilizing APIs to access online models/workflows, while providing a user-friendly local interface for easier use.
 
 Currently implemented features:
 
-1. Enter the Runninghub AI application URL to generate a local UI for use, with the ability to freely upload files.
-2. Local view management.
-3. GRC Local decoding.
+1. Generate a local UI by entering the Runninghub AI app URL; modify parameters and upload files to run workflows
+2. Local view management
+3. Local GRC decoding
+4. Prompt auto-completion
+5. Prompt translation and expansion
+6. Image inference (batch supported)
 
    
-# alpha版部分功能展示
-# Some Features in Alpha ver.
+# v0.1.0 alpha版部分功能展示
+# Some Features in v0.1.0 Alpha ver.
 
 
 输入你的Runninghub网站apikey，然后添加Runninghub的任意AI应用网址（支持一键添加所有作者推荐应用，作者会保持更新，具体应用详见我的主页: [https://www.runninghub.cn/user-center/1911823721911500801/webapp?inviteCode=rh-v1380](https://www.runninghub.cn/user-center/1911823721911500801/webapp?inviteCode=rh-v1380)），自动生成对应的应用和节点卡片;
