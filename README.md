@@ -103,4 +103,7 @@ Support local view management with rich filtering capabilities and XY chart comp
 
 
 
+填写作者Runninghub邀请码rh-v1380以支持作者，并可获得1000RH币。
+
+Enter the author's Runninghub invitation code rh-v1380 to support the author and receive 1000 RH coins.
 
