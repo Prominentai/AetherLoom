@@ -38,6 +38,7 @@
 
 
 国内下载链接：https://pan.quark.cn/s/f0a699748a8e
+视频教程：https://www.bilibili.com/video/BV1bfByBNEcv
 
 本应用程序旨在通过利用API访问在线模型/工作流来减轻部署本地模型的计算负担，并提供一个用户友好的本地交互界面，尽可能在简化操作的同时丰富AI画图功能。
 
