@@ -1,0 +1,50 @@
+# Local credentials and personal configuration
+apikeys*.json
+settings*.json
+running_tasks*.json
+.env
+.env.*
+*.pem
+*.key
+credentials*.json
+secrets*.json
+
+# User workflows, inputs, generated results and caches
+RH_apps/
+input/
+output/
+decoding/
+.thumb_cache/
+*cache*/
+.readme_cache.md
+*.log
+
+# Local environments and Python/build artifacts
+.aetherloom-venv/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+specs/
+*.spec
+*.exe
+*.zip
+*.7z
+*.bak
+*.tmp
+
+# Local verification, documentation and archives (not for publication)
+verification/
+tests/
+test/
+test_*.py
+*_test.py
+docs/
+archives/
+.idea/
+.vscode/

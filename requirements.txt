@@ -1,0 +1,30 @@
+# AetherLoom 0.1.4 runtime dependencies; validated with Python 3.10 on Windows.
+# Install using the same interpreter that runs Start-AetherLoom.cmd:
+# python -m pip install -r requirements.txt
+
+# Desktop UI (PyQt5-Qt5 and PyQt5-sip are installed by PyQt5).
+PyQt5==5.15.11
+
+# Images, local decoding and video processing.
+Pillow>=9.5,<13
+numpy>=1.23,<3
+opencv-python>=4.8,<5
+# Keep 1.x: the application imports moviepy.editor and uses its 1.x interfaces.
+moviepy==1.0.3
+# Bundled FFmpeg executable used by MoviePy for video/audio operations.
+imageio-ffmpeg>=0.6,<0.7
+
+# Provider requests, HTTP retries and download error handling.
+requests>=2.31,<3
+urllib3>=2.2.3,<3
+
+# Native recycle-bin support for local file deletion.
+Send2Trash>=2.1,<3
+
+# Keyless auto-translation backends; the adapter supports these interfaces.
+translators==5.9.9
+googletrans==4.0.2
+httpx>=0.28.1,<0.29
+
+# PyInstaller is a build-only dependency, managed by packaging_build/build_package.py.
+# Test and verification dependencies are intentionally not part of this file.

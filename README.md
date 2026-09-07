@@ -109,3 +109,11 @@ Support local view management with rich filtering capabilities and XY chart comp
 
 Enter the author's Runninghub invitation code rh-v1380 to support the author and receive 1000 RH coins.
 
+
+
+## 源码目录说明
+
+建议使用 Python 3.10，在项目根目录执行 `python -m pip install -r requirements.txt` 安装依赖。
+随后运行根目录 `Start-AetherLoom.cmd` 或 `python AetherLoom.py`。
+运行模块位于 `aetherloom_core/`，供应商接口位于 `api_calls/`，打包脚本位于 `packaging_build/`。
+API 密钥和个人设置请在客户端内配置；这些文件、测试、文档归档及本地输入输出不随源码提交。
