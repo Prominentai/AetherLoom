@@ -36,6 +36,18 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
             self.insertPlainText(source.text())
         else:
             super().insertFromMimeData(source)
+
+    def _completion_options(self):
+        # Editors are initially parentless, then attached to cached RH pages.
+        # Resolve the live owning window so both existing and new pages update.
+        owner = self.parentWidget()
+        while owner is not None:
+            settings = getattr(owner, 'settings', None)
+            if isinstance(settings, dict):
+                return auto_complete.completion_options(settings)
+            owner = owner.parentWidget()
+        return auto_complete.completion_options()
+
     def _get_prefix_before_cursor(self):
         cur = self.textCursor()
         if cur.hasSelection():
@@ -69,7 +81,7 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
             if not prefix or not self._manager:
                 self._hide_popup()
                 return
-            matches = self._manager.get_matches(prefix, limit=self._limit)
+            matches = self._manager.get_matches(prefix, limit=max(self._limit, self._completion_options()['visible_tags']))
             if not matches:
                 self._hide_popup()
                 return
@@ -84,11 +96,8 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
         if not matches:
             self._hide_popup()
             return
-        self._popup.clear()
-        self._popup.addItems(matches)
-        for row, match in enumerate(matches):
-            self._popup.item(row).setToolTip(match)
-        self._popup.setCurrentRow(0)
+        self._popup.set_candidates(matches, self._get_prefix_before_cursor(),
+                                   getattr(self.window(), '_theme_mode', 'dark'))
         self._popup.ensurePolished()
 
         # Cursor rectangles are relative to the viewport, not the editor frame.
@@ -102,10 +111,11 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
         available = screen.availableGeometry()
         frame = self._popup.frameWidth() * 2
         scrollbar = self._popup.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent)
-        width = min(max(self._popup.sizeHintForColumn(0) + frame + scrollbar, 200),
-                    800, available.width())
+        width = min(max(self._popup.sizeHintForColumn(0) + frame + scrollbar, 360),
+                    560, available.width())
         row_height = max(1, self._popup.sizeHintForRow(0))
-        desired_height = min(row_height * min(len(matches), 15) + frame, 600)
+        desired_height = (row_height * min(len(matches), self._completion_options()['visible_tags'])
+                          + frame + self._popup.extra_height)
         below_space = max(0, available.bottom() + 1 - below.y())
         above_space = max(0, above.y() - available.top())
         if below_space >= desired_height or below_space >= above_space:
@@ -143,7 +153,9 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
         cur.setPosition(pos, QtGui.QTextCursor.KeepAnchor)
         following = self.textCursor()
         following.movePosition(QtGui.QTextCursor.End, QtGui.QTextCursor.KeepAnchor)
-        cur.insertText(auto_complete.format_completion(completion, following.selectedText()))
+        options = self._completion_options()
+        cur.insertText(auto_complete.format_completion(completion, following.selectedText(),
+                       escape_parentheses=options['escape_parentheses'], replace_spaces=options['replace_spaces']))
         cur.endEditBlock()
         self.setTextCursor(cur)
         self._hide_popup()

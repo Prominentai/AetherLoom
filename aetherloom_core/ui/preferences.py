@@ -4,6 +4,58 @@ from pathlib import Path
 from PyQt5 import QtCore, QtWidgets
 
 from aetherloom_core.rh_ui import palette
+from aetherloom_core.autocomplete import completion_options
+
+
+def _completion_card(window):
+    card = QtWidgets.QFrame()
+    card.setObjectName('settingsCard')
+    layout = QtWidgets.QVBoxLayout(card)
+    title = QtWidgets.QLabel('提示词补全')
+    title.setObjectName('settingsCardTitle')
+    description = QtWidgets.QLabel('控制补全后的 tag 格式与候选窗口大小；修改后立即生效。')
+    description.setObjectName('settingsHint')
+    description.setWordWrap(True)
+    layout.addWidget(title)
+    layout.addWidget(description)
+    options = completion_options(window.settings)
+    window.autocomplete_escape_cb = QtWidgets.QCheckBox('自动在圆括号前添加反斜杠（\\）')
+    window.autocomplete_escape_cb.setChecked(options['escape_parentheses'])
+    window.autocomplete_escape_cb.setToolTip(r'例如 character_(series) → character_\(series\)，避免括号被识别为权重语法。')
+    window.autocomplete_spaces_cb = QtWidgets.QCheckBox('用下划线（_）替换空格')
+    window.autocomplete_spaces_cb.setChecked(options['replace_spaces'])
+    window.autocomplete_spaces_cb.setToolTip('开启：long_hair；关闭：long hair。仅影响新插入的补全内容。')
+    layout.addWidget(window.autocomplete_escape_cb)
+    layout.addWidget(window.autocomplete_spaces_cb)
+    form = QtWidgets.QFormLayout()
+    form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
+    window.autocomplete_rows_spin = QtWidgets.QSpinBox()
+    window.autocomplete_rows_spin.setRange(1, 50)
+    window.autocomplete_rows_spin.setValue(options['visible_tags'])
+    window.autocomplete_rows_spin.setSuffix(' 个')
+    window.autocomplete_rows_spin.setMinimumHeight(38)
+    window.autocomplete_rows_spin.setMaximumWidth(160)
+    window.autocomplete_rows_spin.setKeyboardTracking(False)
+    window.autocomplete_rows_spin.setAccessibleName('补全窗口可见 tag 数量')
+    window._install_combo_wheel_blocker(window.autocomplete_rows_spin)
+    form.addRow('窗口可见 tag 数量', window.autocomplete_rows_spin)
+    layout.addLayout(form)
+    hint = QtWidgets.QLabel('范围 1–50，默认 15；屏幕空间不足时自动收缩，更多候选可滚动查看。')
+    hint.setObjectName('settingsHint')
+    hint.setWordWrap(True)
+    layout.addWidget(hint)
+
+    def save_options(*_):
+        window.settings['autocomplete'] = {
+            'escape_parentheses': window.autocomplete_escape_cb.isChecked(),
+            'replace_spaces': window.autocomplete_spaces_cb.isChecked(),
+            'visible_tags': window.autocomplete_rows_spin.value()}
+        window._save_settings()
+
+    window.autocomplete_escape_cb.toggled.connect(save_options)
+    window.autocomplete_spaces_cb.toggled.connect(save_options)
+    window.autocomplete_rows_spin.valueChanged.connect(save_options)
+    return card
 
 
 def _header(frame, title, description, eyebrow):
@@ -77,6 +129,8 @@ def configure_settings(window, layout, column, hero):
         tabs.addTab(title)
     layout.insertWidget(1, tabs)
     window._settings_tabs = tabs
+    # Prompt cards start at index six; preserve the existing category mapping.
+    column.insertWidget(6, _completion_card(window))
     cards = [column.itemAt(i).widget() for i in range(column.count()) if column.itemAt(i).widget()]
     window._settings_cards = cards
     folder_rows = []
@@ -199,6 +253,7 @@ def stylesheet(root, mode):
     theme = 'light' if mode == 'light' else 'dark'
     down = (icons / f'ui-chevron-down-{theme}.svg').as_posix()
     up = (icons / f'ui-chevron-up-{theme}.svg').as_posix()
+    check = (icons / 'ui-check.svg').as_posix()
     s = '#' + root
     return f'''
         {s} {{ background: {p['canvas']}; color: {p['text']}; border: none; }}
@@ -224,6 +279,11 @@ def stylesheet(root, mode):
             border-radius: 8px; padding: 8px 10px; min-height: 20px; font-size: 13px;
             selection-background-color: {p['accent']}; selection-color: white; }}
         {s} QLineEdit:focus, {s} QComboBox:focus, {s} QSpinBox:focus, {s} QTextEdit:focus {{ border-color: {p['accent']}; }}
+        {s} QCheckBox {{ spacing: 9px; padding: 4px 0; font-size: 13px; }}
+        {s} QCheckBox::indicator {{ width: 17px; height: 17px; border: 1px solid {p['muted']};
+            border-radius: 4px; background: {p['input']}; }}
+        {s} QCheckBox::indicator:checked {{ image: url("{check}"); background: {p['accent']}; border-color: {p['accent']}; }}
+        {s} QCheckBox::indicator:hover {{ border-color: {p['accent']}; }}
         {s} QLineEdit:read-only {{ color: {p['muted']}; }}
         {s} QComboBox QAbstractItemView {{ background: {p['surface']}; color: {p['text']};
             selection-background-color: {p['accent_soft']}; selection-color: {p['text']}; border: 1px solid {p['border']}; }}
