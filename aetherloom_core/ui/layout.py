@@ -3198,14 +3198,12 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                             # mapping: task_id -> webapp id (string)
                             self._rh_task_to_wid = {}
                         # file for persisting running tasks across runs
-                        try:
-                            self._rh_tasks_file = os.path.join(current_dir, 'running_tasks.json')
-                        except Exception:
-                            self._rh_tasks_file = os.path.join(os.getcwd(), 'running_tasks.json')
                         from aetherloom_core import rh_tasks
                         if not hasattr(self, '_rh_task_lifecycle'):
+                            task_store = rh_tasks.default_task_store()
+                            self._rh_tasks_file = task_store.path
                             self._rh_task_lifecycle = rh_tasks.TaskLifecycle(
-                                self, rh_tasks.TaskStore(self._rh_tasks_file),
+                                self, task_store,
                                 lambda wid, status: self._rh_status_emitter.sig.emit(wid, status))
                             self._refresh_rh_task_credentials()
                         if not hasattr(self, '_rh_status_emitter'):
@@ -7514,6 +7512,15 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                             try:
                                                 try:
                                                     if isinstance(title, dict):
+                                                        if title.get('task_state') and not getattr(card, '_task_id', None):
+                                                            from aetherloom_core.rh_progress import update_card_progress
+                                                            state = title['task_state']
+                                                            update_card_progress(self, card, state)
+                                                            if state in ('FAILED', 'CANCELED'):
+                                                                self._rh_app_last_result[str(getattr(card, '_webapp_id', ''))] = state
+                                                                detail = getattr(card, '_rh_status_detail', None)
+                                                                if detail:
+                                                                    card._rh_progress_widget.set_message(detail)
                                                         if 'timer_start' in title:
                                                             try:
                                                                 card._timer_start = float(title.get('timer_start') or 0)
@@ -7588,6 +7595,7 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                         return
                                                     if not path and not card._rh_results_presented:
                                                         if title and not isinstance(title, dict):
+                                                            card._rh_status_detail = str(title)
                                                             card._rh_progress_widget.set_message(title)
                                                         return
                                                     if path:
@@ -7776,6 +7784,16 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                         my_ph['cards'] = [None]
 
                                                 # spawn a per-run worker thread for each requested run (parallel)
+                                                from aetherloom_core.rh_submission_queue import get_submission_queue
+                                                submission_queue = get_submission_queue(self)
+                                                submission_orders = submission_queue.reserve_orders(len(my_ph['cards']))
+                                                import weakref
+                                                if not hasattr(self, '_rh_local_cards'):
+                                                    self._rh_local_cards = weakref.WeakSet()
+                                                for local_card in my_ph['cards']:
+                                                    if local_card is not None:
+                                                        local_card._webapp_id = str(parsed.get('webappId') or '')
+                                                        self._rh_local_cards.add(local_card)
                                                 try:
                                                     import copy as _copy
                                                 except Exception:
@@ -7796,6 +7814,7 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                     task_id = None
                                                     webapp_id = None
                                                     final_status = None
+                                                    files = None
                                                     runtime_lock = getattr(self, '_rh_task_runtime_lock', None)
                                                     if card is not None:
                                                         card._rh_run_inflight = True
@@ -7808,6 +7827,11 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
 
                                                     def task_status(status):
                                                         if task_id and webapp_id:
+                                                            if status == 'DOWNLOAD_FAILED':
+                                                                lifecycle = getattr(self, '_rh_task_lifecycle', None)
+                                                                if lifecycle is not None:
+                                                                    with lifecycle.lock:
+                                                                        lifecycle._download_retry_attempts.setdefault(task_id, 0)
                                                             self._rh_status_emitter.sig.emit(str(webapp_id), f'TASK_STATUS:{task_id}:{status}')
 
                                                     def cancelled():
@@ -7985,7 +8009,7 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
 
                                                     try:
                                                         from api_calls import call_rh
-                                                        from aetherloom_core.rh_outputs import download_outputs, OutputDownloadError, OutputDownloadCancelled, GRC_DECODE_LOCK
+                                                        from aetherloom_core.rh_outputs import download_outputs, cleanup_output_receipts, OutputDownloadError, OutputDownloadCancelled, GRC_DECODE_LOCK
                                                         from aetherloom_core.rh_storage import (app_output_directories, is_decoded_output,
                                                                                 decoded_output_path, remember_decoded_output, valid_decoded_output)
                                                         import tempfile
@@ -8029,7 +8053,8 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                                 if cancelled():
                                                                     raise OutputDownloadCancelled('下载后处理已停止，任务保留供恢复。')
                                                                 presented_path = saved_path
-                                                                if decode_token and not is_decoded_output(saved_path, output_dir):
+                                                                if decode_token and not is_decoded_output(saved_path, output_dir,
+                                                                        task_id=task_id, token=decode_token, cancelled=cancelled):
                                                                     restored = valid_decoded_output(saved_path, task_id, decode_token, cancelled=cancelled)
                                                                     try:
                                                                         if not restored:
@@ -8092,7 +8117,7 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                                 return default
 
                                                         max_retries = positive_setting('retry_max', 100)
-                                                        retry_delay = positive_setting('retry_delay', 15)
+                                                        retry_delay = positive_setting('retry_delay', 5)
                                                         concurrency = positive_setting('retry_concurrency', 25)
                                                         if cancelled():
                                                             emit_msg(None, '已取消')
@@ -8143,24 +8168,28 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                             response = get_submission_queue(self).submit(
                                                                 lambda: call_rh.run_task(webapp_id, api_key, node_list_local,
                                                                                         base_url=base_url, timeout=30),
-                                                                {'webapp_id': str(webapp_id), 'tid': None, 'card': card},
+                                                                {'webapp_id': str(webapp_id), 'tid': None, 'card': card,
+                                                                 '_submission_order': submission_orders[run_idx]},
                                                                 max_retries=max_retries, delay=retry_delay,
                                                                 concurrency=concurrency, cancelled=cancelled,
-                                                                on_wait=lambda attempt, reason: emit_msg(
-                                                                    None, f'等待队首重试 {attempt}/{max_retries}'),
-                                                                on_submit=lambda: emit_msg(None, '提交任务...'))
+                                                                on_wait=lambda attempt, reason: (
+                                                                    emit_msg(None, {'task_state': 'LOCAL_WAIT'}),
+                                                                    emit_msg(None, f'等待队首重试 {attempt}/{max_retries}')),
+                                                                on_submit=lambda: (emit_msg(None, {'task_state': 'SUBMITTING'}),
+                                                                                   emit_msg(None, '提交任务...')))
                                                         except SubmissionCancelled:
                                                             emit_msg(None, '已取消')
                                                             return
                                                         if not isinstance(response, dict):
                                                             raise RuntimeError('任务提交返回无效响应')
+                                                        call_rh.validate_response(response, 'Submit task', api_key=api_key)
                                                         data = response.get('data')
                                                         raw_id = data.get('taskId') if isinstance(data, dict) else None
                                                         raw_id = raw_id if raw_id is not None else response.get('taskId')
-                                                        if raw_id is None or not str(raw_id).strip():
+                                                        if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)) or not str(raw_id).strip():
                                                             raise RuntimeError('任务提交被拒绝: ' + str(response.get('msg') or response.get('message')
                                                                                                       or response.get('code') or '未返回 taskId'))
-                                                        task_id = str(raw_id)
+                                                        task_id = str(raw_id).strip()
 
                                                         # Publish connection context before TASK_ADD can trigger recovery.
                                                         with runtime_lock if runtime_lock is not None else nullcontext():
@@ -8186,9 +8215,14 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                                 emit_msg(None, f'任务 {task_id} 的恢复记录保存失败，仍继续跟踪: {exc}')
                                                         self._rh_status_emitter.sig.emit(str(webapp_id), f'TASK_ADD:{task_id}')
                                                         if cancelled():
-                                                            # Cancellation while the POST was in flight must cancel its newly
-                                                            # returned remote task rather than leaving it running untracked.
                                                             lifecycle = getattr(self, '_rh_task_lifecycle', None)
+                                                            # A close during POST must preserve the newly returned task ID.
+                                                            if (getattr(self, '_closing', False) or (lifecycle is not None
+                                                                    and lifecycle.stop_event.is_set())):
+                                                                emit_msg(None, '客户端已暂停，任务保留供下次启动恢复')
+                                                                return
+                                                            # Explicit cancellation while POST was in flight applies to
+                                                            # its newly returned remote task as well.
                                                             if lifecycle is not None and lifecycle.cancel_task(task_id, str(webapp_id)):
                                                                 emit_msg(None, '任务已取消')
                                                                 return
@@ -8271,6 +8305,8 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                                 self._rh_downloaded_tasks = set()
                                                             self._rh_downloaded_tasks.add(task_id)
                                                             task_status('SUCCESS')
+                                                        if not cleanup_output_receipts(task_id, files, output_dir):
+                                                            emit_msg(None, '输出已完成，部分校验记录暂未清理')
                                                     except OutputDownloadCancelled:
                                                         emit_msg(None, '下载已停止，未完成任务保留供恢复')
                                                     except Exception as exc:
@@ -8282,12 +8318,21 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                                 pass
                                                         emit_msg(None, '运行错误: ' + str(exc))
                                                     finally:
+                                                        submission_queue.release_order(submission_orders[run_idx])
+                                                        if not task_id:
+                                                            emit_msg(None, {'task_state': 'CANCELED' if cancelled() else 'FAILED'})
+                                                        lifecycle = getattr(self, '_rh_task_lifecycle', None)
+                                                        if files and lifecycle is not None and lifecycle.receipts_finished(task_id):
+                                                            cleanup_output_receipts(task_id, files, output_dir)
                                                         if card is not None:
                                                             card._rh_run_inflight = False
                                                         emit_msg(None, {'timer_stop': True})
                                                         if task_id:
                                                             with runtime_lock if runtime_lock is not None else nullcontext():
                                                                 getattr(self, '_rh_live_task_ids', set()).discard(task_id)
+                                                                lifecycle = getattr(self, '_rh_task_lifecycle', None)
+                                                                if lifecycle is not None and files:
+                                                                    lifecycle._receipt_maintenance_due = 0
 
                                                 # start a thread per requested run
                                                 try:
@@ -8300,9 +8345,11 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                                     import threading as _tlocal
                                                                     _tlocal.Thread(target=_run_single, args=(idx, ccard), daemon=True).start()
                                                                 except Exception:
-                                                                    pass
+                                                                    submission_queue.release_order(submission_orders[idx])
+                                                                    _update_preview_card(ccard, None, {'task_state': 'FAILED'})
                                                         except Exception:
-                                                            pass
+                                                            submission_queue.release_order(submission_orders[idx])
+                                                            _update_preview_card(ccard, None, {'task_state': 'FAILED'})
                                                 except Exception:
                                                     pass
 
@@ -9940,10 +9987,10 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
         try:
             self.rh_retry_delay_spin.setRange(1, 3600)
             self.rh_retry_delay_spin.setSingleStep(1)
-            self.rh_retry_delay_spin.setValue(int(getattr(self, 'rh_retry_delay', 10) or 10))
+            self.rh_retry_delay_spin.setValue(int(getattr(self, 'rh_retry_delay', 5) or 5))
         except Exception:
             try:
-                self.rh_retry_delay_spin.setValue(10)
+                self.rh_retry_delay_spin.setValue(5)
             except Exception:
                 pass
         rh_row.addWidget(self.rh_retry_delay_spin)

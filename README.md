@@ -34,6 +34,8 @@
 # AetherLoom - Cloud AI Apps / ComfyUI Workflows Local Interactive Interface and View Management
 # - 云端AI应用/comfyui工作流本地交互界面与视图管理
 
+当前版本：**0.2**
+
 <img width="3154" height="1809" alt="image" src="https://github.com/user-attachments/assets/806a0280-a4a0-4070-8af5-87e064eb566b" />
 
 
@@ -115,5 +117,8 @@ Enter the author's Runninghub invitation code rh-v1380 to support the author and
 
 建议使用 Python 3.10，在项目根目录执行 `python -m pip install -r requirements.txt` 安装依赖。
 随后运行根目录 `Start-AetherLoom.cmd` 或 `python AetherLoom.py`。
+启动脚本默认使用当前环境的 `python`；使用其他位置的 Python 时，可执行 `.\Start-AetherLoom.cmd "E:\Python310\python.exe"`。虚拟环境请先激活，或直接指定其中的解释器路径。
+切换解释器后需在同一解释器中安装依赖，例如在项目根目录执行 `"E:\Python310\python.exe" -m pip install -r requirements.txt`（PowerShell 中在命令前加 `&`）。启动失败时窗口会显示实际报错及对应安装命令；脚本调用可设置 `AETHERLOOM_NO_PAUSE=1` 禁止暂停。
 运行模块位于 `aetherloom_core/`，供应商接口位于 `api_calls/`，打包脚本位于 `packaging_build/`。
+RunningHub 提交成功并返回 taskId 后，任务状态和校验记录独立保存在 `task_records/runninghub/`；未完成任务可在重启后恢复，确认结束后清理记录。旧位置记录会自动迁移，该目录不随源码提交。
 API 密钥和个人设置请在客户端内配置；这些文件、测试、文档归档及本地输入输出不随源码提交。

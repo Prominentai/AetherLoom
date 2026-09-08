@@ -1,8 +1,8 @@
 """FIFO retries for RunningHub submissions rejected while the service is busy.
 
-Initial submissions retain their concurrency limit. Once rejected with 415/421,
-an entry keeps the head position until submitted, exhausted, or cancelled. Other
-entries sleep on a condition and never run their own retry polling loops.
+Click/batch order is reserved before uploads start. Initial requests may overlap,
+but retries follow that order regardless of response timing. A head stays first
+until confirmed running, exhausted, or cancelled; followers have no retry polling loop.
 """
 
 import threading
@@ -37,6 +37,38 @@ class SubmissionQueue:
             owner._rh_retry_active = 0
         self.condition = threading.Condition(owner._rh_retry_lock)
         self.closed = False
+        self._next_order = 0
+        self._pending_orders = set()
+        self._awaiting_start = {}
+
+    def reserve_orders(self, count):
+        """Capture click/batch order before uploads or worker scheduling race."""
+        with self.condition:
+            orders = tuple(range(self._next_order, self._next_order + count))
+            self._next_order += count
+            self._pending_orders.update(orders)
+            return orders
+
+    def release_order(self, order):
+        with self.condition:
+            if order in self._awaiting_start.values():
+                return  # Returning from submit or pausing its worker is not RUNNING.
+            self._pending_orders.discard(order)
+            self.condition.notify_all()
+
+    def task_status(self, task_id, status):
+        """Advance on confirmed execution (or its outcome), never on taskId alone."""
+        if status not in {'RUNNING', 'DOWNLOADING', 'DOWNLOAD_FAILED', 'SUCCESS', 'FAILED', 'CANCELED'}:
+            return
+        with self.condition:
+            order = self._awaiting_start.pop(str(task_id), None)
+            if order is not None:
+                self._pending_orders.discard(order)
+                self.condition.notify_all()
+
+    def waiting_for_start(self, order):
+        with self.condition:
+            return any(previous < order for previous in self._awaiting_start.values())
 
     def _stopped(self, cancelled):
         return (self.closed or getattr(self.owner, '_closing', False)
@@ -52,6 +84,7 @@ class SubmissionQueue:
             removed = [item for item in self.owner._rh_retry_queue if predicate(item)]
             for item in removed:
                 item['_cancelled'] = True
+                self._pending_orders.discard(item.get('_submission_order'))
                 card = item.get('card')
                 if card is not None:
                     card._rh_cancelled = True
@@ -75,11 +108,20 @@ class SubmissionQueue:
             for entry in self.owner._rh_retry_queue:
                 entry['_cancelled'] = True
             self.owner._rh_retry_queue.clear()
+            self._pending_orders.clear()
+            self._awaiting_start.clear()
             self.condition.notify_all()
 
     def submit(self, request, entry, *, max_retries, delay, concurrency, cancelled,
                on_wait=None, on_submit=None):
         entry = dict(entry)
+        with self.condition:
+            order = entry.get('_submission_order')
+            if order not in self._pending_orders:
+                order = self._next_order
+                self._next_order += 1
+                self._pending_orders.add(order)
+            entry['_submission_order'] = order
         queued = False
         due = 0.0
         try:
@@ -92,7 +134,8 @@ class SubmissionQueue:
                             items = self.owner._rh_retry_queue
                             if not any(item is entry for item in items):
                                 raise SubmissionCancelled('Submission removed from retry queue')
-                            if not items or items[0] is not entry:
+                            if (not items or items[0] is not entry
+                                    or any(previous < order for previous in self._pending_orders)):
                                 # Followers have no retry timer: only a queue change wakes them.
                                 self.condition.wait()
                                 continue
@@ -100,8 +143,14 @@ class SubmissionQueue:
                             if remaining > 0:
                                 self.condition.wait(remaining)
                                 continue
+                        elif (any(item['_submission_order'] < order for item in self.owner._rh_retry_queue)
+                              or any(previous < order for previous in self._awaiting_start.values())):
+                            # New submissions cannot take slots ahead of an older retry.
+                            self.condition.wait()
+                            continue
                         if self.owner._rh_retry_active < max(1, int(concurrency)):
                             self.owner._rh_retry_active += 1
+                            entry['_submitting'] = True
                             break
                         self.condition.wait()
 
@@ -116,38 +165,52 @@ class SubmissionQueue:
                     response = request()
                     if isinstance(response, dict):
                         retry_code = response.get('code', response.get('errcode', response.get('status')))
-                except SubmissionCancelled:
-                    raise
+                except SubmissionCancelled as exc:
+                    error = exc
                 except Exception as exc:
                     error = exc
                     retry_code = getattr(getattr(exc, 'response', None), 'status_code', None)
+                try:
+                    try:
+                        retry_code = int(retry_code)
+                    except (TypeError, ValueError, OverflowError):
+                        retry_code = None
+                    if retry_code in (415, 421) and attempt < max_retries:
+                        with self.condition:
+                            if self._stopped(cancelled) or entry.get('_cancelled', False):
+                                raise SubmissionCancelled('Submission cancelled')
+                            if not queued:
+                                self.owner._rh_retry_queue.append(entry)
+                                self.owner._rh_retry_queue.sort(key=lambda item: item['_submission_order'])
+                                queued = True
+                            entry.update(reason=str(retry_code), attempt=attempt + 1)
+                            due = time.monotonic() + max(0.0, float(delay))
+                            self.condition.notify_all()
+                        if on_wait is not None:
+                            on_wait(attempt + 1, str(retry_code))
+                        continue
+                    if error is not None:
+                        raise error
+                    if isinstance(response, dict) and str(response.get('code')) == '0':
+                        data = response.get('data')
+                        task_id = data.get('taskId') if isinstance(data, dict) else None
+                        task_id = task_id if task_id is not None else response.get('taskId')
+                        if (isinstance(task_id, (str, int)) and not isinstance(task_id, bool)
+                                and str(task_id).strip()):
+                            with self.condition:
+                                if not self.closed:
+                                    self._awaiting_start[str(task_id).strip()] = order
+                    # An accepted task ID must reach the caller even during close/cancel.
+                    return response
                 finally:
                     with self.condition:
+                        entry['_submitting'] = False
                         self.owner._rh_retry_active = max(0, self.owner._rh_retry_active - 1)
                         self.condition.notify_all()
-                try:
-                    retry_code = int(retry_code)
-                except (TypeError, ValueError, OverflowError):
-                    retry_code = None
-                if retry_code in (415, 421) and attempt < max_retries:
-                    with self.condition:
-                        if self._stopped(cancelled) or entry.get('_cancelled', False):
-                            raise SubmissionCancelled('Submission cancelled')
-                        if not queued:
-                            self.owner._rh_retry_queue.append(entry)
-                            queued = True
-                        entry.update(reason=str(retry_code), attempt=attempt + 1)
-                        due = time.monotonic() + max(0.0, float(delay))
-                        self.condition.notify_all()
-                    if on_wait is not None:
-                        on_wait(attempt + 1, str(retry_code))
-                    continue
-                if error is not None:
-                    raise error
-                # An in-flight request can succeed after cancellation. Its taskId
-                # must reach the caller so it can be persisted and cancelled remotely.
-                return response
         finally:
-            if queued:
-                with self.condition:
+            with self.condition:
+                if order not in self._awaiting_start.values():
+                    self._pending_orders.discard(order)
+                if queued:
                     self._remove(entry)
+                self.condition.notify_all()

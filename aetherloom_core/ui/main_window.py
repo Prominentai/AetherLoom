@@ -15,6 +15,7 @@ from aetherloom_core.platform_utils import _api_debug
 from aetherloom_core.services.decoding import _mode_for_label
 from aetherloom_core.platform_utils import _move_to_trash
 from aetherloom_core import api_manager
+from aetherloom_core import __version__
 from aetherloom_core.prompt_history import clear_histories
 from aetherloom_core.paths import current_dir, SOURCE_ROOT
 import cv2
@@ -35,7 +36,7 @@ from aetherloom_core.ui.settings import SettingsMixin
 class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, SettingsMixin, QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('AetherLoom v0.1.4-alpha')
+        self.setWindowTitle(f'AetherLoom v{__version__}')
         # threadpool and thumbnail cache for background thumbnail generation
         try:
             self._thumb_pool = QtCore.QThreadPool.globalInstance()
@@ -219,9 +220,9 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         except Exception:
             self.rh_retry_max = 100
         try:
-            self.rh_retry_delay = int(self.settings.get('rh_retry_delay', 15))
+            self.rh_retry_delay = int(self.settings.get('rh_retry_delay', 5))
         except Exception:
-            self.rh_retry_delay = 15
+            self.rh_retry_delay = 5
         # concurrency is fixed default (not user-configurable in settings)
         try:
             self.rh_retry_concurrency = 25

@@ -453,6 +453,47 @@ def _wait_before_retry(delay, cancelled):
         time.sleep(min(0.05, remaining))
 
 
+def cleanup_output_receipts(task_id, files, output_dir):
+    """Remove only this completed task's receipts, without scanning other tasks.
+
+    Call after all outputs have been presented, including local decoding. Failed
+    or interrupted tasks must retain their proofs for verified download reuse.
+    Media files are never removed here. Keep the directories themselves because
+    another task may already be preparing to write its receipt there.
+    """
+    from aetherloom_core.rh_storage import (
+        DECODED_FOLDER, _receipt_path, _derivative_receipt_path, receipt_directory)
+    directory = Path(output_dir).resolve()
+    receipt_dirs = (receipt_directory(directory, 'downloads'), receipt_directory(directory, 'decoded'))
+    if any(path.is_symlink() for path in receipt_dirs):
+        return False
+    complete = True
+    for record in files or ():
+        try:
+            url = record.get('fileUrl') or record.get('url') or record.get('file')
+            filename, _ = _destination_name(task_id, url, directory)
+            source = directory / filename
+            key = hashlib.sha256((task_id + '\0' + _url_identity(url)).encode('utf-8')).hexdigest()
+            download_receipt = receipt_dirs[0] / (key + '.json')
+            decode_receipt = _receipt_path(source)
+            receipts = [download_receipt, decode_receipt]
+            if decode_receipt.is_file():
+                decoded_record = json.loads(decode_receipt.read_text(encoding='utf-8'))
+                if decoded_record.get('task_id') != str(task_id):
+                    complete = False
+                    continue
+                name = decoded_record.get('decoded_name')
+                folder = decoded_record.get('decoded_folder', DECODED_FOLDER)
+                if (folder == '' and isinstance(name, str) and name
+                        and not any(char in name for char in '/\\:') and name not in ('.', '..')):
+                    receipts.insert(0, _derivative_receipt_path(directory / name))
+            for receipt in receipts:
+                receipt.unlink(missing_ok=True)
+        except (OSError, ValueError, TypeError, AttributeError):
+            complete = False
+    return complete
+
+
 def download_outputs(task_id, files, output_dir, *, max_attempts=3, retry_delay=0.5,
                      timeout=(15, 60), cancelled=None, on_retry=None, decoded_token=None):
     """Download all outputs, collecting failures after trying later files.
@@ -520,12 +561,13 @@ def download_outputs(task_id, files, output_dir, *, max_attempts=3, retry_delay=
         directory = Path(output_dir).resolve()
         # Receipts are required for verified reuse. Reject an unrepresentable
         # directory before any GET or partially committed output is possible.
-        receipts = directory / '.rh_downloads'
+        from aetherloom_core.rh_storage import receipt_directory
+        receipts = receipt_directory(directory, 'downloads')
         _require_windows_path(receipts / ('0' * 64 + '.json'))
         _require_windows_path(directory / ('tmp' + '0' * 8 + '.part'))
         with _task_lock(task_id, str(directory), cancelled):
             directory.mkdir(parents=True, exist_ok=True)
-            receipts.mkdir(exist_ok=True)
+            receipts.mkdir(parents=True, exist_ok=True)
             for identity, (url, record, metadata) in outputs.items():
                 _check_cancelled(cancelled)
                 filename, url_hash = _destination_name(task_id, url, directory)

@@ -2,6 +2,7 @@
 import os
 import sys
 from PyQt5 import QtCore, QtGui, QtWidgets
+from aetherloom_core import __version__
 from aetherloom_core.paths import current_dir
 from aetherloom_core.resources import PLAY_BUTTON_SVG
 from aetherloom_core.platform_utils import _svg_to_icon
@@ -21,6 +22,7 @@ def main():
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
     app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationVersion(__version__)
 
     # Prefer an explicit app icon so Windows taskbar shows the correct icon.
     try:

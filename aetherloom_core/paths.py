@@ -11,6 +11,8 @@ if getattr(sys, 'frozen', False):
         os.chdir(current_dir)
     except OSError:
         pass
-for directory in (current_dir, parent_dir):
-    if directory not in sys.path:
-        sys.path.insert(0, directory)
+# Keep application modules ahead of unrelated files next to the project.
+# The interpreter installation and parent directory are not resource roots.
+if current_dir in sys.path:
+    sys.path.remove(current_dir)
+sys.path.insert(0, current_dir)

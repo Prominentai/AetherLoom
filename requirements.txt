@@ -1,4 +1,4 @@
-# AetherLoom 0.1.4 runtime dependencies; validated with Python 3.10 on Windows.
+# AetherLoom 0.2 runtime dependencies; validated with Python 3.10 on Windows.
 # Install using the same interpreter that runs Start-AetherLoom.cmd:
 # python -m pip install -r requirements.txt
 

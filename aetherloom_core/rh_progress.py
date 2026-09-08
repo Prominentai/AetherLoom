@@ -93,6 +93,7 @@ class CircularProgress(QtWidgets.QWidget):
 def update_card_progress(owner, card, status, progress=None):
     if card is None or sip.isdeleted(card) or card.layout() is None:
         return
+    card._rh_display_status = status
     widget = getattr(card, '_rh_progress_widget', None)
     if getattr(card, '_rh_results_presented', False):
         if widget is not None:

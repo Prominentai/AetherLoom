@@ -37,6 +37,8 @@ class TaskStore:
             raise ValueError('RunningHub task file must contain an object')
         result = {}
         for task_id, value in data.items():
+            if not str(task_id).strip():
+                continue
             if isinstance(value, (str, int)):
                 value = {'webapp_id': str(value)}
             if not isinstance(value, dict) or not value.get('webapp_id'):
@@ -50,6 +52,12 @@ class TaskStore:
             return self._read_unlocked()
 
     def _write_unlocked(self, data):
+        if not data:
+            try:
+                os.remove(self.path)
+            except FileNotFoundError:
+                pass
+            return
         folder = os.path.dirname(self.path)
         os.makedirs(folder, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(prefix='.running-tasks-', suffix='.tmp', dir=folder)
@@ -64,6 +72,9 @@ class TaskStore:
                 os.remove(temporary)
 
     def put(self, task_id, context):
+        if isinstance(task_id, bool) or not isinstance(task_id, (str, int)) or not str(task_id).strip():
+            raise ValueError('A persisted RunningHub task needs a returned task ID')
+        task_id = str(task_id).strip()
         with self.lock:
             data = self._read_unlocked()
             previous = data.get(str(task_id))
@@ -83,6 +94,21 @@ class TaskStore:
             if str(task_id) in data:
                 data.pop(str(task_id))
                 self._write_unlocked(data)
+
+
+def default_task_store():
+    """Move the old task index only after the replacement is safely written."""
+    from aetherloom_core.paths import current_dir
+    from aetherloom_core.rh_storage import task_records_root
+    store = TaskStore(task_records_root() / 'running_tasks.json')
+    legacy = TaskStore(os.path.join(current_dir, 'running_tasks.json'))
+    if os.path.isfile(legacy.path):
+        records = legacy.read()
+        records.update(store.read())
+        with store.lock:
+            store._write_unlocked(records)
+        os.remove(legacy.path)
+    return store
 
 
 class TaskLifecycle:
@@ -120,6 +146,8 @@ class TaskLifecycle:
         self._download_retry_due = {}
         self._progress_due = {}
         self._progress_connected = set()
+        self._receipt_maintenance_due = 0
+        self._receipt_maintenance_worker = None
 
     def set_credentials(self, defaults, site_keys):
         """Called on the GUI thread with copied strings, including keys in memory only."""
@@ -145,6 +173,7 @@ class TaskLifecycle:
         webapp_id = str(webapp_id)
         if not isinstance(event, str):
             return
+        submission_status = None
         with self.lock:
             if event.startswith('TASK_PROGRESS_SOURCE:'):
                 parts = event.split(':', 2)
@@ -203,6 +232,7 @@ class TaskLifecycle:
                 self.owner._rh_task_contexts[task_id] = context
                 self.owner._rh_task_to_wid[task_id] = webapp_id
                 self.owner._rh_status_entries[task_id] = status
+                submission_status = (task_id, status)
                 if status != 'RUNNING':
                     monitor = getattr(self.owner, '_rh_progress_monitor', None)
                     if monitor is not None:
@@ -212,6 +242,7 @@ class TaskLifecycle:
                     if status in TERMINAL_STATUSES:
                         self._progress_due.pop(task_id, None)
                 if status in TERMINAL_STATUSES:
+                    self._receipt_maintenance_due = 0
                     self.owner._rh_download_notes.pop(task_id, None)
                     self._download_retry_attempts.pop(task_id, None)
                     self._download_retry_due.pop(task_id, None)
@@ -236,6 +267,11 @@ class TaskLifecycle:
                 return
             self.owner._rh_app_active_count[webapp_id] = len(
                 self.owner._rh_running_tasks.get(webapp_id, ()))
+        # Submission workers check lifecycle cancellation while holding their
+        # queue lock; never acquire that queue lock while holding this lock.
+        submission_queue = getattr(self.owner, '_rh_submission_queue', None)
+        if submission_status is not None and submission_queue is not None:
+            submission_queue.task_status(*submission_status)
 
     def _api(self):
         if self.api is None:
@@ -313,6 +349,13 @@ class TaskLifecycle:
                     or self.owner._rh_status_entries.get(task_id) in TERMINAL_STATUSES
                     or bool(getattr(context.get('card'), '_rh_cancelled', False)))
 
+    def receipts_finished(self, task_id):
+        """Stopping the client pauses work; only a confirmed outcome ends it."""
+        with self.lock:
+            return (task_id in self._confirmed_cancellations
+                    or task_id in self.owner._rh_downloaded_tasks
+                    or self.owner._rh_status_entries.get(task_id) in TERMINAL_STATUSES)
+
     def _note(self, webapp_id, task_id, text):
         self.emit(str(webapp_id), f'TASK_DOWNLOAD_NOTE:{task_id}:{text}')
 
@@ -330,9 +373,10 @@ class TaskLifecycle:
                    f'等待 {delay:g} 秒后进行第 {attempt}/{maximum} 次下载：{reason}')
 
     def _recover_task(self, task_id, context):
-        from aetherloom_core.rh_outputs import OutputDownloadCancelled, OutputDownloadError
+        from aetherloom_core.rh_outputs import OutputDownloadCancelled, OutputDownloadError, cleanup_output_receipts
         webapp_id = context['webapp_id']
         phase = 'poll'
+        output_records = None
 
         def track_paths(paths):
             callback = context.get('on_files_saved')
@@ -364,6 +408,7 @@ class TaskLifecycle:
                     # short-lived signed URLs before entering the downloader.
                     outputs = self._validate(self._api().get_outputs(
                         context['api_key'], task_id, base_url=context['base_url'], timeout=30))
+                    output_records = outputs.get('data')
                     if self._cancelled(task_id):
                         return
                     if self.downloader is None:
@@ -387,7 +432,10 @@ class TaskLifecycle:
                     self.owner._rh_downloaded_tasks.add(task_id)
                     self._download_retry_attempts.pop(task_id, None)
                     self._download_retry_due.pop(task_id, None)
-                    self._status(webapp_id, task_id, 'SUCCESS')
+                self._status(webapp_id, task_id, 'SUCCESS')
+                if not already_downloaded:
+                    if not cleanup_output_receipts(task_id, outputs.get('data'), context['output_dir']):
+                        self._note(webapp_id, task_id, '输出已完成，部分校验记录暂未清理')
             elif remote_status in ('FAILED', 'CANCELED', 'QUEUED', 'RUNNING'):
                 self._status(webapp_id, task_id, remote_status)
                 self.poll_progress(task_id, webapp_id, context['api_key'], context['base_url'], remote_status)
@@ -417,9 +465,13 @@ class TaskLifecycle:
             else:
                 self._status(webapp_id, task_id, 'POLL_TIMEOUT')
         finally:
+            if output_records and self.receipts_finished(task_id):
+                cleanup_output_receipts(task_id, output_records, context['output_dir'])
             with self.lock:
                 self.owner._rh_recovering_tasks.discard(task_id)
                 self._recovery_workers.pop(task_id, None)
+                if output_records:
+                    self._receipt_maintenance_due = 0
 
     def recover_once(self, *, background=False, respect_backoff=False):
         """Manual recovery is immediate; the automatic loop uses two workers.
@@ -471,9 +523,81 @@ class TaskLifecycle:
             else:
                 self._recover_task(task_id, context)
 
+    def _prune_receipts(self):
+        from pathlib import Path
+        from aetherloom_core.rh_storage import prune_output_receipts
+
+        def stopped():
+            return self.stop_event.is_set() or getattr(self.owner, '_closing', False)
+
+        def delete_if_idle(path, task_id, signature):
+            with self.lock:
+                active = self.owner._rh_live_task_ids | self.owner._rh_recovering_tasks
+                if stopped() or task_id in active or (not task_id and active):
+                    return
+                status = self.owner._rh_status_entries.get(task_id, persisted_statuses.get(task_id))
+                if not self.receipts_finished(task_id) and status not in TERMINAL_STATUSES:
+                    if (task_id and (task_id in persisted_statuses or status in ACTIVE_STATUSES
+                                     or task_id in self._download_retry_attempts)):
+                        return  # Unresolved tasks resume polling/downloads after restart.
+                    if not records_read:
+                        return  # An unreadable task list cannot prove abandonment.
+                try:
+                    stat = path.stat(follow_symlinks=False)
+                    if not path.is_symlink() and (stat.st_size, stat.st_mtime_ns) == signature:
+                        path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        try:
+            persisted_statuses = {}
+            records_read = False
+            with self.lock:
+                root = self.defaults.get('output_dir')
+                directories = {value.get('output_dir') for value in self.owner._rh_task_contexts.values()
+                               if value.get('output_dir')}
+            try:
+                records = self.store.read()
+                records_read = True
+                persisted_statuses = {task: value.get('status') for task, value in records.items()}
+                directories.update(value.get('output_dir') for value in records.values()
+                                   if value.get('output_dir'))
+            except (OSError, ValueError, TypeError):
+                pass  # Only confirmed terminal tasks can be cleaned in this case.
+
+            def output_dirs():
+                yield from directories
+                if root:
+                    yield root  # Includes outputs saved before per-app folders.
+                    try:
+                        with os.scandir(root) as entries:
+                            for entry in entries:
+                                if stopped():
+                                    return
+                                if not entry.name.startswith('.') and entry.is_dir(follow_symlinks=False):
+                                    yield Path(entry.path)
+                    except OSError:
+                        pass
+
+            prune_output_receipts(output_dirs(), delete_if_idle, cancelled=stopped)
+        except Exception:
+            # Maintenance must not interrupt execution or recovery.
+            pass
+
+    def _schedule_receipt_maintenance(self):
+        if time.monotonic() < self._receipt_maintenance_due:
+            return
+        if self._receipt_maintenance_worker is not None and self._receipt_maintenance_worker.is_alive():
+            return
+        self._receipt_maintenance_due = time.monotonic() + 30 * 60
+        self._receipt_maintenance_worker = threading.Thread(
+            target=self._prune_receipts, name='rh-receipt-cleanup', daemon=True)
+        self._receipt_maintenance_worker.start()
+
     def run(self):
         while not self.stop_event.is_set():
             try:
+                self._schedule_receipt_maintenance()
                 self.recover_once(background=True, respect_backoff=True)
             except Exception:
                 # A temporarily unavailable task file must not kill recovery.

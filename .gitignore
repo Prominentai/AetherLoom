@@ -2,6 +2,7 @@
 apikeys*.json
 settings*.json
 running_tasks*.json
+task_records/
 .env
 .env.*
 *.pem
