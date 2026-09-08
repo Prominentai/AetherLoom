@@ -10,29 +10,76 @@ import time
 from PyQt5 import QtCore, QtWidgets
 
 
+_credential_lock = threading.RLock()
+_credential_events = None
+
+
+class _CredentialEvents(QtCore.QObject):
+    saved = QtCore.pyqtSignal(str, object)
+
+
+def credential_events():
+    """Notify local credential editors after an atomic save, without polling."""
+    global _credential_events
+    if _credential_events is None:
+        _credential_events = _CredentialEvents()
+    return _credential_events
+
+
+def _rh_keys(record):
+    if isinstance(record, dict):
+        values = record.get('api_keys')
+        if not isinstance(values, list):
+            values = [record.get('api_key', '')]
+    else:
+        values = [record] if isinstance(record, str) else []
+    return list(dict.fromkeys(value.strip() for value in values
+                              if isinstance(value, str) and value.strip()))
+
+
+def _merge_rh_record(previous, incoming):
+    """A legacy single-key edit changes the first key and preserves the rest."""
+    result = copy.deepcopy(previous) if isinstance(previous, dict) else {}
+    if isinstance(incoming, dict):
+        result.update(incoming)
+    if isinstance(incoming, dict) and isinstance(incoming.get('api_keys'), list):
+        keys = _rh_keys(incoming)
+    else:
+        keys = list(dict.fromkeys(_rh_keys(incoming) + _rh_keys(previous)[1:]))
+    result.update(api_key=keys[0] if keys else '', api_keys=keys)
+    return result
+
+
 
 def persist_credentials(path, store, managed_keys):
     """Replace managed records atomically while preserving unrelated credentials."""
-    try:
-        with open(path, 'r', encoding='utf-8') as stream:
-            merged = json.load(stream)
-    except FileNotFoundError:
-        merged = {}
-    if not isinstance(merged, dict):
-        raise ValueError('Credential file must contain an object')
-    for key in managed_keys:
-        merged.pop(key, None)
-    merged.update(store)
-    descriptor, temporary = tempfile.mkstemp(prefix='.apikeys-', suffix='.tmp', dir=os.path.dirname(os.path.abspath(path)))
-    try:
-        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
-            json.dump(merged, stream, ensure_ascii=False, indent=2)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.remove(temporary)
+    with _credential_lock:
+        try:
+            with open(path, 'r', encoding='utf-8') as stream:
+                merged = json.load(stream)
+        except FileNotFoundError:
+            merged = {}
+        if not isinstance(merged, dict):
+            raise ValueError('Credential file must contain an object')
+        updates = copy.deepcopy(store)
+        managed_keys = set(managed_keys)
+        for name in ('runninghub_cn', 'runninghub_ai'):
+            if name in updates or name in managed_keys:
+                updates[name] = _merge_rh_record(merged.get(name), updates.get(name))
+        for key in managed_keys:
+            merged.pop(key, None)
+        merged.update(updates)
+        descriptor, temporary = tempfile.mkstemp(prefix='.apikeys-', suffix='.tmp', dir=os.path.dirname(os.path.abspath(path)))
+        try:
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+                json.dump(merged, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+    credential_events().saved.emit(os.path.normcase(os.path.abspath(path)), copy.deepcopy(merged))
     return merged
 
 

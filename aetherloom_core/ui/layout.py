@@ -187,6 +187,8 @@ class MainLayoutMixin:
         self.local_btn = _make_sidebar_button('本地文件', '浏览输入/输出素材', folder_icon)
         self.api_btn = _make_sidebar_button('API管理', '模型与接口管理', api_icon)
         self.runninghub_btn = _make_sidebar_button('RH应用', 'RunningHub 应用', runninghub_icon)
+        canvas_icon = QtGui.QIcon(os.path.join(current_dir, 'icons', 'canvas.svg'))
+        self.canvas_btn = _make_sidebar_button('画布', '画布与应用工作流', canvas_icon)
         self.settings_btn = _make_sidebar_button('设置中心', '参数与目录管理', settings_icon)
 
         # make Home the default selected sidebar entry
@@ -197,11 +199,12 @@ class MainLayoutMixin:
         # order: Home, Runninghub (moved), then other pages
         sidebar_layout.addWidget(self.home_btn)
         sidebar_layout.addWidget(self.runninghub_btn)
+        sidebar_layout.addWidget(self.canvas_btn)
         sidebar_layout.addWidget(self.decode_btn)
         sidebar_layout.addWidget(self.local_btn)
         sidebar_layout.addWidget(self.api_btn)
         sidebar_layout.addWidget(self.settings_btn)
-        self._sidebar_buttons = [self.home_btn, self.runninghub_btn, self.decode_btn, self.local_btn, self.api_btn, self.settings_btn]
+        self._sidebar_buttons = [self.home_btn, self.runninghub_btn, self.canvas_btn, self.decode_btn, self.local_btn, self.api_btn, self.settings_btn]
         sidebar_layout.addStretch(1)
 
         theme_row = QtWidgets.QHBoxLayout()
@@ -263,772 +266,18 @@ class MainLayoutMixin:
         h.addWidget(self.pages, 1)
 
         # --- Page: 主页 (home) ---
-        home_page = QtWidgets.QWidget()
-        home_layout = QtWidgets.QVBoxLayout(home_page)
-        home_layout.setContentsMargins(24, 24, 24, 24)
-        home_layout.setSpacing(12)
-
-        # top container will hold logo, title and subtitle (occupies upper half)
-        top_container = QtWidgets.QWidget()
-        top_layout = QtWidgets.QVBoxLayout(top_container)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(8)
-        # decorative logo (SVG) if available
-        try:
-            # prefer an on-disk emblem (icons/home_emblem.svg) so users can override it
-            try:
-                emblem_file = os.path.join(current_dir, 'icons', 'home_emblem.svg')
-            except Exception:
-                emblem_file = None
-            ico = None
-            try:
-                if emblem_file and os.path.exists(emblem_file):
-                    ico = QtGui.QIcon(emblem_file)
-                else:
-                    ico = _svg_to_icon(PLAY_BUTTON_SVG, 220)
-            except Exception:
-                ico = None
-            if ico is not None:
-                logo_lbl = QtWidgets.QLabel(alignment=Qt.AlignCenter)
-                logo_lbl.setObjectName('homeLogo')
-                try:
-                    pm = ico.pixmap(220, 220)
-                    logo_lbl._source_pixmap = pm
-                    logo_lbl.setPixmap(pm)
-                except Exception:
-                    pass
-                top_layout.addWidget(logo_lbl, 0, Qt.AlignHCenter)
-        except Exception:
-            pass
-
-        # big artistic title
-        try:
-            title_lbl = QtWidgets.QLabel('AetherLoom', alignment=Qt.AlignCenter)
-            title_lbl.setObjectName('homeTitle')
-            # set large, elegant font and white color with shadow outline
-            try:
-                f = QtGui.QFont()
-                f.setFamily('Brush Script MT, Segoe Script, KaiTi, Serif')
-                # much larger base size for dramatic title (fallback to a large fixed size)
-                f.setPointSize(int(max(64, getattr(self, '_base_font_point', 12) * 8)))
-                f.setBold(True)
-                title_lbl.setFont(f)
-            except Exception:
-                pass
-            try:
-                # enforce large font-size via stylesheet as a fallback and increase weight
-                title_lbl.setStyleSheet('color: #ffffff; font-size: 64pt; font-weight: 900;')
-                eff = QtWidgets.QGraphicsDropShadowEffect(title_lbl)
-                eff.setBlurRadius(22)
-                eff.setColor(QtGui.QColor(0, 0, 0))
-                eff.setOffset(0, 0)
-                title_lbl.setGraphicsEffect(eff)
-            except Exception:
-                pass
-            top_layout.addWidget(title_lbl, 0, Qt.AlignHCenter)
-        except Exception:
-            pass
-
-        # subtitle / tagline
-        try:
-            # keep a reference so theme changes can update its color dynamically
-            self.home_subtitle = QtWidgets.QLabel('调取在线AI工作流进行本地交互&支持本地解码与视图管理', alignment=Qt.AlignCenter)
-            self.home_subtitle.setStyleSheet('color: #d1d5db; font-size: 12pt;')
-            self.home_subtitle.setWordWrap(True)
-            top_layout.addWidget(self.home_subtitle)
-        except Exception:
-            pass
-
-        # README / info box: occupies roughly half the home area
-        try:
-            self.home_readme = QtWidgets.QTextEdit()
-            self.home_readme.setReadOnly(True)
-            self.home_readme.setObjectName('homeReadme')
-            try:
-                # make README background match the main interface (transparent)
-                # text color will be adjusted later based on theme (dark -> light text, light -> dark text)
-                self.home_readme.setStyleSheet('background: transparent; color: #e6eef8; font-size: 11pt; padding:8px; border-radius:8px; border: none;')
-            except Exception:
-                pass
-            # prefer a roughly half-height initial size; adjust if main window size available
-            try:
-                h = 140
-                self.home_readme.setMinimumHeight(h)
-                self.home_readme.setMaximumHeight(max(h, 9999))
-            except Exception:
-                pass
-            # add top container and README with equal stretch so README occupies lower half
-            try:
-                home_layout.addWidget(top_container, 1)
-            except Exception:
-                home_layout.addWidget(top_container)
-            try:
-                # add a spacer so the readme sits lower on the page
-                home_layout.addStretch(1)
-            except Exception:
-                pass
-            try:
-                self.home_readme.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-            except Exception:
-                pass
-            try:
-                # give README a larger stretch so it occupies the lower portion
-                home_layout.addWidget(self.home_readme, 2)
-            except Exception:
-                home_layout.addWidget(self.home_readme)
-
-            # helper: load local README into the widget
-            def _load_local_readme():
-                try:
-                    lp = os.path.join(current_dir, 'README.md')
-                    cached_readme = os.path.join(current_dir, '.readme_cache.md')
-                    if os.path.isfile(cached_readme):
-                        lp = cached_readme
-                    txt = ''
-                    if os.path.exists(lp):
-                        try:
-                            with open(lp, 'r', encoding='utf-8') as rf:
-                                txt = rf.read()
-                        except Exception:
-                            try:
-                                with open(lp, 'r', encoding='gbk', errors='ignore') as rf:
-                                    txt = rf.read()
-                            except Exception:
-                                txt = ''
-                    if not txt:
-                        txt = '本地 README 未找到或为空。'
-                    try:
-                        # strip/ignore SVG content so the README view does not attempt
-                        # to render inline SVGs or show SVG images
-                        try:
-                            import re
-                            # remove full <svg>...</svg> blocks (multiline)
-                            txt = re.sub(r'<svg[\s\S]*?</svg>', '', txt, flags=re.IGNORECASE)
-                            # remove markdown image links that reference .svg files: ![alt](...svg)
-                            txt = re.sub(r'!\[[^\]]*\]\([^)]*?\.svg[^)]*\)', '[SVG image omitted]', txt, flags=re.IGNORECASE)
-                            # remove HTML <img ... src="...svg" ... /> tags
-                            txt = re.sub(r'<img\b[^>]*src=["\'][^"\']*?\.svg[^"\']*["\'][^>]*>', '[SVG image omitted]', txt, flags=re.IGNORECASE)
-                            # remove data-URI svg images
-                            txt = re.sub(r'data:image/svg\+xml;[^\s"\']+', '[SVG data omitted]', txt, flags=re.IGNORECASE)
-                        except Exception:
-                            pass
-                        self.home_readme.setPlainText(txt)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-
-            # background updater: fetch README from GitHub and update local file + UI
-            def _start_readme_refresh():
-                try:
-                    if getattr(self, '_closing', False):
-                        return
-                    class _Runner(QtCore.QObject):
-                        finished = QtCore.pyqtSignal(bool, str)
-                        @QtCore.pyqtSlot()
-                        def run(self):
-                            ok = False
-                            content = ''
-                            try:
-                                # try raw.githubusercontent first (common layout)
-                                raw_url = 'https://raw.githubusercontent.com/Prominentai/AetherLoom/main/README.md'
-                                try:
-                                    import requests as _req
-                                except Exception:
-                                    _req = None
-                                if _req is not None:
-                                    try:
-                                        r = _req.get(raw_url, timeout=15)
-                                        if r is not None and r.status_code == 200:
-                                            content = r.text
-                                            ok = True
-                                    except Exception:
-                                        ok = False
-                                else:
-                                    ok = False
-                                # fallback: fetch repository page and attempt to scrape
-                                if not ok:
-                                    try:
-                                        page_url = 'https://github.com/Prominentai/AetherLoom'
-                                        if _req is not None:
-                                            r2 = _req.get(page_url, timeout=15)
-                                            if r2 is not None and r2.status_code == 200:
-                                                import re as _re
-                                                m = _re.search(r'<article[\s\S]*?>([\s\S]*?)</article>', r2.text, _re.I)
-                                                if m:
-                                                    raw = m.group(1)
-                                                    # crude strip HTML tags
-                                                    txt = _re.sub(r'<[^>]+>', '', raw)
-                                                    content = txt.strip()
-                                                    ok = True
-                                    except Exception:
-                                        ok = False
-                            except Exception:
-                                ok = False
-                            try:
-                                self.finished.emit(ok, content)
-                            except Exception:
-                                pass
-
-                    runner = _Runner(self)
-                    self._readme_refresh_runner = runner
-                    def _on_done(success, txt):
-                        try:
-                            if success and txt:
-                                try:
-                                    lp = os.path.join(current_dir, '.readme_cache.md')
-                                    tmp = lp + '.tmp'
-                                    with open(tmp, 'w', encoding='utf-8') as wf:
-                                        wf.write(txt)
-                                    try:
-                                        os.replace(tmp, lp)
-                                    except Exception:
-                                        try:
-                                            os.replace(tmp, lp)
-                                        except Exception:
-                                            pass
-                                except Exception:
-                                    pass
-                            try:
-                                _load_local_readme()
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
-                        try:
-                            runner.deleteLater()
-                        except Exception:
-                            pass
-                        try:
-                            self._readme_refresh_runner = None
-                        except Exception:
-                            pass
-
-                    runner.finished.connect(_on_done, QtCore.Qt.QueuedConnection)
-                    # This read-only network worker must not hold application exit open.
-                    # Keep the signal emitter on the GUI thread; only the HTTP work
-                    # runs in the daemon. Its signal safely ignores a closed window.
-                    threading.Thread(target=runner.run, name='readme-refresh', daemon=True).start()
-                except Exception:
-                    try:
-                        _load_local_readme()
-                    except Exception:
-                        pass
-
-            # initial load from local
-            try:
-                _load_local_readme()
-            except Exception:
-                pass
-
-            # schedule background refresh shortly after startup
-            try:
-                QtCore.QTimer.singleShot(800, _start_readme_refresh)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        home_layout.addStretch(1)
-
-        # bottom-left contact/links area on home page
-        try:
-            links_w = QtWidgets.QWidget()
-            links_l = QtWidgets.QHBoxLayout(links_w)
-            links_l.setContentsMargins(6, 6, 6, 6)
-            links_l.setSpacing(8)
-            links_lbl = QtWidgets.QLabel()
-            links_lbl.setWordWrap(True)
-            links_lbl.setMinimumWidth(0)
-            links_lbl.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
-            links_lbl.setText(
-                'github网址: <a href="https://github.com/Prominentai/AetherLoom">AetherLoom</a><br>'
-                # 'discord 邀请码: <a href="https://discord.com/invite/3Jwx4MwKQe">https://discord.com/invite/3Jwx4MwKQe</a><br>'
-                'RunningHUB 邀请码: <a href="https://www.runninghub.ai/user-center/1911823721911500801/webapp?inviteCode=rh-v1380">RunningHub</a>'
-            )
-            try:
-                links_lbl.setOpenExternalLinks(True)
-            except Exception:
-                pass
-            try:
-                links_lbl.setTextInteractionFlags(QtCore.Qt.TextBrowserInteraction)
-            except Exception:
-                pass
-            try:
-                links_lbl.setStyleSheet('color: #9fb6d8; font-size: 10pt;')
-            except Exception:
-                pass
-            links_l.addWidget(links_lbl, 1)
-            # adjust colors based on theme mode for readability
-            try:
-                mode = getattr(self, '_theme_mode', None)
-                if mode is None:
-                    try:
-                        mode = (self.settings.get('theme') if isinstance(getattr(self, 'settings', None), dict) else None) or 'dark'
-                    except Exception:
-                        mode = 'dark'
-                # dark mode: brighter link colors; light mode: dark text on light bg
-                if mode == 'light':
-                    try:
-                        sub.setStyleSheet('color: #111111; font-size: 12pt;')
-                    except Exception:
-                        pass
-                    try:
-                        # keep the README background matching the app background (transparent)
-                        # and ensure the text is dark for daytime readability
-                        self.home_readme.setStyleSheet('background: transparent; color: #111111; font-size: 11pt; padding:8px; border-radius:8px; border: none;')
-                    except Exception:
-                        pass
-                    try:
-                        links_lbl.setText(
-                            'github网址: <a href="https://github.com/Prominentai/AetherLoom" style="color:#0b66c3">AetherLoom</a><br>'
-                            # 'discord 邀请码: <a href="https://discord.com/invite/3Jwx4MwKQe" style="color:#0b66c3">https://discord.com/invite/3Jwx4MwKQe</a><br>'
-                            'RunningHUB 邀请码: <a href="https://www.runninghub.ai/user-center/1911823721911500801/webapp?inviteCode=rh-v1380" style="color:#0b66c3">RunningHub</a>'
-                        )
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        sub.setStyleSheet('color: #d1d5db; font-size: 12pt;')
-                    except Exception:
-                        pass
-                    try:
-                        # dark mode: transparent background (match app) and light text
-                        self.home_readme.setStyleSheet('background: transparent; color: #ffffff; font-size: 11pt; padding:8px; border-radius:8px; border: none;')
-                    except Exception:
-                        pass
-                    try:
-                        self.home_readme.setStyleSheet('background: rgba(255,255,255,0.02); color: #e6eef8; font-size: 11pt; padding:8px; border-radius:8px;')
-                    except Exception:
-                        pass
-                    try:
-                        links_lbl.setText(
-                            'github网址: <a href="https://github.com/Prominentai/AetherLoom" style="color:#86e7ff">AetherLoom</a><br>'
-                            # 'discord 邀请码: <a href="https://discord.com/invite/3Jwx4MwKQe" style="color:#86e7ff">https://discord.com/invite/3Jwx4MwKQe</a><br>'
-                            'RunningHUB 邀请码: <a href="https://www.runninghub.ai/user-center/1911823721911500801/webapp?inviteCode=rh-v1380" style="color:#86e7ff">RunningHub</a>'
-                        )
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            home_layout.addWidget(links_w)
-        except Exception:
-            pass
-
-        make_responsive(home_page, home=True)
+        from aetherloom_core.ui.home import HomePage
+        home_page = HomePage(self, current_dir)
+        self.home_page = home_page
+        self.home_readme = home_page.readme
+        self.home_subtitle = home_page.subtitle
+        make_responsive(home_page)
         self.pages.addWidget(home_page)
 
         # --- Page: 本地解码 (decode) ---
-        decode_page = QtWidgets.QWidget()
-        decode_layout = QtWidgets.QHBoxLayout(decode_page)
-
-        # left column within decode page: file list and action buttons
-        left_col = QtWidgets.QVBoxLayout()
-        self.file_list = DropListWidget()
-        # Make the left-list thumbnails larger for better visibility
-        try:
-            base_icon = getattr(self, '_file_list_icon_base', 120)
-            self.file_list.setIconSize(QtCore.QSize(base_icon, base_icon))
-            self.file_list.setSpacing(6)
-            try:
-                self.file_list.setUniformItemSizes(True)
-            except Exception:
-                pass
-        except Exception:
-            pass
-        self.file_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        # keep default selection appearance for left file list (do not apply custom delegate)
-        left_col.addWidget(self.file_list)
-
-        # ensure file_list also enqueues visible thumbnails on scroll/viewport
-        try:
-            self.file_list.verticalScrollBar().valueChanged.connect(partial(self._on_list_scrolled, self.file_list))
-            self.file_list.viewport().installEventFilter(self)
-            # selection info for left file list
-            try:
-                self.file_list.itemSelectionChanged.connect(partial(self._on_list_selection_changed, self.file_list))
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        btn_row = QtWidgets.QHBoxLayout()
-        self.preview_btn = QtWidgets.QPushButton('解码选中')
-        self.batch_btn = QtWidgets.QPushButton('批量解码')
-        self.cancel_btn = QtWidgets.QPushButton('取消任务')
-        btn_row.addWidget(self.preview_btn)
-        btn_row.addWidget(self.batch_btn)
-        btn_row.addWidget(self.cancel_btn)
-        left_col.addLayout(btn_row)
-
-        decode_layout.addLayout(left_col, 2)
-
-        # middle column: preview (原图) and controls/log
-        mid_col = QtWidgets.QVBoxLayout()
-        # make middle column narrower by reducing stretch factor
-        decode_layout.addLayout(mid_col, 3)
-
-        # Preview area: original
-        self.preview_tabs = QtWidgets.QTabWidget()
-        # per-mode preview labels so settings and previews stay isolated
-        self.orig_view_grc = DropLabel(alignment=Qt.AlignCenter)
-        self.orig_view_sst = DropLabel(alignment=Qt.AlignCenter)
-        self.orig_view = self.orig_view_grc  # alias points to active tab's label
-        # VAE tab intentionally has no preview box; temporarily remove VAE support
-        # self.vae_view = QtWidgets.QWidget()
-        # allow dynamic scaling with window resize for preview-like widgets
-        for lbl in (self.orig_view_grc, self.orig_view_sst):  # VAE preview removed
-            try:
-                lbl.setObjectName('previewLabel')
-            except Exception:
-                pass
-            try:
-                lbl.setMinimumSize(self._preview_min_base.width(), self._preview_min_base.height())
-            except Exception:
-                pass
-            try:
-                lbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-            except Exception:
-                pass
-            try:
-                if hasattr(lbl, 'setScaledContents'):
-                    lbl.setScaledContents(False)
-            except Exception:
-                pass
-
-        # store last pixmaps for responsive scaling
-        self._current_pixmaps = {'orig': None, 'output': None}
-        # keep per-mode caches so switching tabs does not override previews
-        self._orig_pixmaps_by_mode = {'grc': None, 'sst': None}
-        self._orig_paths_by_mode = {'grc': None, 'sst': None}
-        # store current file paths shown in previews so double-click can open them
-        self._current_paths = {'orig': None, 'output': None}
-        # add tabs: GRC decode (VAE tab temporarily removed)
-        self._grc_tab_index = self.preview_tabs.addTab(self.orig_view_grc, 'GRC解码')
-        self._sst_tab_index = self.preview_tabs.addTab(self.orig_view_sst, 'SSTool解码')
-        mid_col.addWidget(self.preview_tabs, 6)
-
-        # when the user switches tabs, toggle which decode-control group is shown
-        
-
-        self.orig_info_label = QtWidgets.QLabel('', alignment=Qt.AlignLeft)
-        self.orig_info_label.setObjectName('fileInfoLabel')
-        self.orig_info_label.setWordWrap(True)
-        mid_col.addWidget(self.orig_info_label)
-
-        # Controls
-        # group without title (title removed per request)
-        control_group = QtWidgets.QGroupBox('')
-        self.decode_control_group = control_group
-        self._control_group_css_template = 'QGroupBox { margin-top: 0px; } QLabel, QCheckBox, QSpinBox { font-size: {size}pt; }'
-        control_layout = QtWidgets.QGridLayout(control_group)
-        self._apply_control_group_font(getattr(self, '_ui_scale_factor', 1.0))
-
-        self.grid_label = QtWidgets.QLabel('网格列数:')
-        control_layout.addWidget(self.grid_label, 0, 0)
-        self.grid_spin = QtWidgets.QSpinBox()
-        self.grid_spin.setRange(4, 256)
-        # default to 32 columns
-        self.grid_spin.setValue(32)
-        try:
-            grc.grid_cols = 32
-            grc.grid_rows = int(grc.grid_cols) + 2
-        except Exception:
-            pass
-        control_layout.addWidget(self.grid_spin, 0, 1)
-        # SSTool password (visible only in SSTool模式)
-        self.sst_pwd_label = QtWidgets.QLabel('密码:')
-        self.sst_pwd_edit = QtWidgets.QLineEdit()
-        self.sst_pwd_edit.setPlaceholderText('无')
-        self.sst_pwd_edit.setEchoMode(QtWidgets.QLineEdit.Normal)
-        self.sst_pwd_label.setVisible(False)
-        self.sst_pwd_edit.setVisible(False)
-        control_layout.addWidget(self.sst_pwd_label, 1, 0)
-        control_layout.addWidget(self.sst_pwd_edit, 1, 1)
-
-        control_layout.addWidget(QtWidgets.QLabel('显示网格覆盖:'), 2, 0)
-        self.show_grid_cb = QtWidgets.QCheckBox('在预览上显示网格线')
-        self.show_grid_cb.setChecked(False)
-        control_layout.addWidget(self.show_grid_cb, 2, 1)
-
-        # overwrite option: if unchecked, skip already-decoded files
-        control_layout.addWidget(QtWidgets.QLabel('覆盖输出:'), 3, 0)
-        self.overwrite_cb = QtWidgets.QCheckBox('勾选以覆盖已存在的解码文件')
-        self.overwrite_cb.setChecked(False)
-        control_layout.addWidget(self.overwrite_cb, 3, 1)
-
-        mid_col.addWidget(control_group, 2)
-
-        # VAE decode control area (temporarily disabled)
-        # vae_group = QtWidgets.QGroupBox('')
-        # self.vae_control_group = vae_group
-        # # layout for VAE controls
-        # try:
-        #     vae_layout = QtWidgets.QGridLayout(self.vae_control_group)
-        #     vae_layout.setContentsMargins(6, 6, 6, 6)
-        #     vae_layout.setHorizontalSpacing(8)
-        #     vae_layout.setVerticalSpacing(8)
-        #
-        #     lbl = QtWidgets.QLabel('选择VAE：')
-        #     vae_layout.addWidget(lbl, 0, 0)
-        #
-        #     self.vae_combo = QtWidgets.QComboBox()
-        #     self.vae_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        #     vae_layout.addWidget(self.vae_combo, 0, 1)
-        #
-        #     self.add_vae_btn = QtWidgets.QPushButton('添加vae')
-        #     vae_layout.addWidget(self.add_vae_btn, 1, 0, 1, 2)
-        #
-        #     # helper to refresh combobox from ./models/vae
-        #     def _refresh_vae_list():
-        #         try:
-        #             models_dir = os.path.join(current_dir, 'models', 'vae')
-        #             os.makedirs(models_dir, exist_ok=True)
-        #             items = [f for f in os.listdir(models_dir) if os.path.isfile(os.path.join(models_dir, f))]
-        #             items = sorted(items)
-        #             self.vae_combo.blockSignals(True)
-        #             self.vae_combo.clear()
-        #             for it in items:
-        #                 self.vae_combo.addItem(it)
-        #             self.vae_combo.blockSignals(False)
-        #         except Exception:
-        #             pass
-        #
-        #     # add button handler: copy selected file into models/vae and refresh
-        #     def _on_add_vae():
-        #         try:
-        #             start = getattr(self, 'settings', {}).get('last_browse_dir', current_dir)
-        #             path, _ = QtWidgets.QFileDialog.getOpenFileName(self, '选择 VAE 文件', start, 'All Files (*)')
-        #             if not path:
-        #                 return
-        #             dst_dir = os.path.join(current_dir, 'models', 'vae')
-        #             os.makedirs(dst_dir, exist_ok=True)
-        #             dst = os.path.join(dst_dir, os.path.basename(path))
-        #             shutil.copy2(path, dst)
-        #             try:
-        #                 self.settings['last_browse_dir'] = os.path.dirname(path)
-        #             except Exception:
-        #                 pass
-        #             _refresh_vae_list()
-        #             try:
-        #                 self._show_toast(f'已添加 VAE: {os.path.basename(path)}')
-        #             except Exception:
-        #                 QtWidgets.QMessageBox.information(self, '添加vae', f'已添加: {os.path.basename(path)}')
-        #         except Exception as e:
-        #             try:
-        #                 QtWidgets.QMessageBox.warning(self, '添加vae 失败', str(e))
-        #             except Exception:
-        #                 pass
-        #
-        #     try:
-        #         self.add_vae_btn.clicked.connect(_on_add_vae)
-        #     except Exception:
-        #         pass
-        #
-        #     # populate initially
-        #     _refresh_vae_list()
-        # except Exception:
-        #     # fallback: keep group empty
-        #     pass
-        #
-        # # keep VAE area hidden until VAE tab selected
-        # try:
-        #     self.vae_control_group.setVisible(False)
-        #     mid_col.addWidget(self.vae_control_group, 2)
-        # except Exception:
-        #     pass
-
-        # ensure tab switching toggles the appropriate control group and mode-specific UI
-        try:
-            def _apply_mode_ui(mode):
-                is_grc = (mode == 'grc')
-                is_sst = (mode == 'sst')
-                try:
-                    self.grid_spin.setEnabled(is_grc)
-                    self.grid_spin.setVisible(is_grc)
-                    self.grid_label.setVisible(is_grc)
-                except Exception:
-                    pass
-                try:
-                    self.sst_pwd_label.setVisible(is_sst)
-                    self.sst_pwd_edit.setVisible(is_sst)
-                except Exception:
-                    pass
-
-            def _sync_active_preview(mode):
-                try:
-                    if mode == 'sst':
-                        self.orig_view = self.orig_view_sst
-                    else:
-                        self.orig_view = self.orig_view_grc
-                except Exception:
-                    self.orig_view = getattr(self, 'orig_view_grc', None)
-                # refresh cached pixmaps into the active label if available
-                try:
-                    pix = (self._orig_pixmaps_by_mode or {}).get(mode)
-                    path = (self._orig_paths_by_mode or {}).get(mode)
-                except Exception:
-                    pix, path = None, None
-                if pix is not None:
-                    try:
-                        if hasattr(self.orig_view, 'set_base_pixmap'):
-                            self.orig_view.set_base_pixmap(pix)
-                        else:
-                            self.orig_view.setPixmap(pix.scaled(self.orig_view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                    except Exception:
-                        pass
-                    try:
-                        self._current_pixmaps['orig'] = pix
-                        self._current_paths['orig'] = path
-                    except Exception:
-                        pass
-                    try:
-                        if path:
-                            self._set_file_info(path, 'orig')
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        self._current_pixmaps['orig'] = None
-                        self._current_paths['orig'] = None
-                    except Exception:
-                        pass
-                    try:
-                        QtCore.QTimer.singleShot(80, self.on_file_selected)
-                    except Exception:
-                        pass
-
-            def _on_preview_tab_changed(idx):
-                if idx == getattr(self, '_sst_tab_index', -1):
-                    mode = 'sst'
-                else:
-                    mode = 'grc'
-                _apply_mode_ui(mode)
-                try:
-                    if mode == 'grc':
-                        grc.grid_cols = int(self.grid_spin.value())
-                        grc.grid_rows = int(grc.grid_cols) + 2
-                except Exception:
-                    pass
-                _sync_active_preview(mode)
-                try:
-                    self._save_settings()
-                except Exception:
-                    pass
-            self.preview_tabs.currentChanged.connect(_on_preview_tab_changed)
-            # initialize once with default tab
-            _apply_mode_ui('grc')
-            _sync_active_preview('grc')
-        except Exception:
-            pass
-
-        # Progress and log in middle column
-        self.progress = QtWidgets.QProgressBar()
-        # ensure progress bar has explicit range and starts at 0
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        # hide percentage text; we'll show elapsed time instead
-        try:
-            self.progress.setTextVisible(False)
-        except Exception:
-            pass
-        mid_col.addWidget(self.progress)
-
-        # elapsed time label shown during processing (dynamic)
-        self.elapsed_label = QtWidgets.QLabel('解码用时: 0.00s')
-        self.elapsed_label.setAlignment(Qt.AlignLeft)
-        mid_col.addWidget(self.elapsed_label)
-
-        # timer used to update elapsed time display
-        self._elapsed_timer = QtCore.QTimer(self)
-        self._elapsed_timer.setInterval(200)
-        self._elapsed_timer.timeout.connect(lambda: self._update_elapsed_label())
-        self._progress_start_time = None
-
-        self.log_text = QtWidgets.QTextEdit()
-        self.log_text.setReadOnly(True)
-        mid_col.addWidget(self.log_text, 3)
-        try:
-            class _LogEmitter(QtCore.QObject):
-                sig = QtCore.pyqtSignal(str)
-            self._log_emitter = _LogEmitter()
-            try:
-                self._log_emitter.sig.connect(self.log_text.append)
-            except Exception:
-                pass
-        except Exception:
-            try:
-                self._log_emitter = None
-            except Exception:
-                pass
-
-        # right-most column: large independent output preview and file info
-        right_preview_col = QtWidgets.QVBoxLayout()
-        # right column slightly wider
-        decode_layout.addLayout(right_preview_col, 7)
-
-        self.output_container = QtWidgets.QFrame()
-        output_stack = QtWidgets.QGridLayout(self.output_container)
-        output_stack.setContentsMargins(0, 0, 0, 0)
-        output_stack.setSpacing(0)
-
-        self.output_view = DropLabel(alignment=Qt.AlignCenter)
-        self.output_view.setObjectName('previewLabel')
-        self.output_view.setMinimumSize(self._output_min_base.width(), self._output_min_base.height())
-        self.output_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        output_stack.addWidget(self.output_view, 0, 0)
-
-        self.output_play_btn = QtWidgets.QToolButton(self.output_container)
-        self.output_play_btn.setObjectName('outputPlayButton')
-        self.output_play_btn.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
-        self.output_play_btn.setVisible(False)
-        self.output_play_btn.setAutoRaise(True)
-        self.output_play_btn.setToolTip('未找到对应解码文件，点击开始解码')
-        try:
-            btn_size = max(100, int(getattr(self, '_play_btn_size_base', 152) * getattr(self, '_ui_scale_factor', 1.0)))
-            self.output_play_btn.setFixedSize(QtCore.QSize(btn_size, btn_size))
-            icon_px = max(72, int(getattr(self, '_play_icon_px_base', 100) * getattr(self, '_ui_scale_factor', 1.0)))
-            icon_obj = self._get_play_icon(icon_px)
-            if icon_obj:
-                self.output_play_btn.setIcon(icon_obj)
-                self.output_play_btn.setIconSize(QtCore.QSize(icon_px, icon_px))
-        except Exception:
-            pass
-        try:
-            self.output_play_btn.setStyleSheet(
-                """
-QToolButton#outputPlayButton {
-    background: rgba(12, 24, 38, 0.82);
-    border: 2px solid rgba(255, 255, 255, 0.12);
-    border-radius: 999px;
-    padding: 16px;
-}
-QToolButton#outputPlayButton:hover { background: rgba(35, 92, 158, 0.88); }
-QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
-                """
-            )
-        except Exception:
-            pass
-
-        output_stack.addWidget(self.output_play_btn, 0, 0, Qt.AlignCenter)
-
-        right_preview_col.addWidget(self.output_container, 10)
-
-        # file info label under output preview
-        self.file_info_label = QtWidgets.QLabel('', alignment=Qt.AlignLeft)
-        self.file_info_label.setObjectName('fileInfoLabel')
-        self.file_info_label.setWordWrap(True)
-        right_preview_col.addWidget(self.file_info_label, 1)
-
-        self._info_labels = {
-            'orig': self.orig_info_label,
-            'output': self.file_info_label,
-        }
-
-        # add decode page to stack
-        self.file_list.setMinimumHeight(180)
-        self.log_text.setMinimumHeight(100)
-        make_responsive(decode_page, rows=((decode_layout, 1100),))
+        from aetherloom_core.ui.decode import DecodePage
+        decode_page = DecodePage(self)
+        self._decode_page = decode_page
         self.pages.addWidget(decode_page)
 
         # --- Page: 本地文件 (local files) ---
@@ -2672,6 +1921,21 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                 cancel_all_btn.setMaximumWidth(260)
                 def _on_cancel_all():
                     self._refresh_rh_task_credentials()
+                    workflow_queue = getattr(self, '_canvas_workflow_queue', None)
+                    if workflow_queue is not None:
+                        workflow_queue.cancel_all()
+                    else:
+                        canvas = getattr(self, 'canvas_page', None)
+                        if canvas is not None:
+                            canvas.engine.stop_all()
+                    shared_tasks = set()
+                    shared = getattr(self, '_rh_execution_service', None)
+                    if shared is not None:
+                        for record in shared.record_headers():
+                            if record.get('status') not in ('SUCCESS', 'FAILED', 'CANCELED', 'UNKNOWN'):
+                                if record.get('task_id'):
+                                    shared_tasks.add(record['task_id'])
+                                shared.cancel(record['run_id'])
                     lifecycle = getattr(self, '_rh_task_lifecycle', None)
                     if lifecycle is None:
                         return
@@ -2690,18 +1954,22 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                         task_ids = set(self._rh_live_task_ids)
                         for ids in self._rh_running_tasks.values():
                             task_ids.update(ids)
-                    try:
-                        task_ids.update(lifecycle.store.read())
-                    except Exception:
-                        pass
-                
-                    def _worker_all():
-                        for task_id in task_ids:
-                            if lifecycle.stop_event.is_set():
-                                break
-                            lifecycle.cancel_task(task_id)
-                
-                    threading.Thread(target=_worker_all, name='rh-cancel-all', daemon=True).start()
+                    persisted = lifecycle.store.read()
+                    task_ids.update(persisted)
+                    # Record every cancellation now. The lifecycle's bounded
+                    # status pool retries and confirms cloud cancellation; a
+                    # slow first RPC must not delay intent for all later tasks.
+                    for task_id in task_ids - shared_tasks:
+                        context = lifecycle.context(task_id, persisted=persisted.get(task_id))
+                        if not context.get('webapp_id'):
+                            context['webapp_id'] = getattr(self, '_rh_task_to_wid', {}).get(task_id)
+                        if not context.get('webapp_id'):
+                            continue
+                        if shared is not None:
+                            context = shared.adopt_task(task_id, context)
+                            shared.cancel(context['run_id'])
+                        else:
+                            lifecycle.cancel_task(task_id, context['webapp_id'])
                 cancel_all_btn.clicked.connect(_on_cancel_all)
             except Exception:
                 pass
@@ -2727,7 +1995,11 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
             try:
                 def _one_click_add_recommended():
                     # runs in main thread: start a QThread to perform network work
-                    connection = self._rh_connection_snapshot()
+                    try:
+                        connection = self._rh_connection_snapshot()
+                    except (OSError, ValueError, TypeError):
+                        self._show_toast('连接设置保存失败，请检查 apikeys.json 是否可写。', 5000)
+                        return
                     try:
                         import get_apps as _get_apps
                     except Exception:
@@ -2775,6 +2047,7 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                 os.makedirs(dest_dir, exist_ok=True)
                                 path = os.path.join(dest_dir, f'{wid}.json')
                                 data_to_save = {'webappId': wid, 'title': page_title, 'description': description,
+                                                'url': app.get('url') or f'{base_url}/webapp/{wid}', 'base_url': base_url,
                                                 'thumbnail_uri': thumbnail_uri, 'nodeInfoList': nodes}
                                 with open(path, 'wb') as file:
                                     file.write(json.dumps(data_to_save, ensure_ascii=False).encode('utf-8'))
@@ -2856,6 +2129,10 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                 pass
             apikey_row.addWidget(apikey_label)
             apikey_row.addWidget(self.rh_apikey_input, 1)
+            manage_keys_btn = QtWidgets.QPushButton('管理 API keys')
+            from aetherloom_core.rh_connections import show_connection_dialog
+            manage_keys_btn.clicked.connect(lambda: show_connection_dialog(self))
+            apikey_row.addWidget(manage_keys_btn)
             try:
                 get_key_btn = QtWidgets.QPushButton('获取密钥')
                 try:
@@ -3220,6 +2497,8 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                     except Exception:
                                         pass
                             self._rh_status_emitter.sig.connect(_on_status_update)
+                        from aetherloom_core.rh_execution_ui import ensure_execution_service
+                        ensure_execution_service(self)
                         if not hasattr(self, '_rh_app_status_timer'):
                             def _update_app_button_styles():
                                 self._rh_dashboard.refresh()
@@ -3288,7 +2567,8 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                 import threading as _thr
                                 self._rh_resume_thread = _thr.Thread(
                                     target=_resume_tasks_loop, name='rh-task-recovery', daemon=True)
-                                self._rh_resume_thread.start()
+                                # The canvas restores durable results before task queries start.
+                                self._rh_start_recovery_worker = self._rh_resume_thread.start
                             except Exception:
                                 pass
                     except Exception:
@@ -5877,94 +5157,21 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                         preview_hint.setObjectName('rhMuted')
                                         preview_hint.setWordWrap(True)
                                         preview_layout.addWidget(preview_hint)
-                                        # scrollable container to hold generated preview cards on the right
-                                        preview_cards_scroll = QtWidgets.QScrollArea()
-                                        preview_cards_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-                                        preview_cards_scroll.setWidgetResizable(True)
-                                        try:
-                                            preview_cards_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-                                        except Exception:
-                                            pass
-                                        preview_cards_widget = QtWidgets.QWidget()
-                                        try:
-                                            preview_cards_widget.setMinimumWidth(0)
-                                            preview_cards_widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
-                                        except Exception:
-                                            pass
-                                        preview_cards_grid = QtWidgets.QGridLayout(preview_cards_widget)
-                                        preview_cards_grid.setContentsMargins(0, 0, 0, 0)
-                                        preview_cards_grid.setHorizontalSpacing(12)
-                                        preview_cards_grid.setVerticalSpacing(12)
-                                        try:
-                                            preview_cards_grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-                                        except Exception:
-                                            pass
-                                        preview_cards_scroll.setWidget(preview_cards_widget)
-                                        preview_empty = QtWidgets.QWidget()
-                                        preview_empty.setObjectName('rhEmptyState')
-                                        preview_empty_layout = QtWidgets.QVBoxLayout(preview_empty)
-                                        preview_empty_layout.setContentsMargins(24, 40, 24, 40)
-                                        preview_empty_layout.setSpacing(10)
-                                        preview_empty_layout.addStretch(1)
-                                        preview_empty_title = QtWidgets.QLabel('等待你的第一个结果')
-                                        preview_empty_title.setObjectName('rhEmptyTitle')
-                                        preview_empty_title.setAlignment(Qt.AlignCenter)
-                                        preview_empty_title.setWordWrap(True)
-                                        preview_empty_layout.addWidget(preview_empty_title)
-                                        preview_empty_hint = QtWidgets.QLabel('在左侧填写参数，再点击「运行应用」。\n生成进度和结果会显示在这里。')
-                                        preview_empty_hint.setObjectName('rhEmptyHint')
-                                        preview_empty_hint.setAlignment(Qt.AlignCenter)
-                                        preview_empty_hint.setWordWrap(True)
-                                        preview_empty_layout.addWidget(preview_empty_hint)
-                                        preview_empty_layout.addStretch(1)
-                                        preview_stack = QtWidgets.QStackedWidget()
-                                        preview_stack.addWidget(preview_empty)
-                                        preview_stack.addWidget(preview_cards_scroll)
-                                        preview_stack.setCurrentWidget(preview_empty)
-                                        app_page._rh_empty_state = preview_empty
-                                        app_page._rh_result_stack = preview_stack
+                                        from aetherloom_core.rh_output_groups import RhOutputGroups
+                                        preview_stack = RhOutputGroups(app_page)
+                                        app_page._rh_output_groups = preview_stack
                                         app_page._rh_result_count_label = preview_count_label
                                         _preview_cards = []
                                         app_page._rh_preview_cards = _preview_cards
                                         _card_fixed_w = 280
 
                                         def _reflow_preview_cards():
-                                            preview_stack.setCurrentWidget(preview_cards_scroll if _preview_cards else preview_empty)
-                                            preview_count_label.setText(f'{len(_preview_cards)} 项')
-                                            try:
-                                                # clear layout positions
-                                                while preview_cards_grid.count():
-                                                    preview_cards_grid.takeAt(0)
-                                            except Exception:
-                                                pass
-                                            try:
-                                                area_w = max(1, preview_cards_widget.width())
-                                                spacing = max(1, preview_cards_grid.horizontalSpacing())
-                                                cols = max(1, area_w // (_card_fixed_w + spacing))
-                                            except Exception:
-                                                cols = 1
-                                            try:
-                                                for idx, c in enumerate(_preview_cards):
-                                                    r = idx // cols
-                                                    cidx = idx % cols
-                                                    preview_cards_grid.addWidget(c, r, cidx)
-                                            except Exception:
-                                                pass
+                                            # The shared bridge owns both current pages and their ordering.
+                                            # Card callbacks must not move a card back into a global grid.
+                                            callback = getattr(app_page, '_rh_shared_reflow', None)
+                                            if callback is not None:
+                                                callback()
 
-                                        class _ReflowWatcher(QtCore.QObject):
-                                            def eventFilter(self, watched, event):
-                                                try:
-                                                    if event.type() == QtCore.QEvent.Resize:
-                                                        _reflow_preview_cards()
-                                                except Exception:
-                                                    pass
-                                                return False
-
-                                        try:
-                                            _reflow_watcher = _ReflowWatcher(preview_cards_widget)
-                                            preview_cards_widget.installEventFilter(_reflow_watcher)
-                                        except Exception:
-                                            pass
                                         # Decode settings expand above the results without reducing preview width.
                                         preview_container = QtWidgets.QWidget()
                                         try:
@@ -5981,8 +5188,13 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                             sidebar_layout = QtWidgets.QVBoxLayout(sidebar_frame)
                                             sidebar_layout.setContentsMargins(8, 8, 8, 8)
                                             sidebar_layout.setSpacing(6)
+                                            decode_scope_hint = QtWidgets.QLabel('以下设置用于之后发起的任务。已提交和等候任务保留发起时的解码配置。')
+                                            decode_scope_hint.setObjectName('rhMuted')
+                                            decode_scope_hint.setWordWrap(True)
+                                            sidebar_layout.addWidget(decode_scope_hint)
                                             # enable checkbox (created here but placed beside the toggle button)
                                             local_cb = QtWidgets.QCheckBox('启用本地解码')
+                                            local_cb.setToolTip('用于之后发起的任务，不修改现有任务的解码配置')
                                             local_cb.setChecked(False)
                                             # decode mode selector (GRC/SST)
                                             mode_row = QtWidgets.QHBoxLayout()
@@ -6219,7 +5431,7 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                             toggle_btn.setObjectName('rhSecondaryButton')
                                             toggle_btn.setMinimumHeight(32)
                                             toggle_btn.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
-                                            toggle_btn.setToolTip('展开本应用的本地解码选项')
+                                            toggle_btn.setToolTip('展开之后发起任务使用的本地解码选项')
                                             app_page._rh_decode_toggle = toggle_btn
                                             app_page._rh_decode_panel = sidebar_frame
                                             toggle_btn.setCheckable(True)
@@ -7084,7 +6296,12 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
 
                                                             menu = QtWidgets.QMenu(_card)
                                                             menu.setToolTipsVisible(True)
-                                                            # If this card represents a currently running remote task, only allow cancel
+                                                            task_details = getattr(_card, '_rh_show_task_details', None)
+                                                            if task_details is not None:
+                                                                act_task_details = menu.addAction('查看本次任务参数')
+                                                                act_task_details.triggered.connect(lambda _checked=False: task_details())
+                                                                menu.addSeparator()
+                                                            # Running tasks retain parameter inspection and cancellation.
                                                             try:
                                                                 is_running = False
                                                                 try:
@@ -7117,7 +6334,9 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                             from aetherloom_core.rh_result_actions import associated_paths, card_is_active, delete_card_files, plan_card_deletion
                                                             is_running = is_running or card_is_active(self, _card)
                                                             if is_running:
-                                                                act_cancel = menu.addAction('取消任务')
+                                                                cancel_pending = bool(getattr(_card, '_rh_cancel_pending', False))
+                                                                act_cancel = menu.addAction('正在取消…' if cancel_pending else '取消任务')
+                                                                act_cancel.setEnabled(not cancel_pending)
                                                             else:
                                                                 # build actions (delete always available)
                                                                 act_open = menu.addAction('在默认应用中打开')
@@ -7419,6 +6638,12 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                                         try:
                                                                             import threading as _th
                                                                             self._refresh_rh_task_credentials()
+                                                                            shared_run = getattr(_card, '_rh_run_id', None)
+                                                                            if shared_run:
+                                                                                self._rh_execution_service.cancel(shared_run)
+                                                                                current = self._rh_execution_service.get(shared_run) or {}
+                                                                                _card._rh_cancel_pending = current.get('status') == 'CANCELING'
+                                                                                return
 
                                                                             # remove any queued retry items for this card or tid so they won't retry
                                                                             try:
@@ -7451,10 +6676,8 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                                                 if not tid:
                                                                                     _card._rh_cancelled = True
                                                                                     return
-                                                                                confirmed = self._rh_task_lifecycle.cancel_task(
+                                                                                self._rh_task_lifecycle.cancel_task(
                                                                                     tid, str(getattr(_card, '_webapp_id', '')))
-                                                                                if confirmed:
-                                                                                    _card._rh_cancelled = True
                                                                             _th.Thread(target=_cancel_worker, daemon=True).start()
                                                                         except Exception:
                                                                             pass
@@ -7704,7 +6927,7 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                 run_count_spin.setFixedWidth(76)
                                                 run_count_spin.setFixedHeight(36)
                                                 run_count_spin.setSuffix(' 次')
-                                                run_count_spin.setToolTip('按当前参数并行提交的任务数量')
+                                                run_count_spin.setToolTip('按当前参数依次排队；前一任务开始运行后提交下一项')
                                                 run_count_label.setBuddy(run_count_spin)
                                                 app_page._rh_run_count = run_count_spin
                                                 out_btn_row.addWidget(run_count_spin)
@@ -7726,15 +6949,18 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                         node_list[index]['fieldValue'] = captured.get('fieldValue', '')
                                                     if captured_nodes:
                                                         _persist_and_write(captured_nodes[-1].get('fieldValue', ''), len(captured_nodes) - 1)
-                                                    host = self.rh_host_combo.currentText() or 'www.runninghub.cn'
-                                                    api_key = (self.rh_apikey_input.text() or '').strip()
+                                                    connection = self._rh_connection_snapshot()
+                                                    host = connection['base_url']
+                                                    api_key = connection['api_key']
                                                     if not api_key:
                                                         raise ValueError('请先配置当前 RunningHub 站点的 API Key')
                                                     run_snapshot = {
+                                                        'webapp_id': str(wid),
                                                         'nodes': captured_nodes,
                                                         'parsed': copy.deepcopy(parsed),
                                                         'host': host if host.startswith('http') else f'https://{host}',
                                                         'api_key': api_key,
+                                                        'api_keys': connection['api_keys'],
                                                         'output_dir': self.output_dir,
                                                         'input_dir': self.input_dir,
                                                         'retry_max': self.rh_retry_max,
@@ -7751,609 +6977,31 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                                 except Exception as exc:
                                                     self._show_toast(f'无法运行: {exc}', 4000)
                                                     return
-                                                # mark this app page as enabled only when the user actually clicks Run
+                                                from aetherloom_core.rh_execution_ui import ensure_execution_service, app_snapshot
                                                 try:
+                                                    import uuid
+                                                    service = ensure_execution_service(self)
+                                                    count = int(run_count_spin.value()) if run_count_spin is not None else 1
+                                                    count = max(1, count)
+                                                    run_snapshot['origin'] = {
+                                                        'kind': 'app_page',
+                                                        'app_submission_group_id': uuid.uuid4().hex,
+                                                        'app_submission_count': count,
+                                                    }
+                                                    snapshot = app_snapshot(self, run_snapshot)
                                                     app_page._rh_run_enabled = True
-                                                except Exception:
-                                                    pass
-                                                # create placeholders for each requested run, synchronously on main thread
-                                                my_ph = {'cards': [], 'card': None, 'out_idx': 0, 'count': 1}
-                                                try:
-                                                    cnt = 1
-                                                    try:
-                                                        if run_count_spin is not None:
-                                                            cnt = int(run_count_spin.value() or 1)
-                                                    except Exception:
-                                                        cnt = 1
-                                                    my_ph['count'] = max(1, cnt)
-                                                    def _create_placeholder_one():
-                                                        try:
-                                                            return _add_preview_card(None, '运行中...')
-                                                        except Exception:
-                                                            return None
-                                                    for _ in range(my_ph['count']):
-                                                        try:
-                                                            c = _create_placeholder_one()
-                                                            my_ph['cards'].append(c)
-                                                        except Exception:
-                                                            my_ph['cards'].append(None)
-                                                except Exception:
-                                                    try:
-                                                        my_ph['cards'].append(_add_preview_card(None, '运行中...'))
-                                                    except Exception:
-                                                        my_ph['cards'] = [None]
+                                                    for index in range(count):
+                                                        task_snapshot = copy.deepcopy(snapshot)
+                                                        task_snapshot['origin']['app_submission_index'] = index
+                                                        service.submit(task_snapshot)
+                                                except Exception as exc:
+                                                    self._show_toast(f'任务启动失败：{exc}', 4000)
 
-                                                # spawn a per-run worker thread for each requested run (parallel)
-                                                from aetherloom_core.rh_submission_queue import get_submission_queue
-                                                submission_queue = get_submission_queue(self)
-                                                submission_orders = submission_queue.reserve_orders(len(my_ph['cards']))
-                                                import weakref
-                                                if not hasattr(self, '_rh_local_cards'):
-                                                    self._rh_local_cards = weakref.WeakSet()
-                                                for local_card in my_ph['cards']:
-                                                    if local_card is not None:
-                                                        local_card._webapp_id = str(parsed.get('webappId') or '')
-                                                        self._rh_local_cards.add(local_card)
-                                                try:
-                                                    import copy as _copy
-                                                except Exception:
-                                                    _copy = None
-                                                try:
-                                                    import threading as _th
-                                                except Exception:
-                                                    _th = None
-
-                                                def _run_single(run_idx, card):
-                                                    """Execute one immutable UI snapshot and retain unfinished tasks for recovery."""
-                                                    import copy
-                                                    import os
-                                                    import shutil
-                                                    import time
-                                                    from contextlib import nullcontext
-
-                                                    task_id = None
-                                                    webapp_id = None
-                                                    final_status = None
-                                                    files = None
-                                                    runtime_lock = getattr(self, '_rh_task_runtime_lock', None)
-                                                    if card is not None:
-                                                        card._rh_run_inflight = True
-
-                                                    def emit_msg(path, title=None):
-                                                        try:
-                                                            _emitter.sig.emit(card, path, title)
-                                                        except Exception:
-                                                            pass
-
-                                                    def task_status(status):
-                                                        if task_id and webapp_id:
-                                                            if status == 'DOWNLOAD_FAILED':
-                                                                lifecycle = getattr(self, '_rh_task_lifecycle', None)
-                                                                if lifecycle is not None:
-                                                                    with lifecycle.lock:
-                                                                        lifecycle._download_retry_attempts.setdefault(task_id, 0)
-                                                            self._rh_status_emitter.sig.emit(str(webapp_id), f'TASK_STATUS:{task_id}:{status}')
-
-                                                    def cancelled():
-                                                        lifecycle = getattr(self, '_rh_task_lifecycle', None)
-                                                        stop_event = getattr(lifecycle, 'stop_event', None)
-                                                        task_cancelled = getattr(lifecycle, '_cancelled', None)
-                                                        return bool(getattr(self, '_closing', False) or getattr(card, '_rh_cancelled', False)
-                                                            or (stop_event is not None and stop_event.is_set())
-                                                            or (task_id and callable(task_cancelled) and task_cancelled(task_id)))
-
-                                                    def _decode_sstool(src_path, out_path, password=''):
-                                                        try:
-                                                            import numpy as _np
-                                                            from PIL import Image as _Img
-                                                            import moviepy.editor as _mpe
-                                                            import struct as _struct
-                                                        except Exception:
-                                                            return False
-
-                                                        WATERMARK_SKIP_W_RATIO = 0.40
-                                                        WATERMARK_SKIP_H_RATIO = 0.08
-                                                        TRY_K = (2, 6, 8)
-                                                        IMAGE_EXTS_LOCAL = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp')
-                                                        VIDEO_EXTS_LOCAL = ('.mp4', '.mov', '.avi', '.webm', '.mkv', '.gif')
-
-                                                        def _load_image_array(path):
-                                                            _, ext = os.path.splitext(path)
-                                                            ext = ext.lower()
-                                                            if ext in IMAGE_EXTS_LOCAL:
-                                                                img = _Img.open(path).convert('RGB')
-                                                                try:
-                                                                    arr = _np.array(img).astype(_np.uint8)
-                                                                finally:
-                                                                    try:
-                                                                        img.close()
-                                                                    except Exception:
-                                                                        pass
-                                                                return arr
-                                                            if ext in VIDEO_EXTS_LOCAL:
-                                                                clip = _mpe.VideoFileClip(path)
-                                                                try:
-                                                                    frame = clip.get_frame(0)
-                                                                finally:
-                                                                    try:
-                                                                        clip.close()
-                                                                    except Exception:
-                                                                        pass
-                                                                return frame.astype(_np.uint8)
-                                                            raise ValueError('unsupported input type')
-
-                                                        def _extract_payload_with_k(arr, k):
-                                                            h, w, c = arr.shape
-                                                            skip_w = int(w * WATERMARK_SKIP_W_RATIO)
-                                                            skip_h = int(h * WATERMARK_SKIP_H_RATIO)
-                                                            mask2d = _np.ones((h, w), dtype=bool)
-                                                            if skip_w > 0 and skip_h > 0:
-                                                                mask2d[:skip_h, :skip_w] = False
-                                                            mask3d = _np.repeat(mask2d[:, :, None], c, axis=2)
-                                                            flat = arr.reshape(-1)
-                                                            idxs = _np.flatnonzero(mask3d.reshape(-1))
-                                                            vals = (flat[idxs] & ((1 << k) - 1)).astype(_np.uint8)
-                                                            ub = _np.unpackbits(vals, bitorder='big').reshape(-1, 8)[:, -k:]
-                                                            bits = ub.reshape(-1)
-                                                            if len(bits) < 32:
-                                                                raise ValueError('Insufficient image data')
-                                                            len_bits = bits[:32]
-                                                            length_bytes = _np.packbits(len_bits, bitorder='big').tobytes()
-                                                            header_len = _struct.unpack('>I', length_bytes)[0]
-                                                            total_bits = 32 + header_len * 8
-                                                            if header_len <= 0 or total_bits > len(bits):
-                                                                raise ValueError('Payload length invalid')
-                                                            payload_bits = bits[32:32 + header_len * 8]
-                                                            return _np.packbits(payload_bits, bitorder='big').tobytes()
-
-                                                        def _generate_key_stream(password_local, salt, length):
-                                                            import hashlib as _hashlib
-                                                            key_material = (password_local + salt.hex()).encode('utf-8')
-                                                            out = bytearray()
-                                                            counter = 0
-                                                            while len(out) < length:
-                                                                out.extend(_hashlib.sha256(key_material + str(counter).encode('utf-8')).digest())
-                                                                counter += 1
-                                                            return bytes(out[:length])
-
-                                                        def _parse_header(header, password_local):
-                                                            idx = 0
-                                                            if len(header) < 1:
-                                                                raise ValueError('Header corrupted')
-                                                            has_pwd = header[0] == 1
-                                                            idx += 1
-                                                            pwd_hash = b''
-                                                            salt = b''
-                                                            if has_pwd:
-                                                                if len(header) < idx + 32 + 16:
-                                                                    raise ValueError('Header corrupted')
-                                                                pwd_hash = header[idx:idx + 32]
-                                                                idx += 32
-                                                                salt = header[idx:idx + 16]
-                                                                idx += 16
-                                                            if len(header) < idx + 1:
-                                                                raise ValueError('Header corrupted')
-                                                            ext_len = header[idx]
-                                                            idx += 1
-                                                            if len(header) < idx + ext_len + 4:
-                                                                raise ValueError('Header corrupted')
-                                                            ext = header[idx:idx + ext_len].decode('utf-8', errors='ignore')
-                                                            idx += ext_len
-                                                            data_len = _struct.unpack('>I', header[idx:idx + 4])[0]
-                                                            idx += 4
-                                                            data = header[idx:]
-                                                            if len(data) != data_len:
-                                                                raise ValueError('Data length mismatch')
-                                                            if not has_pwd:
-                                                                return data, ext
-                                                            if not password_local:
-                                                                raise ValueError('Password required')
-                                                            import hashlib as _hashlib
-                                                            check_hash = _hashlib.sha256((password_local + salt.hex()).encode('utf-8')).digest()
-                                                            if check_hash != pwd_hash:
-                                                                raise ValueError('Wrong password')
-                                                            ks = _generate_key_stream(password_local, salt, len(data))
-                                                            plain = bytes(a ^ b for a, b in zip(data, ks))
-                                                            return plain, ext
-
-                                                        def _decode_array(arr, password_local):
-                                                            for k in TRY_K:
-                                                                try:
-                                                                    header = _extract_payload_with_k(arr, k)
-                                                                    raw, ext = _parse_header(header, password_local)
-                                                                    return raw, ext
-                                                                except Exception:
-                                                                    continue
-                                                            raise RuntimeError('解析失败: 无法从图像提取载荷')
-
-                                                        def _save_payload(raw, ext, out_base):
-                                                            final_ext = ext
-                                                            if ext.endswith('.binpng'):
-                                                                tmp_png = out_base + '.binpng'
-                                                                with open(tmp_png, 'wb') as f:
-                                                                    f.write(raw)
-                                                                try:
-                                                                    img = _Img.open(tmp_png).convert('RGB')
-                                                                    arr = _np.array(img).astype(_np.uint8)
-                                                                finally:
-                                                                    try:
-                                                                        img.close()
-                                                                    except Exception:
-                                                                        pass
-                                                                    try:
-                                                                        os.unlink(tmp_png)
-                                                                    except Exception:
-                                                                        pass
-                                                                mp4_bytes = arr.reshape(-1, 3).reshape(-1).tobytes().rstrip(b'\x00')
-                                                                final_path = out_base + '.mp4'
-                                                                with open(final_path, 'wb') as f:
-                                                                    f.write(mp4_bytes)
-                                                                final_ext = 'mp4'
-                                                            else:
-                                                                if ext.startswith('.'):  # keep leading dot
-                                                                    final_path = out_base + ext
-                                                                else:
-                                                                    final_path = out_base + '.' + ext
-                                                                with open(final_path, 'wb') as f:
-                                                                    f.write(raw)
-                                                            return final_path, final_ext
-
-                                                        try:
-                                                            arr = _load_image_array(src_path)
-                                                            raw, ext = _decode_array(arr, password or '')
-                                                            out_base, _ = os.path.splitext(out_path)
-                                                            final_path, _ = _save_payload(raw, ext, out_base)
-                                                            return final_path if final_path and os.path.exists(final_path) else ''
-                                                        except Exception:
-                                                            return ''
-
-                                                    try:
-                                                        from api_calls import call_rh
-                                                        from aetherloom_core.rh_outputs import download_outputs, cleanup_output_receipts, OutputDownloadError, OutputDownloadCancelled, GRC_DECODE_LOCK
-                                                        from aetherloom_core.rh_storage import (app_output_directories, is_decoded_output,
-                                                                                decoded_output_path, remember_decoded_output, valid_decoded_output)
-                                                        import tempfile
-                                                        import uuid
-                                                        from pathlib import Path
-
-                                                        snapshot = copy.deepcopy(run_snapshot)
-                                                        node_list_local = snapshot.get('nodes') or []
-                                                        parsed_local = snapshot.get('parsed') or {}
-                                                        if not isinstance(node_list_local, list) or not isinstance(parsed_local, dict):
-                                                            raise ValueError('应用参数格式无效')
-                                                        webapp_id = parsed_local.get('webappId')
-                                                        if not webapp_id:
-                                                            raise ValueError('未在应用文件中找到 webappId')
-                                                        if card is not None:
-                                                            card._webapp_id = webapp_id
-                                                        host_now = str(snapshot.get('host') or 'www.runninghub.cn').strip()
-                                                        base_url = host_now if host_now.startswith(('https://', 'http://')) else f'https://{host_now}'
-                                                        api_key = str(snapshot.get('api_key') or '').strip()
-                                                        app_name = (parsed_local.get('title') or parsed_local.get('webappName')
-                                                                    or parsed_local.get('name') or str(webapp_id))
-                                                        output_dir, decoded_dir = app_output_directories(snapshot['output_dir'], app_name, webapp_id)
-                                                        input_dir = snapshot.get('input_dir')
-                                                        decode_settings = snapshot.get('decode_settings') or {}
-                                                        decode_token = uuid.uuid4().hex if decode_settings.get('enabled', False) else None
-                                                        if card is not None:
-                                                            card._rh_output_roots = (output_dir,)
-                                                            card._rh_output_files = ()
-                                                            card._rh_input_files = tuple(os.path.abspath(node['fieldValue'])
-                                                                for node in node_list_local if isinstance(node, dict)
-                                                                and isinstance(node.get('fieldValue'), str) and os.path.isfile(node['fieldValue']))
-
-                                                        def track_outputs(paths):
-                                                            if card is not None:
-                                                                card._rh_output_files = tuple(dict.fromkeys(
-                                                                    (*getattr(card, '_rh_output_files', ()),
-                                                                     *(os.path.abspath(path) for path in paths))))
-                                                        def present_outputs(saved_paths):
-                                                            track_outputs(saved_paths)
-                                                            for saved_path in saved_paths:
-                                                                if cancelled():
-                                                                    raise OutputDownloadCancelled('下载后处理已停止，任务保留供恢复。')
-                                                                presented_path = saved_path
-                                                                if decode_token and not is_decoded_output(saved_path, output_dir,
-                                                                        task_id=task_id, token=decode_token, cancelled=cancelled):
-                                                                    restored = valid_decoded_output(saved_path, task_id, decode_token, cancelled=cancelled)
-                                                                    try:
-                                                                        if not restored:
-                                                                            Path(decoded_dir).mkdir(parents=True, exist_ok=True)
-                                                                            # Failed decoders never leave a partial final result.
-                                                                            with tempfile.TemporaryDirectory(prefix='.decode-', dir=decoded_dir) as staging:
-                                                                                name, extension = os.path.splitext(os.path.basename(saved_path))
-                                                                                target = os.path.join(staging, 'result' + extension)
-                                                                                if decode_settings.get('mode', 'grc') == 'sst':
-                                                                                    target = _decode_sstool(saved_path, target, str(decode_settings.get('password') or ''))
-                                                                                    decode_ok = bool(target)
-                                                                                else:
-                                                                                    with GRC_DECODE_LOCK:
-                                                                                        if cancelled():
-                                                                                            raise OutputDownloadCancelled('下载后处理已停止，任务保留供恢复。')
-                                                                                        old_cols, old_rows = grc.grid_cols, grc.grid_rows
-                                                                                        try:
-                                                                                            grc.grid_cols = int(decode_settings.get('grid_cols', 32))
-                                                                                            grc.grid_rows = grc.grid_cols + 2
-                                                                                            if extension.lower() in IMAGE_EXTS:
-                                                                                                decode_ok = bool(grc.reverse_image_grid(saved_path, target))
-                                                                                            else:
-                                                                                                decode_ok = bool(grc.restore_video_cv2(saved_path, target))
-                                                                                        finally:
-                                                                                            grc.grid_cols, grc.grid_rows = old_cols, old_rows
-                                                                                if cancelled():
-                                                                                    raise OutputDownloadCancelled('下载后处理已停止，任务保留供恢复。')
-                                                                                if (not decode_ok or not target or not os.path.isfile(target)
-                                                                                        or os.path.getsize(target) <= 0
-                                                                                        or Path(target).resolve().parent != Path(staging).resolve()):
-                                                                                    raise ValueError('本地解码未生成完整文件')
-                                                                                restored = decoded_output_path(output_dir, saved_path, Path(target).suffix)
-                                                                                os.replace(target, restored)
-                                                                                track_outputs((restored,))
-                                                                                # Record both hashes before optionally deleting the source.
-                                                                                remember_decoded_output(saved_path, restored, task_id, decode_token, cancelled=cancelled)
-                                                                        if cancelled():
-                                                                            raise OutputDownloadCancelled('下载后处理已停止，任务保留供恢复。')
-                                                                        presented_path = restored
-                                                                        track_outputs((restored,))
-                                                                        if decode_settings.get('delete_original', True):
-                                                                            try:
-                                                                                os.remove(saved_path)
-                                                                            except OSError:
-                                                                                pass
-                                                                    except OutputDownloadCancelled:
-                                                                        raise
-                                                                    except Exception:
-                                                                        # Retain the verified original if decoding or its receipt fails.
-                                                                        presented_path = saved_path
-                                                                        emit_msg(None, '本地解码失败，已保留原始输出')
-                                                                if cancelled():
-                                                                    raise OutputDownloadCancelled('下载后处理已停止，任务保留供恢复。')
-                                                                emit_msg(presented_path, os.path.basename(presented_path))
-                                                        def positive_setting(name, default):
-                                                            try:
-                                                                value = int(snapshot.get(name, getattr(self, 'rh_' + name, default)))
-                                                                return value if value > 0 else default
-                                                            except (TypeError, ValueError, OverflowError):
-                                                                return default
-
-                                                        max_retries = positive_setting('retry_max', 100)
-                                                        retry_delay = positive_setting('retry_delay', 5)
-                                                        concurrency = positive_setting('retry_concurrency', 25)
-                                                        if cancelled():
-                                                            emit_msg(None, '已取消')
-                                                            return
-
-                                                        # A failed upload cannot be sent to the remote service as a local path.
-                                                        # Reuse an upload within this run when multiple nodes reference one file.
-                                                        uploads = {}
-                                                        for node in node_list_local:
-                                                            if not isinstance(node, dict):
-                                                                raise ValueError('应用参数包含无效节点')
-                                                            value = node.get('fieldValue')
-                                                            upload_node = ((node.get('fieldType') or '').upper() in ('IMAGE', 'VIDEO', 'AUDIO', 'UPLOAD')
-                                                                           or bool(node.get('_rh_upload', False)))
-                                                            if not upload_node or not isinstance(value, str):
-                                                                continue
-                                                            if cancelled():
-                                                                emit_msg(None, '已取消')
-                                                                return
-                                                            if not os.path.isfile(value):
-                                                                if os.path.splitdrive(value)[0]:
-                                                                    raise ValueError(f'上传文件不存在: {os.path.basename(value)}')
-                                                                continue  # Existing remote file token or URL.
-                                                            source = os.path.normcase(os.path.abspath(value))
-                                                            token = uploads.get(source)
-                                                            if not token:
-                                                                emit_msg(None, f'上传: {os.path.basename(value)}')
-                                                                response = call_rh.upload_file(value, api_key=api_key, base_url=base_url, timeout=120)
-                                                                data = response.get('data') if isinstance(response, dict) else None
-                                                                token = ((data.get('fileName') or data.get('filePath')) if isinstance(data, dict) else None)
-                                                                if not token and isinstance(response, dict):
-                                                                    token = response.get('fileName') or response.get('filePath')
-                                                                if not isinstance(token, str) or not token.strip():
-                                                                    raise RuntimeError(f'上传失败，未返回文件标识: {os.path.basename(value)}')
-                                                                uploads[source] = token
-                                                                if input_dir:
-                                                                    try:
-                                                                        os.makedirs(input_dir, exist_ok=True)
-                                                                        destination = os.path.join(input_dir, os.path.basename(value))
-                                                                        if os.path.normcase(os.path.abspath(destination)) != source:
-                                                                            shutil.copy2(value, destination)
-                                                                    except OSError:
-                                                                        pass  # The upload succeeded; a local convenience copy is optional.
-                                                            node['fieldValue'] = token
-
-                                                        from aetherloom_core.rh_submission_queue import get_submission_queue, SubmissionCancelled
-                                                        try:
-                                                            response = get_submission_queue(self).submit(
-                                                                lambda: call_rh.run_task(webapp_id, api_key, node_list_local,
-                                                                                        base_url=base_url, timeout=30),
-                                                                {'webapp_id': str(webapp_id), 'tid': None, 'card': card,
-                                                                 '_submission_order': submission_orders[run_idx]},
-                                                                max_retries=max_retries, delay=retry_delay,
-                                                                concurrency=concurrency, cancelled=cancelled,
-                                                                on_wait=lambda attempt, reason: (
-                                                                    emit_msg(None, {'task_state': 'LOCAL_WAIT'}),
-                                                                    emit_msg(None, f'等待队首重试 {attempt}/{max_retries}')),
-                                                                on_submit=lambda: (emit_msg(None, {'task_state': 'SUBMITTING'}),
-                                                                                   emit_msg(None, '提交任务...')))
-                                                        except SubmissionCancelled:
-                                                            emit_msg(None, '已取消')
-                                                            return
-                                                        if not isinstance(response, dict):
-                                                            raise RuntimeError('任务提交返回无效响应')
-                                                        call_rh.validate_response(response, 'Submit task', api_key=api_key)
-                                                        data = response.get('data')
-                                                        raw_id = data.get('taskId') if isinstance(data, dict) else None
-                                                        raw_id = raw_id if raw_id is not None else response.get('taskId')
-                                                        if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)) or not str(raw_id).strip():
-                                                            raise RuntimeError('任务提交被拒绝: ' + str(response.get('msg') or response.get('message')
-                                                                                                      or response.get('code') or '未返回 taskId'))
-                                                        task_id = str(raw_id).strip()
-
-                                                        # Publish connection context before TASK_ADD can trigger recovery.
-                                                        with runtime_lock if runtime_lock is not None else nullcontext():
-                                                            if not hasattr(self, '_rh_task_contexts'):
-                                                                self._rh_task_contexts = {}
-                                                            if not hasattr(self, '_rh_live_task_ids'):
-                                                                self._rh_live_task_ids = set()
-                                                            self._rh_task_contexts[task_id] = {
-                                                                'webapp_id': str(webapp_id), 'base_url': base_url, 'output_dir': output_dir,
-                                                                'api_key': api_key, 'card': card, 'on_downloaded': present_outputs,
-                                                                'on_files_saved': track_outputs,
-                                                                **({'decode_token': decode_token} if decode_token else {}),
-                                                            }
-                                                            self._rh_live_task_ids.add(task_id)
-                                                        if card is not None:
-                                                            card._task_id = task_id
-                                                            card._webapp_id = webapp_id
-                                                        lifecycle = getattr(self, '_rh_task_lifecycle', None)
-                                                        if lifecycle is not None and getattr(lifecycle, 'store', None) is not None:
-                                                            try:
-                                                                lifecycle.store.put(task_id, dict(self._rh_task_contexts[task_id], status='QUEUED'))
-                                                            except Exception as exc:
-                                                                emit_msg(None, f'任务 {task_id} 的恢复记录保存失败，仍继续跟踪: {exc}')
-                                                        self._rh_status_emitter.sig.emit(str(webapp_id), f'TASK_ADD:{task_id}')
-                                                        if cancelled():
-                                                            lifecycle = getattr(self, '_rh_task_lifecycle', None)
-                                                            # A close during POST must preserve the newly returned task ID.
-                                                            if (getattr(self, '_closing', False) or (lifecycle is not None
-                                                                    and lifecycle.stop_event.is_set())):
-                                                                emit_msg(None, '客户端已暂停，任务保留供下次启动恢复')
-                                                                return
-                                                            # Explicit cancellation while POST was in flight applies to
-                                                            # its newly returned remote task as well.
-                                                            if lifecycle is not None and lifecycle.cancel_task(task_id, str(webapp_id)):
-                                                                emit_msg(None, '任务已取消')
-                                                                return
-                                                            if card is not None:
-                                                                card._rh_cancelled = False
-                                                            task_status('CANCEL_FAILED')
-                                                        emit_msg(None, f'任务已提交: {task_id}，等待结果...')
-                                                        task_status('QUEUED')
-
-                                                        final_status = None
-                                                        timer_start = None
-                                                        for _ in range(600):
-                                                            if cancelled():
-                                                                emit_msg(None, '任务已取消')
-                                                                return
-                                                            try:
-                                                                response = call_rh.get_status(api_key, task_id, base_url=base_url, timeout=15)
-                                                                value = response.get('data') if isinstance(response, dict) else None
-                                                            except Exception:
-                                                                value = None
-                                                            status = value.strip().upper() if isinstance(value, str) else None
-                                                            if status == 'CANCELLED':
-                                                                status = 'CANCELED'
-                                                            if status in ('FAILED', 'CANCELED', 'SUCCESS'):
-                                                                final_status = status
-                                                                break
-                                                            if status in ('QUEUED', 'RUNNING'):
-                                                                task_status(status)
-                                                                lifecycle = getattr(self, '_rh_task_lifecycle', None)
-                                                                if lifecycle is not None:
-                                                                    lifecycle.poll_progress(task_id, str(webapp_id), api_key, base_url, status)
-                                                                if status == 'RUNNING' and timer_start is None:
-                                                                    timer_start = time.time()
-                                                                    emit_msg(None, {'timer_start': timer_start})
-                                                                if timer_start is not None:
-                                                                    emit_msg(None, {'timer': f'{time.time() - timer_start:.2f}s'})
-                                                            time.sleep(2)
-                                                        if final_status is None:
-                                                            task_status('POLL_TIMEOUT')
-                                                            emit_msg(None, '本次状态查询已超时，任务已保留，将继续恢复查询')
-                                                            return
-                                                        if final_status in ('FAILED', 'CANCELED'):
-                                                            task_status(final_status)
-                                                            emit_msg(None, '任务已取消' if final_status == 'CANCELED' else '任务失败')
-                                                            return
-
-                                                        task_status('DOWNLOADING')
-                                                        emit_msg(None, '获取输出...')
-                                                        def download_retry(info):
-                                                            message = (f"下载重试 {info['next_attempt']}/{info['max_attempts']}："
-                                                                       f"{info['reason']}，{info['delay']:.1f} 秒后继续")
-                                                            emit_msg(None, message)
-                                                            self._rh_status_emitter.sig.emit(str(webapp_id), f'TASK_DOWNLOAD_NOTE:{task_id}:{message}')
-                                                        try:
-                                                            outputs = call_rh.get_outputs(api_key, task_id, base_url=base_url, timeout=30)
-                                                            files = outputs.get('data') if isinstance(outputs, dict) else outputs
-                                                            saved_paths = download_outputs(task_id, files, output_dir,
-                                                                cancelled=cancelled, on_retry=download_retry, decoded_token=decode_token)
-                                                        except OutputDownloadCancelled as exc:
-                                                            track_outputs(exc.completed_paths)
-                                                            emit_msg(None, '下载已停止，未完成任务保留供恢复')
-                                                            return
-                                                        except Exception as exc:
-                                                            track_outputs(getattr(exc, 'completed_paths', ()))
-                                                            if cancelled():
-                                                                return
-                                                            detail = str(exc) if isinstance(exc, OutputDownloadError) else type(exc).__name__
-                                                            task_status('DOWNLOAD_FAILED')
-                                                            self._rh_status_emitter.sig.emit(str(webapp_id), f'TASK_DOWNLOAD_NOTE:{task_id}:{detail}')
-                                                            emit_msg(None, f'输出下载失败，任务已保留以便重试: {detail}')
-                                                            return
-
-                                                        present_outputs(saved_paths)
-                                                        if cancelled():
-                                                            return
-                                                        with runtime_lock if runtime_lock is not None else nullcontext():
-                                                            if cancelled():
-                                                                return
-                                                            if not isinstance(getattr(self, '_rh_downloaded_tasks', None), set):
-                                                                self._rh_downloaded_tasks = set()
-                                                            self._rh_downloaded_tasks.add(task_id)
-                                                            task_status('SUCCESS')
-                                                        if not cleanup_output_receipts(task_id, files, output_dir):
-                                                            emit_msg(None, '输出已完成，部分校验记录暂未清理')
-                                                    except OutputDownloadCancelled:
-                                                        emit_msg(None, '下载已停止，未完成任务保留供恢复')
-                                                    except Exception as exc:
-                                                        if task_id:
-                                                            # An unexpected local error does not prove that a remote task failed.
-                                                            try:
-                                                                task_status('DOWNLOAD_FAILED' if final_status == 'SUCCESS' else 'POLL_TIMEOUT')
-                                                            except Exception:
-                                                                pass
-                                                        emit_msg(None, '运行错误: ' + str(exc))
-                                                    finally:
-                                                        submission_queue.release_order(submission_orders[run_idx])
-                                                        if not task_id:
-                                                            emit_msg(None, {'task_state': 'CANCELED' if cancelled() else 'FAILED'})
-                                                        lifecycle = getattr(self, '_rh_task_lifecycle', None)
-                                                        if files and lifecycle is not None and lifecycle.receipts_finished(task_id):
-                                                            cleanup_output_receipts(task_id, files, output_dir)
-                                                        if card is not None:
-                                                            card._rh_run_inflight = False
-                                                        emit_msg(None, {'timer_stop': True})
-                                                        if task_id:
-                                                            with runtime_lock if runtime_lock is not None else nullcontext():
-                                                                getattr(self, '_rh_live_task_ids', set()).discard(task_id)
-                                                                lifecycle = getattr(self, '_rh_task_lifecycle', None)
-                                                                if lifecycle is not None and files:
-                                                                    lifecycle._receipt_maintenance_due = 0
-
-                                                # start a thread per requested run
-                                                try:
-                                                    for idx, ccard in enumerate(my_ph.get('cards', []) or []):
-                                                        try:
-                                                            if _th is not None:
-                                                                _th.Thread(target=_run_single, args=(idx, ccard), daemon=True).start()
-                                                            else:
-                                                                try:
-                                                                    import threading as _tlocal
-                                                                    _tlocal.Thread(target=_run_single, args=(idx, ccard), daemon=True).start()
-                                                                except Exception:
-                                                                    submission_queue.release_order(submission_orders[idx])
-                                                                    _update_preview_card(ccard, None, {'task_state': 'FAILED'})
-                                                        except Exception:
-                                                            submission_queue.release_order(submission_orders[idx])
-                                                            _update_preview_card(ccard, None, {'task_state': 'FAILED'})
-                                                except Exception:
-                                                    pass
-
-                                                # cancel handler removed with button
+                                            from aetherloom_core.rh_execution_ui import ensure_execution_service
+                                            ensure_execution_service(self)
+                                            self._rh_execution_bridge.bind(str(wid), app_page,
+                                                                           _add_preview_card, _update_preview_card,
+                                                                           _remove_result_card, preview_layout)
 
                                             try:
                                                     preview_run_btn.clicked.connect(_on_preview_run)
@@ -8491,6 +7139,8 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
 
                                                                 data_to_save = {
                                                                     'webappId': wid,
+                                                                    'url': f'{base_url}/webapp/{wid}',
+                                                                    'base_url': base_url,
                                                                     'title': page_title or '',
                                                                     'description': description or '',
                                                                     'thumbnail_uri': thumbnail_uri or '',
@@ -9011,6 +7661,8 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
 
                                                         data_to_save = {
                                                             'webappId': wid,
+                                                            'url': f'{base_url}/webapp/{wid}',
+                                                            'base_url': base_url,
                                                             'title': page_title or '',
                                                             'description': description or '',
                                                             'thumbnail_uri': thumbnail_uri or '',
@@ -9153,6 +7805,10 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                     pass
 
             # populate any existing RH_apps on startup
+            self._rh_reload_apps = _load_rh_apps
+            from aetherloom_core.rh_app_install import install_apps
+            self._rh_install_apps = lambda references, on_progress=None, on_finished=None: install_apps(
+                self, references, on_progress, on_finished)
             try:
                 _load_rh_apps()
             except Exception:
@@ -9300,6 +7956,7 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                                             os.makedirs(dest_dir, exist_ok=True)
                                             path = os.path.join(dest_dir, f'{wid}.json')
                                             data_to_save = {'webappId': wid, 'title': page_title, 'description': description,
+                                                            'url': app.get('url') or f'{base_url}/webapp/{wid}', 'base_url': base_url,
                                                             'thumbnail_uri': thumbnail_uri, 'nodeInfoList': nodes}
                                             with open(path, 'wb') as file:
                                                 file.write(json.dumps(data_to_save, ensure_ascii=False).encode('utf-8'))
@@ -9364,206 +8021,26 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                             if not url:
                                 dlg.accept()
                                 return
-                            import re, threading
+                            from aetherloom_core.rh_app_install import application_reference
+                            from aetherloom_core.rh_connections import ensure_connections
                             try:
-                                m = re.search(r"(\d+)(?:/?$)", url)
-                                webapp_id = m.group(1) if m else None
-                            except Exception:
-                                webapp_id = None
-                            if not webapp_id:
-                                QtWidgets.QMessageBox.warning(self, '错误', '无法识别 webapp id，请检查网址')
+                                reference = application_reference({'url': url})
+                                if not ensure_connections(self).keys_for(reference['base_url']):
+                                    raise ValueError('请先在连接设置中配置该应用站点的 API key')
+                            except ValueError as exc:
+                                QtWidgets.QMessageBox.warning(self, '无法添加应用', str(exc))
                                 return
-                            host = self.rh_host_combo.currentText() or 'www.runninghub.cn'
-                            base_url = host if host.startswith('http') else f'https://{host}'
-                            api_key = self.rh_apikey_input.text().strip()
-                            if not api_key:
-                                QtWidgets.QMessageBox.warning(self, '缺少 apikey', '请在界面中输入 apikey 后重试')
-                                return
+                            dlg.accept()
 
-                            # close the dialog immediately and run check in background
-                            try:
-                                dlg.accept()
-                            except Exception:
-                                pass
-                            try:
-                                dlg.close()
-                            except Exception:
-                                pass
+                            def _added(report):
+                                if report['failed']:
+                                    self._show_toast(report['failed'][0]['error'], 5000)
+                                elif report['added']:
+                                    self._show_toast('已添加应用', 2000)
+                                else:
+                                    self._show_toast('该应用已添加', 2000)
 
-                            title = url
-                            if len(title) > 36:
-                                title_short = title[:16] + '…' + title[-16:]
-                            else:
-                                title_short = title
-
-                            result = {'done': False, 'success': False, 'nodes': None, 'bytes': None}
-
-                            def _worker():
-                                try:
-                                    try:
-                                        from api_calls import call_rh
-                                    except Exception:
-                                        call_rh = None
-                                    if call_rh is None:
-                                        raise RuntimeError('call_rh module not available')
-                                    b = call_rh.get_nodeinfo(webapp_id, api_key, base_url=base_url, timeout=25)
-                                    # parse bytes to list
-                                    nodes = None
-                                    try:
-                                        txt = b.decode('utf-8') if isinstance(b, (bytes, bytearray)) else str(b)
-                                        parsed = json.loads(txt)
-                                        nodes = parsed if isinstance(parsed, list) else parsed.get('data', {}).get('nodeInfoList', [])
-                                    except Exception:
-                                        nodes = None
-
-                                    success = isinstance(nodes, list) and len(nodes) > 0
-                                    if success:
-                                        try:
-                                            outdir = os.path.join(current_dir, 'RH_apps')
-                                            dest_dir = os.path.join(outdir, str(webapp_id))
-                                            os.makedirs(dest_dir, exist_ok=True)
-                                            path = os.path.join(dest_dir, f'{webapp_id}.json')
-                                            # attempt to fetch detail (name/description/thumbnail)
-                                            page_title = ''
-                                            description = ''
-                                            thumbnail_uri = ''
-                                            try:
-                                                try:
-                                                    import get_apps as _get_apps
-                                                except Exception:
-                                                    _get_apps = None
-                                                if _get_apps is not None:
-                                                    detail = _get_apps.scrape_runninghub_detail(url, session=None, timeout=10, api_base=base_url)
-                                                    page_title = detail.get('name') or ''
-                                                    description = detail.get('description') or ''
-                                                    covers = detail.get('covers') or []
-                                                    if isinstance(covers, list) and covers:
-                                                        thumbnail_uri = covers[0].get('thumbnailUri') or covers[0].get('url') or ''
-                                                else:
-                                                    import requests as _requests
-                                                    resp = _requests.get(url, timeout=10)
-                                                    if resp is not None and resp.status_code == 200:
-                                                        txt = resp.text
-                                                        import re as _re
-                                                        m = _re.search(r"<title[^>]*>(.*?)</title>", txt, _re.I | _re.S)
-                                                        if m:
-                                                            page_title = m.group(1).strip()
-                                            except Exception:
-                                                page_title = page_title or ''
-                                                description = description or ''
-                                                thumbnail_uri = thumbnail_uri or ''
-
-                                            data_to_save = {
-                                                'webappId': webapp_id,
-                                                'title': page_title or '',
-                                                'description': description or '',
-                                                'thumbnail_uri': thumbnail_uri or '',
-                                                'nodeInfoList': nodes or []
-                                            }
-                                            with open(path, 'wb') as f:
-                                                f.write(json.dumps(data_to_save, ensure_ascii=False).encode('utf-8'))
-                                        except Exception:
-                                            success = False
-
-                                    result['done'] = True
-                                    result['success'] = success
-                                    result['nodes'] = nodes
-                                    result['bytes'] = b
-                                except Exception as exc:
-                                    result['error'] = str(exc)
-                                    result['done'] = True
-                                    result['success'] = False
-
-                            # run worker in a QThread so any Qt timers/objects are safe
-                            thread = QtCore.QThread()
-                            class _WorkerObj(QtCore.QObject):
-                                finished = QtCore.pyqtSignal()
-
-                                @QtCore.pyqtSlot()
-                                def run(self):
-                                    try:
-                                        _worker()
-                                    except Exception:
-                                        pass
-                                    finally:
-                                        try:
-                                            self.finished.emit()
-                                        except Exception:
-                                            pass
-
-                            w = _WorkerObj()
-                            w.moveToThread(thread)
-                            thread.started.connect(w.run)
-                            w.finished.connect(thread.quit)
-                            w.finished.connect(w.deleteLater)
-                            thread.finished.connect(thread.deleteLater)
-                            # keep references to thread and worker on self to avoid
-                            # them being GC'd while running (can cause crashes)
-                            try:
-                                if not hasattr(self, '_rh_worker_refs'):
-                                    self._rh_worker_refs = []
-                                self._rh_worker_refs.append((thread, w))
-                                def _cleanup(t=thread, obj=w):
-                                    try:
-                                        if hasattr(self, '_rh_worker_refs'):
-                                            try:
-                                                self._rh_worker_refs.remove((t, obj))
-                                            except Exception:
-                                                # try to remove any matching thread-only entries
-                                                for item in list(self._rh_worker_refs):
-                                                    try:
-                                                        if item[0] is t:
-                                                            self._rh_worker_refs.remove(item)
-                                                    except Exception:
-                                                        pass
-                                    except Exception:
-                                        pass
-                                thread.finished.connect(_cleanup)
-                            except Exception:
-                                pass
-                            thread.start()
-
-                            # poller on main thread to show result when ready
-                            timer = QtCore.QTimer(self)
-
-                            def _check():
-                                try:
-                                    if not result.get('done'):
-                                        return
-                                    timer.stop()
-                                    if result.get('success'):
-                                        try:
-                                            # reload buttons from RH_apps directory instead of adding directly
-                                            try:
-                                                _load_rh_apps()
-                                            except Exception:
-                                                pass
-                                            try:
-                                                self._show_toast(f'已保存 {webapp_id}.json 到 RH_apps/{webapp_id}/', 2000)
-                                            except Exception:
-                                                # fallback to a short toast
-                                                try:
-                                                    self._show_toast('已添加应用', 1500)
-                                                except Exception:
-                                                    pass
-                                        except Exception:
-                                            try:
-                                                self._show_toast('已添加应用', 1500)
-                                            except Exception:
-                                                pass
-                                    else:
-                                        try:
-                                            self._show_toast(result.get('error') or '应用未返回可用节点，请检查应用配置', 5000)
-                                        except Exception:
-                                            pass
-                                except Exception:
-                                    try:
-                                        timer.stop()
-                                    except Exception:
-                                        pass
-
-                            timer.timeout.connect(_check)
-                            timer.start(200)
+                            self._rh_install_apps([reference], on_finished=_added)
                         except Exception:
                             pass
 
@@ -9641,137 +8118,10 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
                 except Exception:
                     pass
 
-            # helper paths
-            _apikeys_path = os.path.join(current_dir, 'apikeys.json')
-
-            def _read_apikeys() -> dict:
-                try:
-                    if os.path.exists(_apikeys_path):
-                        with open(_apikeys_path, 'r', encoding='utf-8') as f:
-                            return json.load(f) or {}
-                except Exception:
-                    pass
-                return {}
-
-            def _write_apikeys(data: dict):
-                try:
-                    with open(_apikeys_path, 'w', encoding='utf-8') as f:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                except Exception:
-                    pass
-
-            def _load_current_key():
-                apis = _read_apikeys()
-                host = self.rh_host_combo.currentText() or 'www.runninghub.cn'
-                key_name = 'runninghub_ai' if 'ai' in host else 'runninghub_cn'
-                val = ''
-                try:
-                    val = apis.get(key_name, {}).get('api_key') if isinstance(apis.get(key_name), dict) else apis.get(key_name)
-                except Exception:
-                    val = apis.get(key_name) if isinstance(apis, dict) else ''
-                if not val:
-                    self.rh_apikey_input.setPlaceholderText('请输入apikey（密钥仅保存在本地apikeys.json）')
-                    self.rh_apikey_input.setText('')
-                else:
-                    self.rh_apikey_input.setText(str(val))
-
-            def _save_current_key():
-                host = self.rh_host_combo.currentText() or 'www.runninghub.cn'
-                key_name = 'runninghub_ai' if 'ai' in host else 'runninghub_cn'
-                apis = _read_apikeys()
-                # preserve existing structure if dict with api_key; remove entry when empty
-                val = self.rh_apikey_input.text().strip()
-                try:
-                    cur = apis.get(key_name)
-                    if val:
-                        if isinstance(cur, dict):
-                            cur['api_key'] = val
-                            apis[key_name] = cur
-                        else:
-                            apis[key_name] = {'api_key': val}
-                    else:
-                        # remove key entirely if present
-                        if key_name in apis:
-                            try:
-                                del apis[key_name]
-                            except Exception:
-                                apis.pop(key_name, None)
-                except Exception:
-                    # fallback: set or remove directly
-                    if val:
-                        apis[key_name] = {'api_key': val}
-                    else:
-                        apis.pop(key_name, None)
-                # write to disk
-                _write_apikeys(apis)
-                # also sync with in-memory self._apikeys used during shutdown save
-                try:
-                    if hasattr(self, '_apikeys') and isinstance(self._apikeys, dict):
-                        try:
-                            if val:
-                                self._apikeys[key_name] = {'api_key': val}
-                            else:
-                                if key_name in self._apikeys:
-                                    try:
-                                        del self._apikeys[key_name]
-                                    except Exception:
-                                        self._apikeys.pop(key_name, None)
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            self._apikeys = apis
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-            # also update in-memory settings when host changes (will be persisted on close)
-            try:
-                def _on_host_changed(_):
-                    try:
-                        if isinstance(getattr(self, 'settings', None), dict):
-                            self.settings['runninghub_host'] = self.rh_host_combo.currentText()
-                    except Exception:
-                        pass
-                self.rh_host_combo.currentIndexChanged.connect(_on_host_changed)
-                # persist host selection immediately so other code can read from settings
-                try:
-                    def _on_host_changed_and_save(_=None):
-                        try:
-                            if isinstance(getattr(self, 'settings', None), dict):
-                                self.settings['runninghub_host'] = self.rh_host_combo.currentText()
-                        except Exception:
-                            pass
-                        try:
-                            # save settings to disk immediately
-                            self._save_settings()
-                        except Exception:
-                            pass
-                    # also connect a saver that writes settings immediately on change
-                    self.rh_host_combo.currentIndexChanged.connect(_on_host_changed_and_save)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-            # signals
-            try:
-                self.rh_host_combo.currentIndexChanged.connect(lambda _: _load_current_key())
-                self.rh_apikey_input.editingFinished.connect(lambda: _save_current_key())
-                # also handle clear-button press / immediate emptying
-                try:
-                    # save on any change so keys persist; if emptied, removal is handled in _save_current_key
-                    self.rh_apikey_input.textChanged.connect(lambda v: _save_current_key())
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-            # initialize value
-            _load_current_key()
-            self.rh_host_combo.currentIndexChanged.connect(lambda _: self._refresh_rh_task_credentials())
-            self.rh_apikey_input.textChanged.connect(lambda _: self._refresh_rh_task_credentials())
+            from aetherloom_core.rh_connections import install_legacy_controls
+            connections = install_legacy_controls(self)
+            connections.changed.connect(self._refresh_rh_task_credentials)
+            connections.error.connect(lambda message: self._show_toast(message, 5000))
             self._refresh_rh_task_credentials()
         except Exception:
             # fallback: simple placeholder
@@ -9961,7 +8311,7 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
 
         rh_title = QtWidgets.QLabel('RunningHub 重试设置')
         rh_title.setObjectName('settingsCardTitle')
-        rh_sub = QtWidgets.QLabel('触发 RH API 并行上限后按进入顺序等待，仅队首重试；提交成功、取消或达到重试上限后轮到下一项。')
+        rh_sub = QtWidgets.QLabel('App 与画布共用等候队列。按发起顺序，让队首前 N 项提交或重试；任务开始运行、直接完成、失败或取消后立即补位。云端仍在排队的任务占用名额。')
         rh_sub.setWordWrap(True)
         rh_sub.setObjectName('settingsHint')
 
@@ -9973,10 +8323,10 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
         try:
             self.rh_retry_max_spin.setRange(1, 100000)
             self.rh_retry_max_spin.setSingleStep(1)
-            self.rh_retry_max_spin.setValue(int(getattr(self, 'rh_retry_max', 500) or 500))
+            self.rh_retry_max_spin.setValue(int(getattr(self, 'rh_retry_max', 100) or 100))
         except Exception:
             try:
-                self.rh_retry_max_spin.setValue(500)
+                self.rh_retry_max_spin.setValue(100)
             except Exception:
                 pass
         rh_row.addWidget(self.rh_retry_max_spin)
@@ -10000,6 +8350,19 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
         rh_layout.addWidget(rh_title)
         rh_layout.addWidget(rh_sub)
         rh_layout.addLayout(rh_row)
+        rh_head_row = QtWidgets.QHBoxLayout()
+        rh_head_row.addWidget(QtWidgets.QLabel('队首重试名额 (N)'))
+        self.rh_retry_head_count_spin = RhNumberSpinBox(integer=True)
+        self.rh_retry_head_count_spin.configure({'min': 1, 'max': 16, 'step': 1})
+        self.rh_retry_head_count_spin.setValue(self.rh_retry_head_count)
+        self.rh_retry_head_count_spin.setToolTip('默认 1。增大后立即补位；调小不会中断已获得名额的任务。该设置不限制云端已运行任务数量。')
+        rh_head_row.addWidget(self.rh_retry_head_count_spin)
+        rh_head_row.addStretch(1)
+        rh_layout.addLayout(rh_head_row)
+        rh_session_hint = QtWidgets.QLabel('关闭客户端后，普通等候和生成任务不再恢复；仅保留已生成结果的下载重试。关闭客户端不会向云端发送取消指令，需要终止时请先取消任务。')
+        rh_session_hint.setWordWrap(True)
+        rh_session_hint.setObjectName('settingsHint')
+        rh_layout.addWidget(rh_session_hint)
         cards_column.addWidget(rh_card)
 
         # expansion system prompt card (可自定义扩写 system prompt)
@@ -10124,7 +8487,14 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
             self.rh_retry_delay_spin.valueChanged.connect(lambda v: (setattr(self, 'rh_retry_delay', int(v)), self.settings.__setitem__('rh_retry_delay', int(v)), self._save_settings()))
         except Exception:
             pass
-        # concurrency setting removed from UI; uses fixed default 25
+        def _on_retry_head_count_changed(value):
+            from aetherloom_core.rh_submission_queue import get_submission_queue
+            self.rh_retry_head_count = max(1, min(16, int(value)))
+            self.settings['rh_retry_head_count'] = self.rh_retry_head_count
+            get_submission_queue(self).set_admission_limit(self.rh_retry_head_count)
+            self._save_settings()
+
+        self.rh_retry_head_count_spin.valueChanged.connect(_on_retry_head_count_changed)
         try:
             def _on_app_cache_changed(v):
                 try:
@@ -10406,3 +8776,6 @@ QToolButton#outputPlayButton:pressed { background: rgba(22, 60, 110, 0.9); }
             self.runninghub_btn.clicked.connect(_set_runninghub_page)
         except Exception:
             pass
+
+        from aetherloom_core.rh_execution_ui import install_canvas_page
+        install_canvas_page(self)

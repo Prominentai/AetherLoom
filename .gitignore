@@ -3,6 +3,10 @@ apikeys*.json
 settings*.json
 running_tasks*.json
 task_records/
+canvases/
+*.aethercanvas.zip
+*.aethercanvas
+*.aetherloom.json
 .env
 .env.*
 *.pem
@@ -18,6 +22,7 @@ decoding/
 .thumb_cache/
 *cache*/
 .readme_cache.md
+.readme_cache.json
 *.log
 
 # Local environments and Python/build artifacts

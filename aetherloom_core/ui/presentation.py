@@ -708,12 +708,17 @@ class PresentationMixin:
         if mode not in getattr(self, '_themes', {}):
             mode = 'dark'
         self._theme_mode = mode
+        if hasattr(self, '_decode_page'):
+            self._decode_page.apply_theme()
         if hasattr(self, '_rh_dashboard'):
             self._rh_dashboard.apply_theme()
         from aetherloom_core.api_manager_ui import apply_theme as apply_api_theme
         apply_api_theme(self, mode)
         from aetherloom_core.ui.preferences import apply_settings_theme
         apply_settings_theme(self, mode)
+        canvas = getattr(self, 'canvas_page', None)
+        if canvas is not None:
+            canvas.refresh_theme()
         css = self._themes.get(mode)
         if css:
             self.setStyleSheet(css)
@@ -753,32 +758,9 @@ class PresentationMixin:
                 self._compare_window.sync_theme(mode)
         except Exception:
             pass
-        # ensure Home page subtitle and README follow current theme
-        try:
-            if getattr(self, '_theme_mode', 'dark') == 'light':
-                try:
-                    if hasattr(self, 'home_subtitle') and self.home_subtitle is not None:
-                        self.home_subtitle.setStyleSheet('color: #111111; font-size: 12pt;')
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'home_readme') and self.home_readme is not None:
-                        self.home_readme.setStyleSheet('background: transparent; color: #111111; font-size: 11pt; padding:8px; border-radius:8px; border: none;')
-                except Exception:
-                    pass
-            else:
-                try:
-                    if hasattr(self, 'home_subtitle') and self.home_subtitle is not None:
-                        self.home_subtitle.setStyleSheet('color: #d1d5db; font-size: 12pt;')
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, 'home_readme') and self.home_readme is not None:
-                        self.home_readme.setStyleSheet('background: transparent; color: #ffffff; font-size: 11pt; padding:8px; border-radius:8px; border: none;')
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        home_page = getattr(self, 'home_page', None)
+        if home_page is not None:
+            home_page.set_theme(mode)
         # refresh any per-node preview placeholders so they match new theme
         try:
             try:

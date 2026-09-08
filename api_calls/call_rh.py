@@ -11,6 +11,39 @@ from urllib.parse import quote, quote_plus, urlsplit, urlunsplit
 import requests
 
 DEFAULT_BASE_URL = "https://www.runninghub.cn"
+BUSY_SUBMISSION_CODES = frozenset({415, 421})
+# These official errors reject creation before a task can be accepted. Existing
+# task states (804/805/813), server faults and unknown codes are deliberately not
+# included: switching credentials after those could duplicate paid generation.
+REJECTED_SUBMISSION_CODES = frozenset({301, 380, 412, 416, 433, 435, 436,
+    801, 802, 803, 806, 808, 809, 810, 811, 812, 901, 1001, 1002, 1007, 1008, 1009})
+
+
+def accepted_task_id(payload):
+    """A returned identity outranks even an inconsistent error/status code."""
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get('data')
+    values = [data.get('taskId') if isinstance(data, dict) else None, payload.get('taskId')]
+    for value in values:
+        if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def submission_response_kind(payload):
+    """Classify only documented creation outcomes; absence of an ID is not failure."""
+    if accepted_task_id(payload):
+        return 'accepted'
+    try:
+        code = int(payload.get('code'))
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return 'unknown'
+    if code in BUSY_SUBMISSION_CODES:
+        return 'busy'
+    if code in REJECTED_SUBMISSION_CODES:
+        return 'rejected'
+    return 'unknown'
 
 
 class RunningHubResponseError(RuntimeError):
@@ -20,10 +53,11 @@ class RunningHubResponseError(RuntimeError):
 class RunningHubAPIError(RuntimeError):
     """A valid RunningHub response reported a business failure."""
 
-    def __init__(self, operation: str, code: Any, message: str):
+    def __init__(self, operation: str, code: Any, message: str, payload=None):
         self.operation = operation
         self.code = code
         self.message = message
+        self.payload = payload
         super().__init__(f"{operation} failed (code={code}): {message}")
 
 
@@ -90,19 +124,26 @@ def validate_response(payload: Any, operation: str = 'RunningHub request', *,
             normalized_code = int(safe_code)
         except (TypeError, ValueError):
             normalized_code = safe_code
-        raise RunningHubAPIError(operation, normalized_code, message)
+        raise RunningHubAPIError(operation, normalized_code, message, payload=payload)
     return payload
 
 
-def _request_json(method: str, url: str, operation: str, **kwargs) -> Dict[str, Any]:
+def _request_json(method: str, url: str, operation: str, *, preserve_task_id=False, **kwargs) -> Dict[str, Any]:
     """Do not copy request URLs, credentials, or response bodies into exceptions."""
     try:
         request = requests.get if method == 'GET' else requests.post
         response = request(url, **kwargs)
+        if preserve_task_id:
+            try:
+                payload = response.json()
+            except (ValueError, TypeError):
+                payload = None
+            if isinstance(payload, dict) and (accepted_task_id(payload) or 'code' in payload):
+                return payload
         response.raise_for_status()
     except requests.HTTPError as exc:
         status = getattr(exc.response, 'status_code', None)
-        # Keep HTTPError/response for the GUI's existing HTTP 415/421 retry logic.
+        # Preserve the response for diagnosis; HTTP codes are not RH business codes.
         raise requests.HTTPError(f"{operation} failed: HTTP {status if status is not None else 'error'}", response=exc.response) from None
     except requests.Timeout:
         raise requests.Timeout(f"{operation} timed out") from None
@@ -121,7 +162,8 @@ def _post_task(endpoint: str, api_key: str, payload: Dict[str, Any], *,
                base_url: str, timeout: int, operation: str, validate: bool = True) -> Dict[str, Any]:
     url = f"{_api_root(base_url)}/{endpoint}"
     headers = {'Host': urlsplit(url).netloc, 'Content-Type': 'application/json'}
-    result = _request_json('POST', url, operation, headers=headers, json=payload, timeout=timeout)
+    result = _request_json('POST', url, operation, preserve_task_id=endpoint == 'ai-app/run',
+                           headers=headers, json=payload, timeout=timeout)
     return validate_response(result, operation, api_key=api_key) if validate else result
 
 

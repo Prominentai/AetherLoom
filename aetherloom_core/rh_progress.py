@@ -27,6 +27,47 @@ def progress_text(progress):
     return f'已完成 {completed} 个节点，等待后续进度' if completed else '已连接，等待节点进度'
 
 
+def progress_percent(status, progress=None, previous=0):
+    """Normalize shared progress for both output cards and painted canvas nodes."""
+    if status in ('DOWNLOADING', 'DOWNLOAD_FAILED', 'WAITING_FOR_SECRET', 'SUCCESS'):
+        return 100
+    if status in ('PENDING', 'WAITING', 'PREPARING', 'QUEUED', 'SUBMITTING', 'LOCAL_WAIT'):
+        return 0
+    if isinstance(progress, dict):
+        value = 100 if progress.get('finished') else progress.get('percent')
+    else:
+        value = progress
+    if value is None:
+        value = 0 if status == 'RUNNING' else previous
+    try:
+        value = float(value)
+        return max(0, min(100, int(round(value)))) if math.isfinite(value) else 0
+    except (ValueError, TypeError, OverflowError):
+        return 0
+
+
+def draw_circular_progress(painter, rect, percent, status, colors, *, stroke=8, font=None):
+    """Passive shared paint routine; no QWidget, timer or network dependency."""
+    painter.save()
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)
+    painter.setBrush(QtCore.Qt.NoBrush)
+    painter.setPen(QtGui.QPen(QtGui.QColor(colors['border']), stroke))
+    painter.drawEllipse(rect)
+    color = colors['danger'] if status in ('FAILED', 'DOWNLOAD_FAILED', 'CANCEL_FAILED') else colors['accent']
+    if status in ('CANCELED', 'INTERRUPTED'):
+        color = colors['muted']
+    painter.setPen(QtGui.QPen(QtGui.QColor(color), stroke, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
+    if percent:
+        painter.drawArc(rect, 90 * 16, -round(360 * 16 * percent / 100))
+    if font is None:
+        font = QtGui.QFont(painter.font())
+        font.setPointSize(24)
+    painter.setFont(font)
+    painter.setPen(QtGui.QColor(colors['text']))
+    painter.drawText(rect, QtCore.Qt.AlignCenter, f'{percent}%')
+    painter.restore()
+
+
 class CircularProgress(QtWidgets.QWidget):
     """A passive view of shared task state; never starts polling or timers."""
     def __init__(self, owner, parent=None):
@@ -48,18 +89,15 @@ class CircularProgress(QtWidgets.QWidget):
     def set_state(self, status, progress=None):
         self.status = status
         progress = progress or {}
-        if status in ('DOWNLOADING', 'DOWNLOAD_FAILED', 'SUCCESS'):
-            self.percent = 100
-        elif status == 'RUNNING':
-            self.percent = 100 if progress.get('finished') else int(round(progress.get('percent') or 0))
-        elif status in ('QUEUED', 'SUBMITTING', 'LOCAL_WAIT'):
-            self.percent = 0
+        self.percent = progress_percent(status, progress, self.percent)
         messages = {'SUBMITTING': '准备 / 等待提交', 'LOCAL_WAIT': '等待提交',
                     'QUEUED': '云端排队中', 'RUNNING': '运行中 · 等待节点进度',
                     'DOWNLOADING': '生成完成 · 下载 / 处理输出中',
                     'DOWNLOAD_FAILED': '生成完成 · 等待下载重试',
                     'POLL_TIMEOUT': '等待重新查询任务状态', 'WAITING_FOR_KEY': '等待密钥',
-                    'CANCEL_FAILED': '取消未确认 · 等待重查', 'CANCELED': '已取消',
+                    'CANCELING': '正在取消 · 自动重试并确认状态',
+                    'INTERRUPTED': '会话已中断',
+                    'CANCEL_FAILED': '取消未确认 · 可再次取消', 'CANCELED': '已取消',
                     'FAILED': '任务失败', 'SUCCESS': '下载完成 · 准备展示结果'}
         self.set_message(progress_text(progress) if status == 'RUNNING' and progress else messages.get(status, status))
 
@@ -71,22 +109,11 @@ class CircularProgress(QtWidgets.QWidget):
     def paintEvent(self, event):
         colors = palette(getattr(self.owner, '_theme_mode', 'dark'))
         painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
         rect = QtCore.QRectF((self.width() - 124) / 2, 20, 124, 124)
-        painter.setPen(QtGui.QPen(QtGui.QColor(colors['border']), 8))
-        painter.drawEllipse(rect)
-        color = colors['danger'] if self.status in ('FAILED', 'DOWNLOAD_FAILED', 'CANCEL_FAILED') else colors['accent']
-        if self.status == 'CANCELED':
-            color = colors['muted']
-        painter.setPen(QtGui.QPen(QtGui.QColor(color), 8, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
-        if self.percent:
-            painter.drawArc(rect, 90 * 16, -round(360 * 16 * self.percent / 100))
         font = QtGui.QFont(self.font())
         font.setPointSize(24)
         font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(QtGui.QColor(colors['text']))
-        painter.drawText(rect, QtCore.Qt.AlignCenter, f'{self.percent}%')
+        draw_circular_progress(painter, rect, self.percent, self.status, colors, font=font)
         painter.end()
 
 
@@ -110,7 +137,10 @@ def update_card_progress(owner, card, status, progress=None):
                        'RUNNING': '任务运行中', 'DOWNLOADING': '下载 / 处理输出',
                        'DOWNLOAD_FAILED': '等待下载重试', 'FAILED': '任务失败', 'CANCELED': '已取消',
                        'SUCCESS': '下载完成', 'POLL_TIMEOUT': '等待状态重查',
-                       'CANCEL_FAILED': '取消未确认', 'WAITING_FOR_KEY': '等待密钥'}.get(status, '等待结果'))
+                       'CANCELING': '正在取消', 'CANCEL_FAILED': '取消未确认', 'WAITING_FOR_KEY': '等待密钥',
+                       'INTERRUPTED': '会话已中断',
+                       'WAITING_FOR_SECRET': '等待解码密码',
+                       'UNKNOWN': '提交结果未知', 'PAUSED': '已暂停'}.get(status, '等待结果'))
     for name in ('_img_label', '_nav_wrap'):
         child = getattr(card, name, None)
         if child is not None and not sip.isdeleted(child):

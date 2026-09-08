@@ -1,17 +1,31 @@
 """RunningHub task state and restart recovery, independent of Qt widgets."""
 
 import json
+import copy
+import hashlib
 import os
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 
 
-TERMINAL_STATUSES = frozenset({'SUCCESS', 'FAILED', 'CANCELED'})
+TERMINAL_STATUSES = frozenset({'SUCCESS', 'FAILED', 'CANCELED', 'INTERRUPTED'})
 ACTIVE_STATUSES = frozenset({
     'QUEUED', 'RUNNING', 'DOWNLOADING', 'DOWNLOAD_FAILED', 'POLL_TIMEOUT',
-    'CANCEL_FAILED', 'WAITING_FOR_KEY',
+    'CANCELING', 'CANCEL_FAILED', 'WAITING_FOR_KEY', 'WAITING_FOR_SECRET',
 })
+
+
+def is_download_recovery(value):
+    """Only explicitly generated, unfinished local results survive a session."""
+    if not isinstance(value, dict) or value.get('cancel_requested'):
+        return False
+    status = str(value.get('status') or '').upper()
+    if status in TERMINAL_STATUSES | {'UNKNOWN'}:
+        return False
+    return bool(value.get('cloud_success') or
+                status in {'DOWNLOADING', 'DOWNLOAD_FAILED', 'WAITING_FOR_SECRET'})
 
 
 def normalize_base_url(value):
@@ -19,18 +33,81 @@ def normalize_base_url(value):
     return site_base_url(value or 'www.runninghub.cn')
 
 
+def normalize_api_keys(value):
+    """Copy ordered, distinct credential strings; never stringify containers."""
+    values = value if isinstance(value, (list, tuple)) else [value]
+    return list(dict.fromkeys(item.strip() for item in values if isinstance(item, str) and item.strip()))
+
+
+def api_key_id(key):
+    value = str(key or '').strip()
+    return hashlib.sha256(value.encode('utf-8')).hexdigest() if value else ''
+
+
 class TaskStore:
     """Atomically update a task map; never serialize API keys or Qt objects."""
 
-    FIELDS = frozenset({'webapp_id', 'base_url', 'output_dir', 'status', 'decode_token'})
+    FIELDS = frozenset({'webapp_id', 'base_url', 'output_dir', 'status', 'decode_token',
+                        'run_id', 'app_name', 'submission_order', 'key_id', 'task_document'})
+
+    @classmethod
+    def clean_context(cls, value):
+        """Persist only recovery data, never runtime callbacks or credentials."""
+        result = {key: str(item) for key, item in value.items()
+                  if key in cls.FIELDS and item is not None}
+        if 'started' in value:
+            result['started'] = str(value['started']).lower() in {'true', '1'}
+        for key in ('cancel_requested', 'cancel_acknowledged', 'cancel_retry_available', 'cloud_success'):
+            if key in value:
+                result[key] = str(value[key]).lower() in {'true', '1'}
+        for key in ('cancel_attempts', 'cancel_retry_at', 'cancel_generation'):
+            if key in value:
+                try:
+                    result[key] = max(0, int(value[key]))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        origin = value.get('origin')
+        if isinstance(origin, dict):
+            result['origin'] = {key: item for key, item in origin.items()
+                                if key in {'canvas_id', 'node_id', 'execution_id', 'round_id',
+                                           'batch_index', 'repeat_index', 'canvas_batch_index',
+                                           'canvas_name', 'node_name', 'node_title',
+                                           'workflow_group_id', 'workflow_job_id',
+                                           'workflow_group_document', 'workflow_job_document',
+                                           'kind', 'app_submission_group_id',
+                                           'app_submission_index', 'app_submission_count'}
+                                and isinstance(item, (str, int, float, bool))}
+        decode = value.get('decode_settings')
+        if isinstance(decode, dict):
+            result['decode_settings'] = {key: item for key, item in decode.items()
+                                          if key in {'enabled', 'mode', 'grid_cols', 'delete_original',
+                                                     'password_required', 'settings_missing'}
+                                          and isinstance(item, (str, int, bool))}
+            if decode.get('password'):
+                result['decode_settings']['password_required'] = True
+        return result
 
     def __init__(self, path):
         self.path = os.path.abspath(os.fspath(path))
         self.lock = threading.RLock()
+        self._cached = None
+        self._signature = None
+        self._download_only = False
+
+    def _file_signature(self):
+        try:
+            stat = os.stat(self.path)
+            return stat.st_mtime_ns, stat.st_size, stat.st_ino
+        except FileNotFoundError:
+            return None
 
     def _read_unlocked(self):
-        if not os.path.exists(self.path):
-            return {}
+        signature = self._file_signature()
+        if self._cached is not None and signature == self._signature:
+            return self._cached
+        if signature is None:
+            self._cached, self._signature = {}, None
+            return self._cached
         with open(self.path, 'r', encoding='utf-8') as source:
             data = json.load(source)
         if not isinstance(data, dict):
@@ -43,13 +120,13 @@ class TaskStore:
                 value = {'webapp_id': str(value)}
             if not isinstance(value, dict) or not value.get('webapp_id'):
                 continue
-            result[str(task_id)] = {key: str(item) for key, item in value.items()
-                                    if key in self.FIELDS and item is not None}
+            result[str(task_id)] = self.clean_context(value)
+        self._cached, self._signature = result, signature
         return result
 
     def read(self):
         with self.lock:
-            return self._read_unlocked()
+            return copy.deepcopy(self._read_unlocked())
 
     def _write_unlocked(self, data):
         if not data:
@@ -57,6 +134,7 @@ class TaskStore:
                 os.remove(self.path)
             except FileNotFoundError:
                 pass
+            self._cached, self._signature = {}, None
             return
         folder = os.path.dirname(self.path)
         os.makedirs(folder, exist_ok=True)
@@ -67,6 +145,7 @@ class TaskStore:
                 destination.flush()
                 os.fsync(destination.fileno())
             os.replace(temporary, self.path)
+            self._cached, self._signature = data, self._file_signature()
         finally:
             if os.path.exists(temporary):
                 os.remove(temporary)
@@ -79,12 +158,18 @@ class TaskStore:
             data = self._read_unlocked()
             previous = data.get(str(task_id))
             entry = dict(previous or {})
-            entry.update({key: str(value) for key, value in context.items()
-                          if key in self.FIELDS and value is not None})
+            entry.update(self.clean_context(context))
             if not entry.get('webapp_id'):
                 raise ValueError('A persisted RunningHub task needs a webapp_id')
+            if self._download_only and not is_download_recovery(entry):
+                if previous is not None:
+                    data = dict(data)
+                    data.pop(task_id, None)
+                    self._write_unlocked(data)
+                return
             if entry == previous:
                 return
+            data = dict(data)
             data[str(task_id)] = entry
             self._write_unlocked(data)
 
@@ -92,8 +177,20 @@ class TaskStore:
         with self.lock:
             data = self._read_unlocked()
             if str(task_id) in data:
+                data = dict(data)
                 data.pop(str(task_id))
                 self._write_unlocked(data)
+
+    def retain_download_retries(self, *, closing=False):
+        """One atomic session cleanup; late ordinary writes stay disabled on close."""
+        with self.lock:
+            if closing:
+                self._download_only = True
+            records = self._read_unlocked()
+            retained = {task_id: value for task_id, value in records.items() if is_download_recovery(value)}
+            if len(retained) != len(records):
+                self._write_unlocked(retained)
+            return copy.deepcopy(retained)
 
 
 def default_task_store():
@@ -122,6 +219,7 @@ class TaskLifecycle:
         self.downloader = downloader
         self.interval = interval
         self.stop_event = threading.Event()
+        self.wake_event = threading.Event()
         if not hasattr(owner, '_rh_task_runtime_lock'):
             owner._rh_task_runtime_lock = threading.RLock()
         self.lock = owner._rh_task_runtime_lock
@@ -138,41 +236,70 @@ class TaskLifecycle:
                 setattr(owner, name, default)
         self.defaults = {}
         self.site_keys = {}
+        self.site_keyrings = {}
         self.recovered_task_ids = set()
         self._confirmed_cancellations = set()
         self._recovery_workers = {}
+        self._download_workers = {}
+        self._pending_downloads = OrderedDict()
         self._recovery_cursor = None
+        self._poll_due = {}
         self._download_retry_attempts = {}
         self._download_retry_due = {}
         self._progress_due = {}
         self._progress_connected = set()
         self._receipt_maintenance_due = 0
         self._receipt_maintenance_worker = None
+        # Cancellation shares the bounded status pool. No per-task retry threads.
+        self.cancel_delays = (1, 2, 4, 8)
 
     def set_credentials(self, defaults, site_keys):
-        """Called on the GUI thread with copied strings, including keys in memory only."""
+        """Called with copied key strings/lists; credentials remain in memory only."""
         with self.lock:
             self.defaults = dict(defaults)
             self.defaults['base_url'] = normalize_base_url(defaults.get('base_url'))
-            self.site_keys = {normalize_base_url(host): str(key or '') for host, key in site_keys.items()}
+            self.site_keyrings = {normalize_base_url(host): normalize_api_keys(keys) for host, keys in site_keys.items()}
+            self.site_keys = {host: keys[0] if keys else '' for host, keys in self.site_keyrings.items()}
 
     def context(self, task_id, webapp_id=None, persisted=None, *, refresh_key=False):
         with self.lock:
             context = dict(self.defaults)
             context.pop('api_key', None)
+            context.pop('api_keys', None)
             context.update(persisted or {})
             context.update(self.owner._rh_task_contexts.get(str(task_id), {}))
+            if isinstance(context.get('decode_settings'), dict):
+                context['decode_settings'] = copy.deepcopy(context['decode_settings'])
             if webapp_id is not None:
                 context['webapp_id'] = str(webapp_id)
             context['base_url'] = normalize_base_url(context.get('base_url'))
-            if refresh_key or str(task_id) in self.recovered_task_ids or not context.get('api_key'):
-                context['api_key'] = self.site_keys.get(context['base_url'], '')
+            ring = self.site_keyrings.get(context['base_url'], [])
+            bound_key = context.get('api_key') or ''
+            key_id = context.get('key_id') or api_key_id(bound_key)
+            if key_id:
+                # A live accepted task keeps its immutable credential. A restart
+                # has only the fingerprint and must locate that exact key.
+                context['api_key'] = (bound_key if api_key_id(bound_key) == key_id else
+                                      next((key for key in ring if api_key_id(key) == key_id), ''))
+                context['key_id'] = key_id
+            else:
+                # Legacy records did not identify an account. A single configured
+                # key is unambiguous; never guess after upgrading to multiple.
+                context['api_key'] = ring[0] if len(ring) == 1 else ''
+                if context['api_key']:
+                    context['key_id'] = api_key_id(context['api_key'])
             return context
 
     def handle_event(self, webapp_id, event):
         webapp_id = str(webapp_id)
         if not isinstance(event, str):
             return
+        event = self._cancel_event(event)
+        service = getattr(self.owner, '_rh_execution_service', None)
+        if service is not None:
+            # Outside the lifecycle lock: a canvas subscriber can atomically
+            # save its result before terminal task records are removed.
+            service.lifecycle_event(webapp_id, event)
         submission_status = None
         with self.lock:
             if event.startswith('TASK_PROGRESS_SOURCE:'):
@@ -224,6 +351,8 @@ class TaskLifecycle:
                 if previous in TERMINAL_STATUSES:
                     return
                 context = self.context(task_id, webapp_id)
+                if status in {'RUNNING', 'DOWNLOADING', 'DOWNLOAD_FAILED', 'WAITING_FOR_SECRET', 'SUCCESS'}:
+                    context['started'] = True
                 # Persist first: a failed disk write must leave a retryable state.
                 if status in TERMINAL_STATUSES:
                     self.store.remove(task_id)
@@ -243,6 +372,7 @@ class TaskLifecycle:
                         self._progress_due.pop(task_id, None)
                 if status in TERMINAL_STATUSES:
                     self._receipt_maintenance_due = 0
+                    self._poll_due.pop(task_id, None)
                     self.owner._rh_download_notes.pop(task_id, None)
                     self._download_retry_attempts.pop(task_id, None)
                     self._download_retry_due.pop(task_id, None)
@@ -285,7 +415,28 @@ class TaskLifecycle:
         return validate_response(payload, 'RunningHub task lifecycle')
 
     def _status(self, webapp_id, task_id, status):
-        self.emit(str(webapp_id), 'TASK_STATUS:{}:{}'.format(task_id, status))
+        event = self._cancel_event('TASK_STATUS:{}:{}'.format(task_id, status))
+        service = getattr(self.owner, '_rh_execution_service', None)
+        if service is not None:
+            service.lifecycle_event(str(webapp_id), event)
+        self.emit(str(webapp_id), event)
+
+    def _cancel_event(self, event):
+        """A late normal poll/Qt event cannot overwrite durable cancellation."""
+        if event.startswith('TASK_STATUS:'):
+            parts = event.split(':', 2)
+            if len(parts) == 3:
+                with self.lock:
+                    context = self.owner._rh_task_contexts.get(parts[1], {})
+                    if (context.get('cancel_requested') and parts[2] == 'CANCEL_FAILED' and
+                            not context.get('cancel_retry_available') and
+                            context.get('cancel_attempts', 0) <= len(self.cancel_delays)):
+                        return 'TASK_STATUS:{}:CANCELING'.format(parts[1])
+                    if context.get('cancel_requested') and parts[2] not in {
+                            'CANCELED', 'INTERRUPTED', 'CANCELING', 'CANCEL_FAILED', 'WAITING_FOR_KEY'}:
+                        state = 'CANCEL_FAILED' if context.get('cancel_attempts', 0) > len(self.cancel_delays) else 'CANCELING'
+                        return 'TASK_STATUS:{}:{}'.format(parts[1], state)
+        return event
 
     def poll_progress(self, task_id, webapp_id, api_key, base_url, status):
         """Called by existing live/recovery polls; progress failure is non-fatal."""
@@ -306,28 +457,128 @@ class TaskLifecycle:
             pass
 
     def cancel_task(self, task_id, webapp_id=None):
+        """Persist intent immediately; the bounded recovery pool confirms it.
+
+        The return value means the request is recorded, not that cloud execution
+        has stopped. Repeated clicks during one attempt series are idempotent.
+        """
         task_id = str(task_id)
         records = self.store.read()
-        context = self.context(task_id, webapp_id, records.get(task_id), refresh_key=True)
-        webapp_id = context.get('webapp_id', str(webapp_id or ''))
-        try:
-            if not context.get('api_key'):
-                raise RuntimeError('No API key is available for this task site')
-            reply = self._api().cancel_task(context['api_key'], task_id,
-                                           base_url=context['base_url'], timeout=15)
-            self._validate(reply)
-        except Exception:
-            self._status(webapp_id, task_id, 'CANCEL_FAILED')
-            return False
         with self.lock:
-            # Qt status delivery may be queued; stop a recovery without a card
-            # immediately after the server has confirmed cancellation.
-            self._confirmed_cancellations.add(task_id)
-            card = context.get('card')
-            if card is not None:
-                card._rh_cancelled = True
-        self._status(webapp_id, task_id, 'CANCELED')
+            if self.receipts_finished(task_id):
+                return False
+            context = self.context(task_id, webapp_id, records.get(task_id), refresh_key=True)
+            if not context.get('webapp_id'):
+                return False
+            if context.get('cancel_requested'):
+                retry_available = (context.get('cancel_retry_available') or
+                    (context.get('status') == 'CANCEL_FAILED' and
+                     context.get('cancel_attempts', 0) > len(self.cancel_delays)))
+                if not retry_available:
+                    return True
+            context.update(cancel_requested=True, cancel_attempts=0, cancel_retry_at=0,
+                           cancel_generation=context.get('cancel_generation', 0) + 1,
+                           cancel_acknowledged=False, cancel_retry_available=False, status='CANCELING')
+            # Write before exposing cancellation or scheduling a network request.
+            self.store.put(task_id, context)
+            self.owner._rh_task_contexts[task_id] = context
+            self._download_retry_due.pop(task_id, None)
+            self._poll_due.pop(task_id, None)
+            if self._pending_downloads.pop(task_id, None) is not None:
+                self.owner._rh_recovering_tasks.discard(task_id)
+        self._status(context['webapp_id'], task_id,
+                     'CANCELING' if context.get('api_key') else 'WAITING_FOR_KEY')
+        self.wake_event.set()
+        self.recover_once(background=True, respect_backoff=True)
         return True
+
+    def _recovery_stopped(self, task_id):
+        with self.lock:
+            return (self.stop_event.is_set() or getattr(self.owner, '_closing', False)
+                    or task_id in self._confirmed_cancellations
+                    or self.owner._rh_status_entries.get(task_id) in TERMINAL_STATUSES)
+
+    def _cancel_confirmed(self, task_id, context):
+        if self._recovery_stopped(task_id):
+            return False
+        self._status(context['webapp_id'], task_id, 'CANCELED')
+        with self.lock:
+            self._confirmed_cancellations.add(task_id)
+            self._pending_downloads.pop(task_id, None)
+        return True
+
+    def _cancel_status_result(self, task_id, context, remote_status):
+        context = self.context(task_id, persisted=context, refresh_key=True)
+        # The documented status vocabulary has no separate canceled value;
+        # FAILED also confirms that generation has stopped after cancel intent.
+        if remote_status in {'CANCELED', 'CANCELLED', 'FAILED', 'SUCCESS'}:
+            confirmed = self._cancel_confirmed(task_id, context)
+            if confirmed and remote_status == 'SUCCESS':
+                self._note(context['webapp_id'], task_id, '云端已完成，本地后续处理已取消')
+            return confirmed
+        exhausted = context.get('cancel_attempts', 0) > len(self.cancel_delays)
+        with self.lock:
+            latest = self.owner._rh_task_contexts.get(task_id, {})
+            if latest.get('cancel_generation', 0) != context.get('cancel_generation', 0):
+                return False
+            # Publish retry eligibility before any synchronous observer/Qt
+            # callback sees CANCEL_FAILED. The UI status map can lag that event.
+            context['cancel_retry_available'] = exhausted
+            context['status'] = 'CANCEL_FAILED' if exhausted else 'CANCELING'
+            self.store.put(task_id, context)
+            self.owner._rh_task_contexts[task_id] = context
+        self._status(context['webapp_id'], task_id, 'CANCEL_FAILED' if exhausted else 'CANCELING')
+        with self.lock:
+            still_exhausted = self.owner._rh_task_contexts.get(task_id, {}).get('cancel_retry_available')
+        if exhausted and still_exhausted and context.get('cancel_acknowledged'):
+            self._note(context['webapp_id'], task_id, '取消已受理，云端状态尚未确认；可再次取消')
+        return False
+
+    def _cancel_step(self, task_id, context):
+        """At most one cancel and one confirmation query in this status slot."""
+        if self._recovery_stopped(task_id):
+            return
+        context = self.context(task_id, persisted=context, refresh_key=True)
+        if not context.get('api_key'):
+            self._status(context['webapp_id'], task_id, 'WAITING_FOR_KEY')
+            return
+        attempts = context.get('cancel_attempts', 0)
+        if attempts <= len(self.cancel_delays) and time.time() >= context.get('cancel_retry_at', 0):
+            context['cancel_attempts'] = attempts + 1
+            delay = self.cancel_delays[min(attempts, len(self.cancel_delays) - 1)] if self.cancel_delays else 0
+            context['cancel_retry_at'] = time.time() + delay
+            with self.lock:
+                latest = self.owner._rh_task_contexts.get(task_id, {})
+                if latest.get('cancel_generation', 0) != context.get('cancel_generation', 0):
+                    return  # A manual retry superseded this waiting status pass.
+                self.store.put(task_id, context)
+                self.owner._rh_task_contexts[task_id] = context
+            self._status(context['webapp_id'], task_id, 'CANCELING')
+            try:
+                reply = self._validate(self._api().cancel_task(
+                    context['api_key'], task_id, base_url=context['base_url'], timeout=15))
+                context['cancel_acknowledged'] = True
+                with self.lock:
+                    latest = self.owner._rh_task_contexts.get(task_id, {})
+                    if latest.get('cancel_generation', 0) == context.get('cancel_generation', 0):
+                        self.store.put(task_id, context)
+                        self.owner._rh_task_contexts[task_id] = context
+            except Exception:
+                pass  # A timeout can still have canceled the job; query it.
+        if self._recovery_stopped(task_id):
+            return
+        remote_status = ''
+        try:
+            reply = self._validate(self._api().get_status(
+                context['api_key'], task_id, base_url=context['base_url'], timeout=15))
+            value = reply.get('data')
+            remote_status = value.strip().upper() if isinstance(value, str) else ''
+        except Exception:
+            # Even an acknowledged cancel plus 805/807 cannot prove a terminal
+            # state: those errors can also mean unknown status or inaccessible ID.
+            pass
+        if not self._recovery_stopped(task_id):
+            self._cancel_status_result(task_id, context, remote_status)
 
     def has_active_app(self, webapp_id):
         with self.lock:
@@ -347,6 +598,7 @@ class TaskLifecycle:
             return (self.stop_event.is_set() or getattr(self.owner, '_closing', False)
                     or task_id in self._confirmed_cancellations
                     or self.owner._rh_status_entries.get(task_id) in TERMINAL_STATUSES
+                    or context.get('cancel_requested', False)
                     or bool(getattr(context.get('card'), '_rh_cancelled', False)))
 
     def receipts_finished(self, task_id):
@@ -357,6 +609,9 @@ class TaskLifecycle:
                     or self.owner._rh_status_entries.get(task_id) in TERMINAL_STATUSES)
 
     def _note(self, webapp_id, task_id, text):
+        service = getattr(self.owner, '_rh_execution_service', None)
+        if service is not None:
+            service.lifecycle_event(str(webapp_id), f'TASK_DOWNLOAD_NOTE:{task_id}:{text}')
         self.emit(str(webapp_id), f'TASK_DOWNLOAD_NOTE:{task_id}:{text}')
 
     def _retry_note(self, webapp_id, task_id, details):
@@ -372,10 +627,9 @@ class TaskLifecycle:
         self._note(webapp_id, task_id,
                    f'等待 {delay:g} 秒后进行第 {attempt}/{maximum} 次下载：{reason}')
 
-    def _recover_task(self, task_id, context):
+    def _download_task(self, task_id, context, *, background=False):
         from aetherloom_core.rh_outputs import OutputDownloadCancelled, OutputDownloadError, cleanup_output_receipts
         webapp_id = context['webapp_id']
-        phase = 'poll'
         output_records = None
 
         def track_paths(paths):
@@ -386,61 +640,52 @@ class TaskLifecycle:
         try:
             if self._cancelled(task_id):
                 return
-            self.emit(webapp_id, 'TASK_ADD:' + task_id)
+            # Refresh account lookup and callbacks, preserving the task's frozen
+            # decoder configuration rather than reading current App settings.
+            context = self.context(task_id, persisted=context, refresh_key=True)
+            service = getattr(self.owner, '_rh_execution_service', None)
+            if service is not None:
+                context = service.adopt_task(task_id, context)
             if not context.get('api_key'):
                 self._status(webapp_id, task_id, 'WAITING_FOR_KEY')
                 return
-            reply = self._validate(self._api().get_status(
-                context['api_key'], task_id, base_url=context['base_url'], timeout=15))
-            remote_status = reply.get('data')
-            remote_status = remote_status.strip().upper() if isinstance(remote_status, str) else ''
-            if remote_status == 'CANCELLED':
-                remote_status = 'CANCELED'
-            if self._cancelled(task_id):
-                return
-            if remote_status == 'SUCCESS':
-                phase = 'download'
-                self._status(webapp_id, task_id, 'DOWNLOADING')
-                with self.lock:
-                    already_downloaded = task_id in self.owner._rh_downloaded_tasks
-                if not already_downloaded:
-                    # Fetch on every recovery, including retries, to refresh
-                    # short-lived signed URLs before entering the downloader.
-                    outputs = self._validate(self._api().get_outputs(
-                        context['api_key'], task_id, base_url=context['base_url'], timeout=30))
-                    output_records = outputs.get('data')
-                    if self._cancelled(task_id):
-                        return
-                    if self.downloader is None:
-                        from aetherloom_core.rh_outputs import download_outputs
-                        self.downloader = download_outputs
-                    paths = self.downloader(task_id, outputs.get('data'), context['output_dir'],
-                        cancelled=lambda: self._cancelled(task_id),
-                        on_retry=lambda details: self._retry_note(webapp_id, task_id, details),
-                        **({'decoded_token': context['decode_token']} if context.get('decode_token') else {}))
-                    track_paths(paths)
-                    if self._cancelled(task_id):
-                        return
-                    callback = context.get('on_downloaded')
-                    if callable(callback):
-                        callback(paths)
-                    if self._cancelled(task_id):
-                        return
-                with self.lock:
-                    if self._cancelled(task_id):
-                        return
-                    self.owner._rh_downloaded_tasks.add(task_id)
-                    self._download_retry_attempts.pop(task_id, None)
-                    self._download_retry_due.pop(task_id, None)
-                self._status(webapp_id, task_id, 'SUCCESS')
-                if not already_downloaded:
-                    if not cleanup_output_receipts(task_id, outputs.get('data'), context['output_dir']):
-                        self._note(webapp_id, task_id, '输出已完成，部分校验记录暂未清理')
-            elif remote_status in ('FAILED', 'CANCELED', 'QUEUED', 'RUNNING'):
-                self._status(webapp_id, task_id, remote_status)
-                self.poll_progress(task_id, webapp_id, context['api_key'], context['base_url'], remote_status)
-            else:
-                self._status(webapp_id, task_id, 'POLL_TIMEOUT')
+            self._status(webapp_id, task_id, 'DOWNLOADING')
+            with self.lock:
+                already_downloaded = task_id in self.owner._rh_downloaded_tasks
+            if not already_downloaded:
+                # Signed output URLs are fetched here, not when entering the
+                # pending queue. Long decodes never leave queued stale URLs.
+                outputs = self._validate(self._api().get_outputs(
+                    context['api_key'], task_id, base_url=context['base_url'], timeout=30))
+                output_records = outputs.get('data')
+                if self._cancelled(task_id):
+                    return
+                if self.downloader is None:
+                    from aetherloom_core.rh_outputs import download_outputs
+                    self.downloader = download_outputs
+                paths = self.downloader(task_id, outputs.get('data'), context['output_dir'],
+                    cancelled=lambda: self._cancelled(task_id),
+                    on_retry=lambda details: self._retry_note(webapp_id, task_id, details),
+                    **({'decoded_token': context['decode_token']} if context.get('decode_token') else {}))
+                track_paths(paths)
+                if self._cancelled(task_id):
+                    return
+                callback = context.get('on_downloaded')
+                if callable(callback):
+                    callback(paths)
+                if self._cancelled(task_id):
+                    return
+            with self.lock:
+                if self._cancelled(task_id):
+                    return
+                self._download_retry_attempts.pop(task_id, None)
+                self._download_retry_due.pop(task_id, None)
+            self._status(webapp_id, task_id, 'SUCCESS')
+            with self.lock:
+                self.owner._rh_downloaded_tasks.add(task_id)
+            if not already_downloaded:
+                if not cleanup_output_receipts(task_id, outputs.get('data'), context['output_dir']):
+                    self._note(webapp_id, task_id, '输出已完成，部分校验记录暂未清理')
         except OutputDownloadCancelled as exc:
             track_paths(exc.completed_paths)
             if not self._cancelled(task_id):
@@ -450,31 +695,131 @@ class TaskLifecycle:
                 track_paths(exc.completed_paths)
             if self._cancelled(task_id):
                 return
-            if phase == 'download':
+            if getattr(exc, 'waiting_for_secret', False):
+                self._status(webapp_id, task_id, 'WAITING_FOR_SECRET')
+                self._note(webapp_id, task_id, getattr(exc, 'recovery_message',
+                           '请补充本次任务的本地解码密码后继续'))
                 with self.lock:
-                    count = self._download_retry_attempts.get(task_id, 0) + 1
-                    self._download_retry_attempts[task_id] = count
-                    delay = min(300, 30 * 2 ** min(count - 1, 4))
-                    self._download_retry_due[task_id] = time.monotonic() + delay
-                self._status(webapp_id, task_id, 'DOWNLOAD_FAILED')
-                # Downloader errors are sanitized at their boundary. Other
-                # exceptions can contain credentials/URLs; expose only the type.
-                detail = str(exc) if isinstance(exc, OutputDownloadError) else type(exc).__name__
-                self._note(webapp_id, task_id,
-                           f'输出下载失败，{delay} 秒后重试：{detail[:240]}')
-            else:
-                self._status(webapp_id, task_id, 'POLL_TIMEOUT')
+                    self._download_retry_due[task_id] = time.monotonic() + 30
+                return
+            with self.lock:
+                count = self._download_retry_attempts.get(task_id, 0) + 1
+                self._download_retry_attempts[task_id] = count
+                delay = min(300, 30 * 2 ** min(count - 1, 4))
+                self._download_retry_due[task_id] = time.monotonic() + delay
+            self._status(webapp_id, task_id, 'DOWNLOAD_FAILED')
+            # Downloader errors are sanitized at their boundary. Other
+            # exceptions can contain credentials/URLs; expose only the type.
+            detail = str(exc) if isinstance(exc, OutputDownloadError) else type(exc).__name__
+            self._note(webapp_id, task_id,
+                       f'输出下载失败，{delay} 秒后重试：{detail[:240]}')
         finally:
             if output_records and self.receipts_finished(task_id):
                 cleanup_output_receipts(task_id, output_records, context['output_dir'])
             with self.lock:
                 self.owner._rh_recovering_tasks.discard(task_id)
-                self._recovery_workers.pop(task_id, None)
+                self._download_workers.pop(task_id, None)
                 if output_records:
                     self._receipt_maintenance_due = 0
+                if self.owner._rh_task_contexts.get(task_id, {}).get('cancel_requested'):
+                    self.wake_event.set()
+            if background:
+                self._start_downloads()
+
+    def _start_downloads(self):
+        """At most two download/decoder threads; waiting items own no thread."""
+        while True:
+            with self.lock:
+                if self.stop_event.is_set() or getattr(self.owner, '_closing', False):
+                    for task_id in self._pending_downloads:
+                        self.owner._rh_recovering_tasks.discard(task_id)
+                    self._pending_downloads.clear()
+                    return
+                if len(self._download_workers) >= 2 or not self._pending_downloads:
+                    return
+                task_id, context = self._pending_downloads.popitem(last=False)
+                if self._cancelled(task_id):
+                    self.owner._rh_recovering_tasks.discard(task_id)
+                    continue
+                worker = threading.Thread(target=self._download_task,
+                    args=(task_id, context), kwargs={'background': True},
+                    name='rh-download-' + task_id[:24], daemon=True)
+                self._download_workers[task_id] = worker
+            try:
+                worker.start()
+            except Exception:
+                with self.lock:
+                    self._download_workers.pop(task_id, None)
+                    self.owner._rh_recovering_tasks.discard(task_id)
+                    self._download_retry_due[task_id] = time.monotonic() + 30
+                self._status(context['webapp_id'], task_id, 'DOWNLOAD_FAILED')
+
+    def _recover_task(self, task_id, context, *, background_download=False):
+        """One cloud status request; a successful task moves to the download pool."""
+        webapp_id = context['webapp_id']
+        deferred = False
+        try:
+            if self._recovery_stopped(task_id):
+                return
+            self.emit(webapp_id, 'TASK_ADD:' + task_id)
+            context = self.context(task_id, persisted=context, refresh_key=True)
+            if context.get('cancel_requested'):
+                self._cancel_step(task_id, context)
+                return
+            if not context.get('api_key'):
+                self._status(webapp_id, task_id, 'WAITING_FOR_KEY')
+                return
+            if is_download_recovery(context):
+                remote_status = 'SUCCESS'  # Generation is already confirmed; only fetch fresh output URLs.
+            else:
+                reply = self._validate(self._api().get_status(
+                    context['api_key'], task_id, base_url=context['base_url'], timeout=15))
+                remote_status = reply.get('data')
+            remote_status = remote_status.strip().upper() if isinstance(remote_status, str) else ''
+            if remote_status == 'CANCELLED':
+                remote_status = 'CANCELED'
+            if self._recovery_stopped(task_id):
+                return
+            context = self.context(task_id, persisted=context, refresh_key=True)
+            if context.get('cancel_requested'):
+                self._cancel_status_result(task_id, context, remote_status)
+                self.wake_event.set()
+                return
+            if remote_status == 'SUCCESS':
+                context['cloud_success'] = True
+                with self.lock:
+                    self.store.put(task_id, context)
+                    self.owner._rh_task_contexts[task_id] = context
+                self._status(webapp_id, task_id, 'DOWNLOADING')
+                if background_download:
+                    with self.lock:
+                        if not self._cancelled(task_id):
+                            self._pending_downloads[task_id] = context
+                            deferred = True
+                    self._start_downloads()
+                else:
+                    self._download_task(task_id, context)
+            elif remote_status in ('FAILED', 'CANCELED', 'QUEUED', 'RUNNING'):
+                self._status(webapp_id, task_id, remote_status)
+                self.poll_progress(task_id, webapp_id, context['api_key'], context['base_url'], remote_status)
+            else:
+                self._status(webapp_id, task_id, 'POLL_TIMEOUT')
+        except Exception:
+            if not self._cancelled(task_id):
+                self._status(webapp_id, task_id, 'POLL_TIMEOUT')
+        finally:
+            with self.lock:
+                self._recovery_workers.pop(task_id, None)
+                if not deferred:
+                    self.owner._rh_recovering_tasks.discard(task_id)
+                if not self._recovery_stopped(task_id):
+                    self._poll_due[task_id] = time.monotonic() + max(.01, self.interval)
+            # Fill the freed slot with the next due task immediately. Completed
+            # tasks have their own due time, so this never hot-polls two heads.
+            self.wake_event.set()
 
     def recover_once(self, *, background=False, respect_backoff=False):
-        """Manual recovery is immediate; the automatic loop uses two workers.
+        """Manual recovery is immediate; cloud polls and downloads have two slots each.
 
         Claims happen before thread creation, so repeated passes cannot create
         duplicate work or an unbounded queue while downloads are slow.
@@ -490,26 +835,61 @@ class TaskLifecycle:
                     if task_id == self._recovery_cursor:
                         pending = pending[index + 1:] + pending[:index + 1]
                         break
+            # Every admitted QUEUED slot can release a waiting submission.
+            # Prioritize all of them in admission order, not only the first;
+            # per-task due times and the bounded status pool still apply.
+            submission_queue = getattr(self.owner, '_rh_submission_queue', None)
+            if submission_queue is not None:
+                with submission_queue.condition:
+                    awaiting = dict(submission_queue._awaiting_start)
+                if awaiting:
+                    pending = (sorted((item for item in pending if item[0] in awaiting),
+                                      key=lambda item: awaiting[item[0]]) +
+                               [item for item in pending if item[0] not in awaiting])
         for task_id, record in pending:
             if self.stop_event.is_set() or getattr(self.owner, '_closing', False):
                 break
             with self.lock:
                 if (task_id in self.owner._rh_live_task_ids or
-                        task_id in self.owner._rh_recovering_tasks or self._cancelled(task_id)):
+                        task_id in self.owner._rh_recovering_tasks or self._recovery_stopped(task_id)):
                     continue
-                if respect_backoff and self._download_retry_due.get(task_id, 0) > time.monotonic():
+                context = self.context(task_id, persisted=record, refresh_key=True)
+                cancel_pending = context.get('cancel_requested')
+                cancel_retry = (cancel_pending and context.get('api_key') and
+                                context.get('cancel_attempts', 0) <= len(self.cancel_delays))
+                if respect_backoff and not cancel_retry and self._poll_due.get(task_id, 0) > time.monotonic():
                     continue
-                if background and len(self.owner._rh_recovering_tasks) >= 2:
+                if (respect_backoff and cancel_pending and context.get('api_key') and
+                        context.get('cancel_attempts', 0) <= len(self.cancel_delays) and
+                        context.get('cancel_retry_at', 0) > time.time()):
                     continue
+                if respect_backoff and not cancel_pending and self._download_retry_due.get(task_id, 0) > time.monotonic():
+                    continue
+                if background and len(self._recovery_workers) >= 2:
+                    break
                 self.owner._rh_recovering_tasks.add(task_id)
                 if background:
                     self._recovery_cursor = task_id
+                    # Reserve the poll slot before callbacks/worker creation;
+                    # concurrent manual passes cannot overbook the pool.
+                    self._recovery_workers[task_id] = None
                 if task_id not in self.owner._rh_task_contexts:
                     self.recovered_task_ids.add(task_id)
-                context = self.context(task_id, persisted=record, refresh_key=True)
                 self.owner._rh_task_contexts[task_id] = context
+            service = getattr(self.owner, '_rh_execution_service', None)
+            if service is not None:
+                try:
+                    context = service.adopt_task(task_id, context)
+                    with self.lock:
+                        self.owner._rh_task_contexts[task_id] = context
+                except Exception:
+                    with self.lock:
+                        self.owner._rh_recovering_tasks.discard(task_id)
+                        self._recovery_workers.pop(task_id, None)
+                    continue
             if background:
                 worker = threading.Thread(target=self._recover_task, args=(task_id, context),
+                                          kwargs={'background_download': True},
                                           name='rh-recover-' + task_id[:24], daemon=True)
                 with self.lock:
                     self._recovery_workers[task_id] = worker
@@ -596,14 +976,30 @@ class TaskLifecycle:
 
     def run(self):
         while not self.stop_event.is_set():
+            self.wake_event.clear()
             try:
                 self._schedule_receipt_maintenance()
                 self.recover_once(background=True, respect_backoff=True)
             except Exception:
                 # A temporarily unavailable task file must not kill recovery.
                 pass
-            if self.stop_event.wait(self.interval):
-                break
+            delay = self.interval
+            with self.lock:
+                now = time.monotonic()
+                for task_id, due in self._poll_due.items():
+                    if due > now and task_id not in self.owner._rh_recovering_tasks:
+                        delay = min(delay, max(.01, due - now))
+                for task_id, context in self.owner._rh_task_contexts.items():
+                    if (context.get('cancel_requested') and context.get('api_key') and
+                            context.get('cancel_attempts', 0) <= len(self.cancel_delays) and
+                            not self._recovery_stopped(task_id) and task_id not in self.owner._rh_recovering_tasks):
+                        delay = min(delay, max(.05, context.get('cancel_retry_at', 0) - time.time()))
+            self.wake_event.wait(delay)
 
     def stop(self):
         self.stop_event.set()
+        self.wake_event.set()
+        with self.lock:
+            for task_id in self._pending_downloads:
+                self.owner._rh_recovering_tasks.discard(task_id)
+            self._pending_downloads.clear()

@@ -1,8 +1,8 @@
-"""FIFO retries for RunningHub submissions rejected while the service is busy.
+"""One FIFO for every activated App submission, independent of its source.
 
-Click/batch order is reserved before uploads start. Initial requests may overlap,
-but retries follow that order regardless of response timing. A head stays first
-until confirmed running, exhausted, or cancelled; followers have no retry polling loop.
+The configured first N tasks upload, try credentials and submit/retry. Each
+admitted task keeps its slot until confirmed running or terminal; running cloud
+tasks continue concurrently in the independent lifecycle status/download pools.
 """
 
 import threading
@@ -27,6 +27,8 @@ def get_submission_queue(owner):
 
 
 class SubmissionQueue:
+    MAX_ADMISSION_LIMIT = 16
+
     def __init__(self, owner):
         self.owner = owner
         if getattr(owner, '_rh_retry_lock', None) is None:
@@ -40,9 +42,56 @@ class SubmissionQueue:
         self._next_order = 0
         self._pending_orders = set()
         self._awaiting_start = {}
+        self._admitted_orders = set()
+        self._dispatch_listeners = []
+        self.admission_limit = 1
+        self.set_admission_limit(getattr(owner, 'rh_retry_head_count', 1))
+
+    def set_admission_limit(self, value):
+        """Resize safely: existing admissions survive a reduction of the limit."""
+        try:
+            limit = max(1, min(self.MAX_ADMISSION_LIMIT, int(value)))
+        except (ValueError, TypeError, OverflowError):
+            limit = 1
+        with self.condition:
+            self.admission_limit = limit
+            self.condition.notify_all()
+        self._notify_dispatch()
+        return limit
+
+    def subscribe_dispatch(self, callback):
+        with self.condition:
+            self._dispatch_listeners.append(callback)
+        def unsubscribe():
+            with self.condition:
+                if callback in self._dispatch_listeners:
+                    self._dispatch_listeners.remove(callback)
+        return unsubscribe
+
+    def _notify_dispatch(self):
+        # Never invoke a service callback while holding the queue lock.
+        with self.condition:
+            callbacks = tuple(self._dispatch_listeners)
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                pass
+
+    def _eligible(self, order):
+        if order in self._admitted_orders:
+            return True
+        return (order in self._pending_orders and
+                len(self._admitted_orders) < self.admission_limit and
+                not any(previous < order and previous not in self._admitted_orders
+                        for previous in self._pending_orders))
+
+    def can_dispatch(self, order):
+        with self.condition:
+            return not self.closed and self._eligible(order)
 
     def reserve_orders(self, count):
-        """Capture click/batch order before uploads or worker scheduling race."""
+        """Reserve only actual submissions, never unactivated workflow nodes."""
         with self.condition:
             orders = tuple(range(self._next_order, self._next_order + count))
             self._next_order += count
@@ -54,17 +103,32 @@ class SubmissionQueue:
             if order in self._awaiting_start.values():
                 return  # Returning from submit or pausing its worker is not RUNNING.
             self._pending_orders.discard(order)
+            self._admitted_orders.discard(order)
             self.condition.notify_all()
+        self._notify_dispatch()
+
+    def release_orders(self, orders):
+        """Drop local waiting positions in one wake-up during bulk shutdown."""
+        with self.condition:
+            retained = set(self._awaiting_start.values())
+            released = set(orders) - retained
+            self._pending_orders.difference_update(released)
+            self._admitted_orders.difference_update(released)
+            self.condition.notify_all()
+        self._notify_dispatch()
 
     def task_status(self, task_id, status):
         """Advance on confirmed execution (or its outcome), never on taskId alone."""
-        if status not in {'RUNNING', 'DOWNLOADING', 'DOWNLOAD_FAILED', 'SUCCESS', 'FAILED', 'CANCELED'}:
+        if status not in {'RUNNING', 'DOWNLOADING', 'DOWNLOAD_FAILED', 'SUCCESS', 'FAILED', 'CANCELED', 'INTERRUPTED', 'UNKNOWN'}:
             return
         with self.condition:
             order = self._awaiting_start.pop(str(task_id), None)
             if order is not None:
                 self._pending_orders.discard(order)
+                self._admitted_orders.discard(order)
                 self.condition.notify_all()
+        if order is not None:
+            self._notify_dispatch()
 
     def waiting_for_start(self, order):
         with self.condition:
@@ -84,15 +148,18 @@ class SubmissionQueue:
             removed = [item for item in self.owner._rh_retry_queue if predicate(item)]
             for item in removed:
                 item['_cancelled'] = True
-                self._pending_orders.discard(item.get('_submission_order'))
-                card = item.get('card')
-                if card is not None:
-                    card._rh_cancelled = True
+                if not item.get('_submitting'):
+                    self._pending_orders.discard(item.get('_submission_order'))
+                    self._admitted_orders.discard(item.get('_submission_order'))
+                # A canceled POST can still return an accepted taskId. Its
+                # gate stays until cloud start/termination is confirmed; card
+                # flags are projections, never evidence of cloud cancellation.
             removed_ids = {id(item) for item in removed}
             self.owner._rh_retry_queue[:] = [item for item in self.owner._rh_retry_queue
                                             if id(item) not in removed_ids]
             self.condition.notify_all()
-            return removed
+        self._notify_dispatch()
+        return removed
 
     def cancel_all(self):
         return self.cancel_matching(lambda item: True)
@@ -101,6 +168,7 @@ class SubmissionQueue:
         """Wake first submissions waiting for a slot after their card is cancelled."""
         with self.condition:
             self.condition.notify_all()
+        self._notify_dispatch()
 
     def close(self):
         with self.condition:
@@ -110,6 +178,7 @@ class SubmissionQueue:
             self.owner._rh_retry_queue.clear()
             self._pending_orders.clear()
             self._awaiting_start.clear()
+            self._admitted_orders.clear()
             self.condition.notify_all()
 
     def submit(self, request, entry, *, max_retries, delay, concurrency, cancelled,
@@ -134,21 +203,15 @@ class SubmissionQueue:
                             items = self.owner._rh_retry_queue
                             if not any(item is entry for item in items):
                                 raise SubmissionCancelled('Submission removed from retry queue')
-                            if (not items or items[0] is not entry
-                                    or any(previous < order for previous in self._pending_orders)):
-                                # Followers have no retry timer: only a queue change wakes them.
-                                self.condition.wait()
-                                continue
                             remaining = due - time.monotonic()
                             if remaining > 0:
                                 self.condition.wait(remaining)
                                 continue
-                        elif (any(item['_submission_order'] < order for item in self.owner._rh_retry_queue)
-                              or any(previous < order for previous in self._awaiting_start.values())):
-                            # New submissions cannot take slots ahead of an older retry.
+                        if not self._eligible(order):
                             self.condition.wait()
                             continue
                         if self.owner._rh_retry_active < max(1, int(concurrency)):
+                            self._admitted_orders.add(order)
                             self.owner._rh_retry_active += 1
                             entry['_submitting'] = True
                             break
@@ -162,6 +225,7 @@ class SubmissionQueue:
                         raise SubmissionCancelled('Submission cancelled')
                     if on_submit is not None:
                         on_submit()
+                    self._notify_dispatch()
                     response = request()
                     if isinstance(response, dict):
                         retry_code = response.get('code', response.get('errcode', response.get('status')))
@@ -169,13 +233,16 @@ class SubmissionQueue:
                     error = exc
                 except Exception as exc:
                     error = exc
-                    retry_code = getattr(getattr(exc, 'response', None), 'status_code', None)
+                    # HTTP 415/421 are media/misdirection errors, not the RH
+                    # business envelope's busy codes. An ambiguous POST is final.
                 try:
                     try:
                         retry_code = int(retry_code)
                     except (TypeError, ValueError, OverflowError):
                         retry_code = None
-                    if retry_code in (415, 421) and attempt < max_retries:
+                    from api_calls.call_rh import accepted_task_id
+                    task_id = accepted_task_id(response)
+                    if not task_id and retry_code in (415, 421) and attempt < max_retries:
                         with self.condition:
                             if self._stopped(cancelled) or entry.get('_cancelled', False):
                                 raise SubmissionCancelled('Submission cancelled')
@@ -191,15 +258,10 @@ class SubmissionQueue:
                         continue
                     if error is not None:
                         raise error
-                    if isinstance(response, dict) and str(response.get('code')) == '0':
-                        data = response.get('data')
-                        task_id = data.get('taskId') if isinstance(data, dict) else None
-                        task_id = task_id if task_id is not None else response.get('taskId')
-                        if (isinstance(task_id, (str, int)) and not isinstance(task_id, bool)
-                                and str(task_id).strip()):
-                            with self.condition:
-                                if not self.closed:
-                                    self._awaiting_start[str(task_id).strip()] = order
+                    if task_id:
+                        with self.condition:
+                            if not self.closed:
+                                self._awaiting_start[task_id] = order
                     # An accepted task ID must reach the caller even during close/cancel.
                     return response
                 finally:
@@ -211,6 +273,8 @@ class SubmissionQueue:
             with self.condition:
                 if order not in self._awaiting_start.values():
                     self._pending_orders.discard(order)
+                    self._admitted_orders.discard(order)
                 if queued:
                     self._remove(entry)
                 self.condition.notify_all()
+            self._notify_dispatch()

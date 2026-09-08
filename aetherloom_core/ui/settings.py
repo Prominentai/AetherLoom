@@ -65,6 +65,7 @@ class SettingsMixin:
                 'app_page_cache_limit': int(getattr(self, 'app_cache_spin', None).value() if hasattr(self, 'app_cache_spin') else getattr(self, 'app_page_cache_limit', 20)),
                 'rh_retry_max': int(getattr(self, 'rh_retry_max', 100)),
                 'rh_retry_delay': int(getattr(self, 'rh_retry_delay', 5)),
+                'rh_retry_head_count': int(getattr(self, 'rh_retry_head_count', 1)),
                 'autocomplete': completion_options(getattr(self, 'settings', None)),
                 'local_mode': int(self.local_mode_group.checkedId()) if hasattr(self, 'local_mode_group') and self.local_mode_group is not None else None,
                 'window': win,

@@ -10,9 +10,11 @@ from aetherloom_core.rh_progress import progress_text
 
 LABELS = {'QUEUED': '云端排队', 'RUNNING': '运行中', 'DOWNLOADING': '下载中',
           'DOWNLOAD_FAILED': '等待下载重试', 'POLL_TIMEOUT': '等待状态重查',
-          'CANCEL_FAILED': '取消未确认', 'WAITING_FOR_KEY': '等待密钥',
+          'CANCELING': '取消中', 'CANCEL_FAILED': '取消未确认',
+          'WAITING_FOR_KEY': '等待密钥', 'WAITING_FOR_SECRET': '等待解码密码',
           'SUCCESS': '已完成', 'FAILED': '失败', 'CANCELED': '已取消',
-          'REMOVED': '已移除', 'LOCAL_WAIT': '等待提交', 'SUBMITTING': '准备 / 提交中'}
+          'REMOVED': '已移除', 'LOCAL_WAIT': '等待提交', 'SUBMITTING': '准备 / 提交中',
+          'UNKNOWN': '提交结果未知', 'PAUSED': '已暂停', 'INTERRUPTED': '会话已中断'}
 ACTIVE_UI = ACTIVE_STATUSES | {'LOCAL_WAIT', 'SUBMITTING'}
 
 
@@ -425,6 +427,9 @@ class Dashboard(QtCore.QObject):
         def title(wid):
             return str(getattr(buttons.get(wid), '_full_title', '') or '应用 ' + wid)
         rows = []
+        service = getattr(self.owner, '_rh_execution_service', None)
+        records = service.record_headers() if service is not None else []
+        records_by_run = {record['run_id']: record for record in records}
         lock = getattr(self.owner, '_rh_retry_lock', None)
         if lock is not None:
             with lock:
@@ -440,6 +445,10 @@ class Dashboard(QtCore.QObject):
             note = ('正在提交请求' if entry.get('_submitting') else
                     ('等待前序任务开始运行' if waiting_start else '队首 · 等待重试')
                     if i == 0 else f'等待第 {i + 1} 位 · 由队首依次提交')
+            shared = records_by_run.get(entry.get('run_id'))
+            if shared is not None:
+                status = shared.get('status', status)
+                note = str(shared.get('message') or '已获得重试名额')
             rows.append(dict(key='local:' + str(id(entry)), wid=wid, title=title(wid), status=status, tid='', note=note))
             card = entry.get('card')
             if card is not None and not sip.isdeleted(card) and not getattr(card, '_task_id', None):
@@ -449,9 +458,10 @@ class Dashboard(QtCore.QObject):
                 if widget is not None:
                     widget.set_message(note)
         waiting_cards = {id(entry.get('card')) for entry in waiting}
+        waiting_runs = {entry.get('run_id') for entry in waiting if entry.get('run_id')}
         for card in list(getattr(self.owner, '_rh_local_cards', ())):
             if (sip.isdeleted(card) or id(card) in waiting_cards or getattr(card, '_task_id', None)
-                    or not getattr(card, '_webapp_id', None)):
+                    or getattr(card, '_rh_run_id', None) or not getattr(card, '_webapp_id', None)):
                 continue
             wid = str(getattr(card, '_webapp_id', '') or '')
             state = getattr(card, '_rh_display_status', 'SUBMITTING')
@@ -459,6 +469,14 @@ class Dashboard(QtCore.QObject):
             note = widget.label.text() if widget is not None else '准备素材或提交请求，等待云端任务 ID'
             rows.append(dict(key='preparing:' + str(id(card)), wid=wid, title=title(wid), status=state,
                              tid='', note=note))
+        if service is not None:
+            for record in records:
+                if record.get('task_id') or record['run_id'] in waiting_runs:
+                    continue
+                wid = str(record.get('webapp_id') or '')
+                rows.append(dict(key='run:' + record['run_id'], wid=wid, title=title(wid),
+                                 status=record.get('status', 'SUBMITTING'), tid='',
+                                 note=str(record.get('message') or '准备素材或提交请求')))
         mapping = getattr(self.owner, '_rh_task_to_wid', {})
         notes = getattr(self.owner, '_rh_download_notes', {})
         for tid, status in list(getattr(self.owner, '_rh_status_entries', {}).items()):
@@ -490,8 +508,8 @@ class Dashboard(QtCore.QObject):
         for wid, button in list(buttons.items()):
             statuses = by_app.get(str(wid), [])
             active = [st for st in statuses if st in ACTIVE_UI]
-            priority = ('RUNNING', 'DOWNLOADING', 'DOWNLOAD_FAILED', 'CANCEL_FAILED', 'POLL_TIMEOUT',
-                        'WAITING_FOR_KEY', 'QUEUED', 'SUBMITTING', 'LOCAL_WAIT')
+            priority = ('RUNNING', 'DOWNLOADING', 'CANCELING', 'DOWNLOAD_FAILED', 'CANCEL_FAILED', 'POLL_TIMEOUT',
+                        'WAITING_FOR_KEY', 'WAITING_FOR_SECRET', 'QUEUED', 'SUBMITTING', 'LOCAL_WAIT')
             state = next((st for st in priority if st in active),
                          getattr(self.owner, '_rh_app_last_result', {}).get(str(wid), statuses[-1] if statuses else None))
             # A single task's node percent must not masquerade as an app-wide

@@ -1,0 +1,681 @@
+"""Lightweight graphics items for the native canvas (no per-node media players)."""
+import math
+import os
+from collections import OrderedDict
+
+from PyQt5 import QtCore, QtGui, QtWidgets
+
+from aetherloom_core.rh_ui import palette
+from aetherloom_core.media_limits import MAX_DECODE_PIXELS
+from aetherloom_core.rh_progress import draw_circular_progress, progress_percent
+from .model import input_ports, output_types
+
+
+KIND_NAMES = {'app': 'APP', 'image': '图像', 'video': '视频', 'audio': '音频',
+              'text': '文本', 'select': '结果选择', 'preview': '预览 / 保存'}
+STATUS_NAMES = {'IDLE': '就绪', 'READY': '就绪', 'WAITING': '等待上游',
+                'SKIPPED': '已跳过', 'INTERRUPTED': '会话已中断',
+                'PENDING': '等待上游',
+                'PREPARING': '准备输入',
+                'LOCAL_WAIT': '等待提交', 'SUBMITTING': '正在提交', 'QUEUED': '云端排队',
+                'RUNNING': '运行中', 'DOWNLOADING': '正在下载', 'DOWNLOAD_FAILED': '等待下载重试',
+                'SUCCESS': '已完成', 'FAILED': '失败', 'CANCELED': '已取消', 'BLOCKED': '已终止 · 上游不可用',
+                'PAUSED': '已暂停', 'UNKNOWN': '结果未知', 'REUSED': '复用结果',
+                'WAITING_FOR_KEY': '等待 API 配置', 'WAITING_FOR_SECRET': '等待解码密码',
+                'POLL_TIMEOUT': '等待查询恢复', 'CANCELING': '取消中', 'CANCEL_FAILED': '取消待确认'}
+
+
+RUNNING_STATES = frozenset({'RUNNING', 'DOWNLOADING', 'DECODING'})
+WAITING_STATES = frozenset({'PENDING', 'WAITING', 'PREPARING', 'SUBMITTING', 'LOCAL_WAIT', 'QUEUED',
+                            'DOWNLOAD_FAILED', 'WAITING_FOR_KEY', 'WAITING_FOR_SECRET',
+                            'POLL_TIMEOUT', 'CANCELING', 'CANCEL_FAILED', 'RETRYING'})
+
+
+def node_is_active(node):
+    if 'activated' in node:
+        return bool(node['activated'])
+    # Old snapshots predate the explicit dependency activation flag. A pending
+    # dependency never counts as active; submitted/running task states do.
+    return node.get('status') in (RUNNING_STATES | WAITING_STATES) - {'PENDING', 'WAITING'}
+
+
+def node_state_color(node, colors):
+    status = str(node.get('status') or 'IDLE')
+    if status == 'FAILED':
+        return colors['danger']
+    if node_is_active(node):
+        if status in RUNNING_STATES:
+            return colors['success']
+        if status in WAITING_STATES:
+            return colors['warning']
+    return None
+
+
+class _ThumbnailSignals(QtCore.QObject):
+    complete = QtCore.pyqtSignal(object, object)
+
+
+class _ThumbnailWorker(QtCore.QRunnable):
+    def __init__(self, key, signals):
+        super().__init__()
+        self.key, self.signals = key, signals
+
+    def run(self):
+        image = None
+        try:
+            reader = QtGui.QImageReader(self.key[0])
+            size = reader.size()
+            if size.isValid() and size.width() * size.height() <= MAX_DECODE_PIXELS:
+                reader.setAutoTransform(True)
+                reader.setScaledSize(size.scaled(256, 120, QtCore.Qt.KeepAspectRatio))
+                decoded = reader.read()
+                if not decoded.isNull():
+                    image = decoded
+        except Exception:
+            image = None
+        try:
+            self.signals.complete.emit(self.key, image)
+        except RuntimeError:
+            pass
+
+
+class ThumbnailCache(QtCore.QObject):
+    """Visible-only requests, two decoders, 64 small GUI-owned pixmaps."""
+    ready = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None, limit=64):
+        super().__init__(parent)
+        self.limit, self.entries = limit, OrderedDict()
+        self.pool = QtCore.QThreadPool(self)
+        self.pool.setMaxThreadCount(2)
+        self.pool.setExpiryTimeout(1000)
+        self.signals = _ThumbnailSignals(self)
+        self.signals.complete.connect(self._complete)
+        self.pending = set()
+        self.closed = False
+
+    @QtCore.pyqtSlot(object, object)
+    def _complete(self, key, decoded):
+        self.pending.discard(key)
+        if self.closed:
+            return
+        self.entries[key] = QtGui.QPixmap.fromImage(decoded) if decoded is not None else None
+        while len(self.entries) > self.limit:
+            self.entries.popitem(last=False)
+        self.ready.emit()
+
+    def close(self):
+        self.closed = True
+        self.pool.clear()
+        self.entries.clear()
+
+    def get(self, path):
+        if self.closed:
+            return None
+        try:
+            stat = os.stat(path)
+            key = (path, stat.st_size, stat.st_mtime_ns)
+        except (OSError, TypeError):
+            return None
+        if key in self.entries:
+            result = self.entries.pop(key)
+            self.entries[key] = result
+            return result
+        if key not in self.pending and len(self.pending) < 2:
+            self.pending.add(key)
+            self.pool.start(_ThumbnailWorker(key, self.signals))
+        return None
+
+
+class PortItem(QtWidgets.QGraphicsEllipseItem):
+    def __init__(self, node, key, label, kind, output=False):
+        super().__init__(-7, -7, 14, 14, node)
+        self.node_item, self.key, self.output = node, key, output
+        self.kind = kind
+        self.label = label
+        self.connected = False
+        self.setToolTip(('输出' if output else label) + ' · ' + str(kind))
+        self.setBrush(QtGui.QColor('#739bff' if output else '#7bcab4'))
+        self.setPen(QtGui.QPen(QtGui.QColor('#162032'), 2))
+        self.setZValue(5)
+        self.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+
+    def refresh_connection(self, connected=False):
+        self.connected = bool(connected)
+        colors = self.node_item.canvas_scene.colors
+        type_colors = {'image': '#6fc6a6', 'video': '#dd84bd', 'audio': '#e6b169', 'text': '#76a6ef',
+                       'number': '#aa8ce5', 'scalar': '#cbbb73', 'file': '#73bdc4', 'any': '#a2afbf'}
+        color = QtGui.QColor(type_colors.get(self.kind, colors['accent']))
+        self.setBrush(color if self.output or connected else QtGui.QColor(colors['surface']))
+        self.setPen(QtGui.QPen(color, 2))
+        if self.output:
+            self.setToolTip('结果输出 · 拖到输入端口或空白处添加下游节点')
+        else:
+            has_internal = self.node_item.node['kind'] == 'app'
+            if connected:
+                detail = ('已连接：运行时覆盖内部值；' if has_internal else '已连接上游结果；') + '拖动可改接，右键可断开'
+            else:
+                detail = '未连接：使用节点内部值；也可拖动连接输出' if has_internal else '等待连接上游结果；此输入为必填'
+            self.setToolTip(self.label + ' · ' + str(self.kind) + '\n' + detail)
+
+
+class NodeItem(QtWidgets.QGraphicsObject):
+    WIDTH = 268
+
+    def __init__(self, node, scene):
+        super().__init__()
+        self.node, self.canvas_scene = node, scene
+        self.ports = {}
+        self._start_positions = None
+        self.setFlags(self.ItemIsMovable | self.ItemIsSelectable | self.ItemSendsGeometryChanges)
+        self.setAcceptHoverEvents(True)
+        self.setCacheMode(self.NoCache)
+        ports = input_ports(node)
+        # Reserve a result area below all input ports, including Apps with many
+        # fields; result arrival then needs no geometry rebuild or moving ports.
+        self.height = max(224 if node['kind'] in ('image', 'video') else 192,
+                          198 + 25 * max(0, len(ports) - 1))
+        for index, port in enumerate(ports):
+            item = PortItem(self, port['key'], port['label'], port['type'])
+            item.setPos(0, 66 + index * 25)
+            self.ports[port['key']] = item
+        types = output_types(node)
+        self.output = PortItem(self, 'output', '结果', next(iter(types)) if len(types) == 1 else 'any', True)
+        self.output.setPos(self.WIDTH, 66)
+        self.setPos(float(node.get('x', 0)), float(node.get('y', 0)))
+
+    def boundingRect(self):
+        return QtCore.QRectF(-9, -3, self.WIDTH + 112, self.height + 8)
+
+    def shape(self):
+        shape = QtGui.QPainterPath()
+        shape.addRoundedRect(QtCore.QRectF(0, 0, self.WIDTH, self.height), 12, 12)
+        if self.node.get('decode_settings', {}).get('enabled'):
+            shape.addRect(self.decode_rect())
+        return shape
+
+    def decode_rect(self):
+        return QtCore.QRectF(self.WIDTH + 10, 94, 86, 27)
+
+    def run_rect(self):
+        return QtCore.QRectF(self.WIDTH - 66, 13, 52, 25)
+
+    def progress_rect(self):
+        return QtCore.QRectF(self.run_rect().center().x() - 19, 6, 38, 38)
+
+    def shows_progress(self):
+        return (self.node['kind'] == 'app' and node_is_active(self.node)
+                and self.node.get('status') in RUNNING_STATES | WAITING_STATES)
+
+    def itemChange(self, change, value):
+        if change == self.ItemPositionHasChanged and hasattr(self, 'canvas_scene'):
+            self.canvas_scene.update_edges(self.node['id'])
+        return super().itemChange(change, value)
+
+    def _preview_path(self):
+        if self.node.get('kind') == 'image':
+            return next(iter(self.node.get('params', {}).get('files', [])), '')
+        for result in self.node.get('results', []):
+            path = result.get('path', '') if isinstance(result, dict) else str(result)
+            if os.path.splitext(path)[1].lower() in ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'):
+                return path
+        return ''
+
+    def paint(self, painter, option, widget=None):
+        p = self.canvas_scene.colors
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        selected = self.isSelected()
+        state_color = node_state_color(self.node, p)
+        border = state_color or (p['accent'] if selected else p['border'])
+        width = (3.3 if selected else 2.3) if state_color else (2 if selected else 1)
+        painter.setPen(QtGui.QPen(QtGui.QColor(border), width))
+        painter.setBrush(QtGui.QColor(p['surface']))
+        painter.drawRoundedRect(QtCore.QRectF(0, 0, self.WIDTH, self.height), 12, 12)
+        font = painter.font()
+        font.setPixelSize(13)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QtGui.QColor(p['text']))
+        title = str(self.node.get('title') or KIND_NAMES.get(self.node['kind'], '节点'))
+        painter.drawText(QtCore.QRectF(15, 12, self.WIDTH - 90, 28), QtCore.Qt.AlignVCenter,
+                         QtGui.QFontMetrics(font).elidedText(title, QtCore.Qt.ElideRight, self.WIDTH - 91))
+        show_progress = self.shows_progress()
+        if show_progress:
+            progress_font = QtGui.QFont(font)
+            progress_font.setPixelSize(10)
+            draw_circular_progress(painter, self.progress_rect(),
+                                   progress_percent(self.node.get('status'), self.node.get('progress')),
+                                   self.node.get('status'), p, stroke=3, font=progress_font)
+        else:
+            painter.setBrush(QtGui.QColor(p['accent_soft']))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.drawRoundedRect(self.run_rect(), 5, 5)
+            font.setBold(False)
+            font.setPixelSize(11)
+            painter.setFont(font)
+            painter.setPen(QtGui.QColor(p['accent']))
+            painter.drawText(self.run_rect(), QtCore.Qt.AlignCenter, '运行')
+        font.setBold(False)
+        font.setPixelSize(11)
+        painter.setFont(font)
+        painter.setPen(QtGui.QColor(p['border']))
+        painter.drawLine(QtCore.QPointF(14, 48), QtCore.QPointF(self.WIDTH - 14, 48))
+        painter.setPen(QtGui.QColor(p['muted']))
+        for index, port in enumerate(input_ports(self.node)):
+            connected = self.ports[port['key']].connected
+            label = str(port['label']) + (' · 连线' if connected else ' · 内部值' if self.node['kind'] == 'app' else ' · 等待连接')
+            painter.drawText(QtCore.QRectF(14, 54 + index * 25, 190, 24), QtCore.Qt.AlignVCenter,
+                             QtGui.QFontMetrics(font).elidedText(label, QtCore.Qt.ElideRight, 185))
+        painter.drawText(QtCore.QRectF(self.WIDTH - 60, 54, 44, 24), QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, '结果')
+        content_top = 83 + 25 * max(0, len(self.ports) - 1)
+        content = QtCore.QRectF(14, content_top, self.WIDTH - 28, self.height - content_top - 43)
+        if content.height() > 20:
+            preview_path = self._preview_path()
+            thumb = (self.canvas_scene.thumbnails.get(preview_path)
+                     if preview_path and self.node['id'] in self.canvas_scene.thumbnail_nodes else None)
+            if thumb is not None and not thumb.isNull():
+                size = thumb.size().scaled(content.size().toSize(), QtCore.Qt.KeepAspectRatio)
+                target = QtCore.QRectF(content.x() + (content.width() - size.width()) / 2,
+                                       content.y(), size.width(), size.height())
+                painter.drawPixmap(target, thumb, QtCore.QRectF(thumb.rect()))
+            else:
+                params = self.node.get('params', {})
+                summary = str(params.get('text') or '')
+                if self.node['kind'] in ('image', 'video', 'audio'):
+                    files = params.get('files', [])
+                    summary = f'{len(files)} 个文件' + (' · ' + os.path.basename(files[0]) if files else ' · 选择或拖入素材')
+                elif self.node['kind'] == 'app':
+                    summary = f"{len(self.ports)} 个输入 · {self.node.get('run_count', 1)} 次运行"
+                elif not summary:
+                    summary = '连接上游结果' if self.ports else KIND_NAMES.get(self.node['kind'], '')
+                painter.drawText(content, QtCore.Qt.AlignVCenter | QtCore.Qt.TextWordWrap, summary[:150])
+        status = str(self.node.get('status') or 'IDLE')
+        color = state_color or (p['success'] if status in ('SUCCESS', 'REUSED') else p['muted'])
+        painter.setPen(QtGui.QColor(color))
+        label = '等待调度' if status == 'PENDING' and node_is_active(self.node) else STATUS_NAMES.get(status, status)
+        progress = self.node.get('progress')
+        if not show_progress and progress is not None and status in RUNNING_STATES:
+            label += f'  {progress_percent(status, progress)}%'
+        if (self.node.get('_ui_stale') or self.node.get('stale')) and (self.node.get('results') or status not in ('IDLE', 'READY')):
+            label += ' · 参数已修改'
+        painter.drawText(QtCore.QRectF(14, self.height - 34, self.WIDTH - 28, 24), QtCore.Qt.AlignVCenter, label)
+        if self.node.get('decode_settings', {}).get('enabled'):
+            painter.setPen(QtGui.QPen(QtGui.QColor(p['border']), 1))
+            painter.drawLine(QtCore.QPointF(self.WIDTH, 107), QtCore.QPointF(self.WIDTH + 10, 107))
+            painter.setBrush(QtGui.QColor(p['accent_soft']))
+            painter.drawRoundedRect(self.decode_rect(), 4, 4)
+            painter.setPen(QtGui.QColor(p['accent']))
+            painter.drawText(self.decode_rect(), QtCore.Qt.AlignCenter, '本地解码')
+
+    def mousePressEvent(self, event):
+        if (event.button() == QtCore.Qt.LeftButton and not self.shows_progress()
+                and self.run_rect().contains(event.pos())):
+            self.canvas_scene.run_requested.emit(self.node['id'], False)
+            event.accept()
+            return
+        if event.button() == QtCore.Qt.LeftButton and self.node.get('decode_settings', {}).get('enabled') and self.decode_rect().contains(event.pos()):
+            self.canvas_scene.clearSelection()
+            self.setSelected(True)
+            self.canvas_scene.decode_requested.emit(self.node['id'])
+            event.accept()
+            return
+        self._start_positions = {item.node['id']: (item.pos().x(), item.pos().y())
+                                 for item in self.scene().selectedItems() if isinstance(item, NodeItem)}
+        self._start_positions[self.node['id']] = (self.pos().x(), self.pos().y())
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        positions = {key: (self.canvas_scene.nodes[key].x(), self.canvas_scene.nodes[key].y())
+                     for key, before in (self._start_positions or {}).items()
+                     if key in self.canvas_scene.nodes and before != (self.canvas_scene.nodes[key].x(), self.canvas_scene.nodes[key].y())}
+        if positions:
+            self.canvas_scene.nodes_moved.emit(positions)
+        self._start_positions = None
+
+
+class EdgeItem(QtWidgets.QGraphicsPathItem):
+    def __init__(self, edge, scene):
+        super().__init__()
+        self.edge, self.canvas_scene = edge, scene
+        self.setFlag(self.ItemIsSelectable)
+        self.setZValue(-1)
+        self.update_path()
+
+    def update_path(self):
+        scene, edge = self.canvas_scene, self.edge
+        if edge['source'] not in scene.nodes or edge['target'] not in scene.nodes:
+            return
+        target = scene.nodes[edge['target']].ports.get(edge['input'])
+        if target is None:
+            return
+        start, end = scene.nodes[edge['source']].output.scenePos(), target.scenePos()
+        distance = max(60, abs(end.x() - start.x()) * .5)
+        path = QtGui.QPainterPath(start)
+        path.cubicTo(start + QtCore.QPointF(distance, 0), end - QtCore.QPointF(distance, 0), end)
+        self.setPath(path)
+        self.setToolTip({'first': '首个匹配结果', 'index': '指定结果', 'all': '全部匹配结果逐项运行'}.get(edge.get('mode'), '首个匹配结果'))
+
+    def shape(self):
+        stroker = QtGui.QPainterPathStroker()
+        stroker.setWidth(15)
+        return stroker.createStroke(self.path())
+
+    def paint(self, painter, option, widget=None):
+        self.setPen(QtGui.QPen(QtGui.QColor(self.canvas_scene.colors['accent'] if self.isSelected() else self.canvas_scene.colors['muted']), 3 if self.isSelected() else 2))
+        super().paint(painter, option, widget)
+
+
+class CanvasScene(QtWidgets.QGraphicsScene):
+    nodes_moved = QtCore.pyqtSignal(dict)
+    connect_requested = QtCore.pyqtSignal(str, str, str)
+    run_requested = QtCore.pyqtSignal(str, bool)
+    decode_requested = QtCore.pyqtSignal(str)
+    action_requested = QtCore.pyqtSignal(str)
+    add_requested = QtCore.pyqtSignal(object, object)
+    reconnect_requested = QtCore.pyqtSignal(str, str, str, str)
+    disconnect_requested = QtCore.pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.nodes, self.edges = {}, {}
+        self.colors = palette('dark')
+        self.thumbnails = ThumbnailCache(self)
+        self.thumbnails.ready.connect(self.update)
+        self.thumbnail_nodes = set()
+        self._link_port, self._draft = None, None
+        self._rewire_edge = None
+        self.setSceneRect(-20000, -20000, 40000, 40000)
+
+    def set_document(self, doc):
+        self.clear()
+        self.nodes, self.edges = {}, {}
+        self._link_port, self._draft = None, None
+        self._rewire_edge = None
+        for node in doc.get('nodes', []):
+            item = NodeItem(node, self)
+            self.nodes[node['id']] = item
+            self.addItem(item)
+        for edge in doc.get('edges', []):
+            item = EdgeItem(edge, self)
+            self.edges[edge['id']] = item
+            self.addItem(item)
+        self.refresh_ports()
+
+    def refresh_ports(self):
+        connected = {(item.edge['target'], item.edge['input']) for item in self.edges.values()}
+        for node_id, node in self.nodes.items():
+            node.output.refresh_connection()
+            for key, port in node.ports.items():
+                port.refresh_connection((node_id, key) in connected)
+
+    def refresh_nodes(self, doc):
+        for node in doc.get('nodes', []):
+            item = self.nodes.get(node['id'])
+            if item:
+                item.node = node
+                types = output_types(node)
+                item.output.kind = next(iter(types)) if len(types) == 1 else 'any'
+                item.output.refresh_connection()
+                item.setToolTip(str(node.get('error') or node.get('message') or ''))
+                item.update()
+
+    def update_edges(self, node_id):
+        for item in self.edges.values():
+            if item.edge['source'] == node_id or item.edge['target'] == node_id:
+                item.update_path()
+
+    def drawBackground(self, painter, rect):
+        painter.fillRect(rect, QtGui.QColor(self.colors['canvas']))
+        scale = abs(painter.transform().m11()) or 1
+        step = 24 if scale > .45 else 96
+        left, top = math.floor(rect.left() / step) * step, math.floor(rect.top() / step) * step
+        painter.setPen(QtGui.QPen(QtGui.QColor(self.colors['border']), 0))
+        points = [QtCore.QPointF(x, y) for x in range(int(left), int(rect.right()) + step, step)
+                  for y in range(int(top), int(rect.bottom()) + step, step)]
+        if points:
+            painter.drawPoints(*points)
+
+    def _port_at(self, pos):
+        return next((item for item in self.items(pos) if isinstance(item, PortItem)), None)
+
+    def mousePressEvent(self, event):
+        port = self._port_at(event.scenePos())
+        if event.button() == QtCore.Qt.LeftButton and port is not None:
+            self._link_port = port
+            self._rewire_edge = next((item for item in self.edges.values() if not port.output
+                                     and item.edge['target'] == port.node_item.node['id']
+                                     and item.edge['input'] == port.key), None)
+            if self._rewire_edge is not None:
+                self._rewire_edge.setOpacity(.25)
+            self._draft = self.addPath(QtGui.QPainterPath(), QtGui.QPen(QtGui.QColor(self.colors['accent']), 2, QtCore.Qt.DashLine))
+            self._draft.setZValue(10)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._link_port is not None:
+            anchor = self.nodes[self._rewire_edge.edge['source']].output if self._rewire_edge else self._link_port
+            start, end = anchor.scenePos(), event.scenePos()
+            direction = 1 if anchor.output else -1
+            path = QtGui.QPainterPath(start)
+            path.cubicTo(start + QtCore.QPointF(direction * 90, 0), end - QtCore.QPointF(direction * 90, 0), end)
+            self._draft.setPath(path)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._link_port is not None:
+            first, second = self._link_port, self._port_at(event.scenePos())
+            old_edge = dict(self._rewire_edge.edge) if self._rewire_edge is not None else None
+            self.cancel_link()
+            if second is first:
+                event.accept()
+                return
+            if second is not None and old_edge is not None:
+                if second.output:
+                    self.reconnect_requested.emit(old_edge['id'], second.node_item.node['id'], old_edge['target'], old_edge['input'])
+                else:
+                    self.reconnect_requested.emit(old_edge['id'], old_edge['source'], second.node_item.node['id'], second.key)
+            elif second is not None and first.output != second.output:
+                source, target = (first, second) if first.output else (second, first)
+                self.connect_requested.emit(source.node_item.node['id'], target.node_item.node['id'], target.key)
+            elif second is None and not any(isinstance(item, NodeItem) for item in self.items(event.scenePos())):
+                context = {'node_id': first.node_item.node['id'], 'input': first.key, 'output': first.output}
+                if old_edge:
+                    context.update(node_id=old_edge['source'], input='output', output=True, remove_edge=old_edge['id'],
+                                   restore_internal=self.nodes[old_edge['target']].node['kind'] == 'app')
+                self.add_requested.emit(event.scenePos(), context)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def cancel_link(self):
+        if self._rewire_edge is not None:
+            self._rewire_edge.setOpacity(1)
+        if self._draft is not None:
+            self.removeItem(self._draft)
+        self._link_port, self._draft, self._rewire_edge = None, None, None
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton and not any(isinstance(item, (NodeItem, EdgeItem, PortItem)) for item in self.items(event.scenePos())):
+            self.add_requested.emit(event.scenePos(), None)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event):
+        port = self._port_at(event.scenePos())
+        if port is not None and not port.output:
+            edge = next((item.edge for item in self.edges.values() if item.edge['target'] == port.node_item.node['id'] and item.edge['input'] == port.key), None)
+            if edge:
+                menu = QtWidgets.QMenu()
+                text = '断开连线，恢复内部值' if port.node_item.node['kind'] == 'app' else '断开连线'
+                menu.addAction(text, lambda: self.disconnect_requested.emit(edge['id']))
+                menu.exec_(event.screenPos())
+                return
+        item = next((i for i in self.items(event.scenePos()) if isinstance(i, NodeItem)), None)
+        if item is not None and not item.isSelected():
+            self.clearSelection()
+            item.setSelected(True)
+        menu = QtWidgets.QMenu()
+        if item is None:
+            position = QtCore.QPointF(event.scenePos())
+            menu.addAction('添加节点…', lambda: self.add_requested.emit(position, None))
+            menu.addSeparator()
+        if item is not None:
+            menu.addAction('运行节点及所需上游', lambda: self.run_requested.emit(item.node['id'], False))
+            menu.addAction('强制重跑节点及上游', lambda: self.run_requested.emit(item.node['id'], True))
+            menu.addSeparator()
+        menu.addAction('复制选中节点', lambda: self.action_requested.emit('copy'))
+        menu.addAction('粘贴节点', lambda: self.action_requested.emit('paste'))
+        menu.addAction('删除选中项', lambda: self.action_requested.emit('delete'))
+        menu.exec_(event.screenPos())
+
+
+class CanvasView(QtWidgets.QGraphicsView):
+    files_dropped = QtCore.pyqtSignal(list, object)
+    view_changed = QtCore.pyqtSignal()
+
+    def __init__(self, scene, parent=None):
+        super().__init__(scene, parent)
+        self.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.TextAntialiasing | QtGui.QPainter.SmoothPixmapTransform)
+        self.setViewportUpdateMode(self.BoundingRectViewportUpdate)
+        self.setDragMode(self.RubberBandDrag)
+        self.setTransformationAnchor(self.AnchorUnderMouse)
+        self.setResizeAnchor(self.AnchorViewCenter)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.setAcceptDrops(True)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self._pan, self._space = None, False
+        self._last_scene_pos = None
+        self.overlay_exclusion = 0
+        self.centerOn(0, 0)
+
+    def wheelEvent(self, event):
+        factor = 1.15 ** (event.angleDelta().y() / 120)
+        zoom = self.transform().m11() * factor
+        if .12 <= zoom <= 3.5:
+            self.scale(factor, factor)
+            self.view_changed.emit()
+        event.accept()
+
+    def paintEvent(self, event):
+        # Large zoomed-out canvases use simple node bodies. In a large viewport
+        # only the nearest 64 visible media nodes decode, preventing LRU churn.
+        if self.transform().m11() < .42:
+            self.scene().thumbnail_nodes = set()
+        else:
+            center = self.mapToScene(self.viewport().rect().center())
+            visible = [item for item in self.items(self.viewport().rect())
+                       if isinstance(item, NodeItem) and item._preview_path()]
+            visible.sort(key=lambda item: (item.scenePos() - center).manhattanLength())
+            self.scene().thumbnail_nodes = {item.node['id'] for item in visible[:64]}
+        super().paintEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.MiddleButton or (self._space and event.button() == QtCore.Qt.LeftButton):
+            self._pan = event.pos()
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        self._last_scene_pos = self.mapToScene(event.pos())
+        if self._pan is not None:
+            delta = event.pos() - self._pan
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            self._pan = event.pos()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._pan is not None:
+            self._pan = None
+            self.unsetCursor()
+            self.view_changed.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key_Tab:
+            position = self._last_scene_pos or self.mapToScene(self.viewport().rect().center())
+            self.scene().add_requested.emit(position, None)
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key_Escape and self.scene()._link_port is not None:
+            self.scene().cancel_link()
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key_Space:
+            self._space = True
+            self.setCursor(QtCore.Qt.OpenHandCursor)
+            event.accept()
+            return
+        if event.key() in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
+            self.scene().action_requested.emit('delete')
+            event.accept()
+            return
+        for sequence, action in ((QtGui.QKeySequence.Copy, 'copy'), (QtGui.QKeySequence.Paste, 'paste'),
+                                 (QtGui.QKeySequence.Undo, 'undo'), (QtGui.QKeySequence.Redo, 'redo')):
+            if event.matches(sequence):
+                self.scene().action_requested.emit(action)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def focusNextPrevChild(self, forward):
+        # Tab belongs to node search while the canvas itself has keyboard focus.
+        return False
+
+    def keyReleaseEvent(self, event):
+        if event.key() == QtCore.Qt.Key_Space:
+            self._space = False
+            if self._pan is None:
+                self.unsetCursor()
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        self._space, self._pan = False, None
+        self.unsetCursor()
+        super().focusOutEvent(event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        if paths:
+            self.files_dropped.emit(paths, self.mapToScene(event.pos()))
+            event.acceptProposedAction()
+
+    def fit_nodes(self):
+        rect = QtCore.QRectF()
+        for node in self.scene().nodes.values():
+            rect = rect.united(node.sceneBoundingRect())
+        if not rect.isEmpty():
+            rect = rect.adjusted(-50, -50, 50, 50)
+            available = max(150, self.viewport().width() - self.overlay_exclusion)
+            zoom = min(1.15, available / rect.width(), max(100, self.viewport().height() - 10) / rect.height())
+            self.resetTransform()
+            self.scale(max(.12, zoom), max(.12, zoom))
+            self.centerOn(rect.center() + QtCore.QPointF(self.overlay_exclusion / (2 * max(.12, zoom)), 0))
+        self.view_changed.emit()

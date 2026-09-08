@@ -11,7 +11,7 @@ class Worker(QtCore.QThread):
     log = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal()
 
-    def __init__(self, files, input_dir, output_dir, keep_audio=True, decode_mode='grc', overwrite=False, password='', parent=None):
+    def __init__(self, files, input_dir, output_dir, keep_audio=True, decode_mode='grc', overwrite=False, password='', parent=None, grid_cols=None):
         super().__init__(parent)
         self.files = files
         self.input_dir = input_dir
@@ -20,6 +20,7 @@ class Worker(QtCore.QThread):
         self.decode_mode = decode_mode
         self.overwrite = overwrite
         self.password = password or ''
+        self.grid_cols = int(grc.grid_cols if grid_cols is None else grid_cols)
         self._is_cancelled = False
 
     def cancel(self):
@@ -46,10 +47,6 @@ class Worker(QtCore.QThread):
                     self.progress.emit(pct)
                     self.log.emit(f"跳过已存在: {out_name}")
                     continue
-                # ensure grid settings are integers (GRC only)
-                if mode_for_decode == 'grc':
-                    grc.grid_cols = int(grc.grid_cols)
-                    grc.grid_rows = int(grc.grid_cols) + 2
                 is_image = ext.lower() in IMAGE_EXTS
 
                 # run the processing in a separate process so we can cancel mid-file
@@ -58,8 +55,8 @@ class Worker(QtCore.QThread):
                 except Exception:
                     ctx = multiprocessing
                 q = ctx.Queue()
-                cols = int(grc.grid_cols)
-                rows = int(grc.grid_rows)
+                cols = self.grid_cols
+                rows = cols + 2
                 p = ctx.Process(target=_file_process_worker, args=(q, src, dst, is_image, self.keep_audio, mode_for_decode, cols, rows, self.password))
                 p.start()
                 self.log.emit(f'子进程已启动 PID={getattr(p, "pid", "?")} 处理文件 {f}')

@@ -223,6 +223,10 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
             self.rh_retry_delay = int(self.settings.get('rh_retry_delay', 5))
         except Exception:
             self.rh_retry_delay = 5
+        try:
+            self.rh_retry_head_count = max(1, min(16, int(self.settings.get('rh_retry_head_count', 1))))
+        except (TypeError, ValueError):
+            self.rh_retry_head_count = 1
         # concurrency is fixed default (not user-configurable in settings)
         try:
             self.rh_retry_concurrency = 25
@@ -244,7 +248,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
             self._rh_retry_queue = []
             self._rh_retry_cancel_all = False
         from aetherloom_core.rh_submission_queue import get_submission_queue
-        get_submission_queue(self)
+        get_submission_queue(self).set_admission_limit(self.rh_retry_head_count)
         # api categories and defaults
         if api_manager and hasattr(api_manager, 'get_categories'):
             try:
@@ -404,11 +408,8 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
 
 
     def _rh_connection_snapshot(self):
-        from api_calls.call_rh import normalize_base_url
-        return {
-            'base_url': normalize_base_url(self.rh_host_combo.currentText() or 'www.runninghub.cn'),
-            'api_key': (self.rh_apikey_input.text() or '').strip(),
-        }
+        from aetherloom_core.rh_connections import ensure_connections
+        return ensure_connections(self).snapshot()
 
 
     def _default_api_settings(self):
@@ -573,17 +574,9 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         lifecycle = getattr(self, '_rh_task_lifecycle', None)
         if lifecycle is None:
             return
-        from aetherloom_core.rh_tasks import normalize_base_url
-        host = normalize_base_url(self.rh_host_combo.currentText())
-        keys = {}
-        stored_keys = getattr(self, '_apikeys', {}) or {}
-        for name, base in (('runninghub_cn', 'https://www.runninghub.cn'),
-                           ('runninghub_ai', 'https://www.runninghub.ai')):
-            value = stored_keys.get(name, '')
-            if isinstance(value, dict):
-                value = value.get('api_key', '')
-            keys[base] = str(value or '')
-        keys[host] = (self.rh_apikey_input.text() or '').strip()
+        from aetherloom_core.rh_connections import ensure_connections
+        connection = ensure_connections(self)
+        host, keys = connection.host, connection.site_keyrings()
         lifecycle.set_credentials(
             {'base_url': host, 'output_dir': str(self.output_dir)}, keys)
 
@@ -1039,6 +1032,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
 
     def on_file_selected(self):
         items = self.file_list.selectedItems()
+        show_grid = self._current_decode_mode() == 'grc' and self.show_grid_cb.isChecked()
         try:
             if getattr(self, '_suppress_play_hide_once', False):
                 self._suppress_play_hide_once = False
@@ -1063,7 +1057,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         try:
             # remember pending preview path to ignore stale results
             self._pending_preview_orig = path
-            job = PreviewJob(path, 'orig', size, show_grid=self.show_grid_cb.isChecked(), grid_cols=self.grid_spin.value())
+            job = PreviewJob(path, 'orig', size, show_grid=show_grid, grid_cols=self.grid_spin.value())
             job.signals.finished.connect(self._on_preview_ready, QtCore.Qt.QueuedConnection)
             if getattr(self, '_thumb_pool', None):
                 self._thumb_pool.start(job)
@@ -1071,7 +1065,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                 job.run()
         except Exception:
             try:
-                self.show_image_in_label(path, self.orig_view, show_grid=self.show_grid_cb.isChecked())
+                self.show_image_in_label(path, self.orig_view, show_grid=show_grid)
             except Exception:
                 pass
         # 如果输出文件已存在，则直接在“输出”预览中显示
@@ -1608,6 +1602,12 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
 
     def on_decode_selected(self):
         """Decode the currently selected files and save outputs to the output folder."""
+        if self.worker and self.worker.isRunning():
+            return
+        if self._current_decode_mode() == 'grc' and not self.grid_spin.commit():
+            self.log('请先填写有效的网格列数（4–256）')
+            self.grid_spin.setFocus()
+            return
         items = self.file_list.selectedItems()
         if not items:
             self.log('请先选择至少一个文件以解码')
@@ -1632,7 +1632,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                 grc.grid_rows = int(grc.grid_cols) + 2
         except Exception:
             pass
-        self.worker = Worker(files, self.local_decode_dir, self.output_dir, keep_audio=True, decode_mode=mode_key, overwrite=self.overwrite_cb.isChecked(), password=pwd_val)
+        self.worker = Worker(files, self.local_decode_dir, self.output_dir, keep_audio=True, decode_mode=mode_key, overwrite=self.overwrite_cb.isChecked(), password=pwd_val, grid_cols=self.grid_spin.value())
         # configure progress bar: if single file, show indeterminate busy state;
         # if multiple files, use determinate 0-100
         if len(files) == 1:
@@ -1645,6 +1645,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         self.worker.finished.connect(self.on_worker_finished)
         self.batch_btn.setEnabled(False)
         self.preview_btn.setEnabled(False)
+        self._decode_page.set_running(True)
         self.worker.start()
         # start elapsed timer display
         try:
@@ -1949,8 +1950,27 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
 
 
     def closeEvent(self, event):
+        connections = getattr(self, '_rh_connection_settings', None)
+        if connections is not None:
+            try:
+                connections.flush_pending()
+            except (OSError, ValueError, TypeError):
+                self._show_toast('连接设置未能保存，请检查 apikeys.json 是否可写。', 5000)
         clear_histories(self)
         self._closing = True
+        home_page = getattr(self, 'home_page', None)
+        if home_page is not None:
+            home_page.close_updates()
+        execution = getattr(self, '_rh_execution_service', None)
+        if execution is not None:
+            execution.close()
+        canvas = getattr(self, 'canvas_page', None)
+        if canvas is not None:
+            canvas.shutdown()
+        workflow_queue = getattr(self, '_canvas_workflow_queue', None)
+        if workflow_queue is not None:
+            workflow_queue.close()
+            workflow_queue.engine.close()
         from aetherloom_core.api_manager_ui import close_probes
         close_probes(self)
         submission_queue = getattr(self, '_rh_submission_queue', None)
@@ -2321,6 +2341,12 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
 
 
     def on_batch_restore(self):
+        if self.worker and self.worker.isRunning():
+            return
+        if self._current_decode_mode() == 'grc' and not self.grid_spin.commit():
+            self.log('请先填写有效的网格列数（4–256）')
+            self.grid_spin.setFocus()
+            return
         items = [self.file_list.item(i).text() for i in range(self.file_list.count())]
         if not items:
             self.log('文件列表为空，无法批量解码')
@@ -2343,7 +2369,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
             pwd_val = self.sst_pwd_edit.text() if mode_key == 'sst' else ''
         except Exception:
             pwd_val = ''
-        self.worker = Worker(items, self.local_decode_dir, self.output_dir, keep_audio=True, decode_mode=mode_key, overwrite=self.overwrite_cb.isChecked(), password=pwd_val)
+        self.worker = Worker(items, self.local_decode_dir, self.output_dir, keep_audio=True, decode_mode=mode_key, overwrite=self.overwrite_cb.isChecked(), password=pwd_val, grid_cols=self.grid_spin.value())
         # configure progress bar: if single file, show indeterminate busy state;
         # since this is batch, use determinate range
         if len(items) == 1:
@@ -2355,6 +2381,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         self.worker.log.connect(self.log)
         self.worker.finished.connect(self.on_worker_finished)
         self.batch_btn.setEnabled(False)
+        self._decode_page.set_running(True)
         self.worker.start()
         # start elapsed timer display for batch
         try:
@@ -2369,19 +2396,9 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
     def on_cancel(self):
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
+            self._decode_page.set_canceling()
             self.log('正在请求取消任务...')
-            # reset progress display to determinate 0 and stop elapsed timer
-            try:
-                self.progress.setRange(0, 100)
-                self.progress.setValue(0)
-            except Exception:
-                pass
-            try:
-                self._elapsed_timer.stop()
-                self._progress_start_time = None
-                self.elapsed_label.setText('解码用时: 0.00s')
-            except Exception:
-                pass
+            # Keep elapsed/progress visible until the worker confirms it stopped.
 
 
     def on_grid_changed(self, val):
@@ -2398,6 +2415,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
 
 
     def on_worker_finished(self):
+        canceled = bool(self.worker and self.worker._is_cancelled)
         self.batch_btn.setEnabled(True)
         self.preview_btn.setEnabled(True)
         # restore determinate range and mark complete
@@ -2405,8 +2423,9 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
             self.progress.setRange(0, 100)
         except Exception:
             pass
-        self.progress.setValue(100)
-        self.log('解码任务完成')
+        self.progress.setValue(0 if canceled else 100)
+        self.log('解码任务已停止' if canceled else '解码任务处理结束')
+        self._decode_page.set_running(False, canceled=canceled)
         # if we have a list of files processed, show output preview for first file if exists
         output_found = False
         try:
