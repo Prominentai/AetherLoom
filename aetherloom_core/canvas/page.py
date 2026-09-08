@@ -20,7 +20,7 @@ from .graphics import CanvasScene, CanvasView, NodeItem, EdgeItem, KIND_NAMES, S
 from .editors import Inspector, EdgeInspector
 
 
-RUNTIME_FIELDS = ('results', 'result_signatures', 'fingerprint', 'status', 'progress', 'message', 'error', 'generation', 'cached', 'stale', 'activated', '_restored_missing_results', '_restored_positions_ambiguous')
+RUNTIME_FIELDS = ('results', 'result_signatures', 'fingerprint', 'status', 'progress', 'node_progress', 'message', 'error', 'generation', 'cached', 'stale', 'activated', '_restored_missing_results', '_restored_positions_ambiguous')
 
 
 class _BatchCountSpinBox(QtWidgets.QSpinBox):

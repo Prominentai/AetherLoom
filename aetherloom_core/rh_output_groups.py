@@ -2,6 +2,31 @@
 from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 
+class ResultTitle(QtWidgets.QLabel):
+    """Keep the full filename accessible without making narrow cards taller."""
+
+    def __init__(self, text='', parent=None):
+        super().__init__(text, parent)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+
+    def sizeHint(self):
+        return QtCore.QSize(0, self.fontMetrics().height() + 4)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setPen(self.palette().color(QtGui.QPalette.WindowText))
+        text = self.fontMetrics().elidedText(self.text(), QtCore.Qt.ElideMiddle, self.contentsRect().width())
+        painter.drawText(self.contentsRect(), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, text)
+
+
 class OutputCard(QtWidgets.QFrame):
     """Resize existing preview content without reopening files or media players."""
 
@@ -146,7 +171,7 @@ class _OutputGroup(QtWidgets.QFrame):
         self.content.setMinimumWidth(0)
         self.grid = QtWidgets.QGridLayout(self.content)
         self.grid.setContentsMargins(0, 0, 0, 0)
-        self.grid.setSpacing(12)
+        self.grid.setSpacing(8)
         self.grid.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
         self.scroll.setWidget(self.content)
         self.empty = QtWidgets.QLabel('暂无任务', self.body)
@@ -193,7 +218,7 @@ class _OutputGroup(QtWidgets.QFrame):
         available = max(1, self.scroll.viewport().width())
         height = self.scroll.viewport().height()
         spacing = self.grid.horizontalSpacing()
-        columns = max(1, (available + spacing) // (240 + spacing))
+        columns = max(1, (available + spacing) // (196 + spacing))
         width = max(1, (available - spacing * (columns - 1)) // columns)
         if columns == self._columns and width == self._card_width and height == self._available_height:
             return
@@ -232,8 +257,8 @@ class RhOutputGroups(QtWidgets.QWidget):
         self._layout.setSpacing(12)
         self.groups = {}
         for key, title, hint in (
-            ('active', '运行与结果', '已获得提交或重试资格的任务，以及已结束的任务。'),
-            ('waiting', '等候任务', '尚未获得提交资格的任务；获得资格后移至上方。'),
+            ('active', '运行与结果', '已提交成功的任务，以及已结束的任务。'),
+            ('waiting', '等候与重试', '尚未提交成功的等候、提交及重试任务。'),
         ):
             group = _OutputGroup(key, title, hint, self)
             self.groups[key] = group

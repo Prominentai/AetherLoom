@@ -6,6 +6,7 @@ The reported value/max describes the current node, not total task completion.
 import json
 import math
 import time
+from collections import OrderedDict
 from PyQt5 import QtCore, QtGui, QtNetwork, QtWebSockets, QtWidgets, sip
 from aetherloom_core.rh_ui import palette
 
@@ -13,18 +14,42 @@ from aetherloom_core.rh_ui import palette
 def progress_text(progress):
     if not progress:
         return ''
+    if not isinstance(progress, dict):
+        progress = {'percent': progress}
     if progress.get('stale'):
         return '进度连接中断，等待重连'
     if progress.get('finished'):
         return '节点执行结束，等待结果确认'
-    node = str(progress.get('node') or '')
+    overall = progress.get('overall_percent')
+    prefix = (f'总进度 {overall:.0f}% · ' if isinstance(overall, (int, float)) else '总进度未知 · ')
+    node = str(progress.get('node_name') or progress.get('node') or '')
     percent = progress.get('percent')
     if percent is not None:
-        return f'节点 {node} · {percent:.0f}% ({progress["value"]:g}/{progress["maximum"]:g})'
+        return prefix + f'当前节点 {node}'
     if node:
-        return f'节点 {node} · 等待进度'
+        return prefix + f'节点 {node} · 等待进度'
     completed = progress.get('completed', 0)
-    return f'已完成 {completed} 个节点，等待后续进度' if completed else '已连接，等待节点进度'
+    return prefix + (f'已完成 {completed} 个节点' if completed else '等待节点进度')
+
+
+def progress_pair(status, progress=None):
+    """Overall generation and current internal node; None means unavailable."""
+    if status in {'SUCCESS', 'REUSED', 'DOWNLOADING', 'DOWNLOAD_FAILED', 'WAITING_FOR_SECRET', 'DECODING'}:
+        return 100, 100
+    if status in {'PENDING', 'WAITING', 'PREPARING', 'QUEUED', 'SUBMITTING', 'LOCAL_WAIT'}:
+        return 0, 0
+    data = progress if isinstance(progress, dict) else {'percent': progress}
+    if data.get('finished'):
+        return 100, 100
+    def percent(value):
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            value = float(value)
+            return max(0, min(100, round(value))) if math.isfinite(value) else None
+        except (ValueError, TypeError, OverflowError):
+            return None
+    return percent(data.get('overall_percent')), percent(data.get('percent'))
 
 
 def progress_percent(status, progress=None, previous=0):
@@ -46,25 +71,30 @@ def progress_percent(status, progress=None, previous=0):
         return 0
 
 
-def draw_circular_progress(painter, rect, percent, status, colors, *, stroke=8, font=None):
+def draw_circular_progress(painter, rect, percent, status, colors, *, stroke=8, font=None, overall=None):
     """Passive shared paint routine; no QWidget, timer or network dependency."""
     painter.save()
     painter.setRenderHint(QtGui.QPainter.Antialiasing)
     painter.setBrush(QtCore.Qt.NoBrush)
-    painter.setPen(QtGui.QPen(QtGui.QColor(colors['border']), stroke))
-    painter.drawEllipse(rect)
     color = colors['danger'] if status in ('FAILED', 'DOWNLOAD_FAILED', 'CANCEL_FAILED') else colors['accent']
     if status in ('CANCELED', 'INTERRUPTED'):
         color = colors['muted']
-    painter.setPen(QtGui.QPen(QtGui.QColor(color), stroke, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
-    if percent:
-        painter.drawArc(rect, 90 * 16, -round(360 * 16 * percent / 100))
-    if font is None:
-        font = QtGui.QFont(painter.font())
-        font.setPointSize(24)
+    inset = rect.width() * .16
+    inner = rect.adjusted(inset, inset, -inset, -inset)
+    for ring, value, tint in ((rect, overall, color), (inner, percent, colors['success'])):
+        painter.setPen(QtGui.QPen(QtGui.QColor(colors['border']), stroke))
+        painter.drawEllipse(ring)
+        if value is None:
+            painter.setPen(QtGui.QPen(QtGui.QColor(colors['muted']), max(1, stroke * .45), QtCore.Qt.DotLine))
+            painter.drawEllipse(ring)
+        elif value:
+            painter.setPen(QtGui.QPen(QtGui.QColor(tint), stroke, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
+            painter.drawArc(ring, 90 * 16, -round(360 * 16 * value / 100))
+    font = QtGui.QFont(font or painter.font())
+    font.setPixelSize(max(8, int(rect.width() * .22)))
     painter.setFont(font)
     painter.setPen(QtGui.QColor(colors['text']))
-    painter.drawText(rect, QtCore.Qt.AlignCenter, f'{percent}%')
+    painter.drawText(inner, QtCore.Qt.AlignCenter, '—' if overall is None else f'{overall}%')
     painter.restore()
 
 
@@ -74,6 +104,7 @@ class CircularProgress(QtWidgets.QWidget):
         super().__init__(parent)
         self.owner = owner
         self.percent = 0
+        self.overall = 0
         self.status = 'SUBMITTING'
         self.setMinimumHeight(208)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
@@ -84,12 +115,12 @@ class CircularProgress(QtWidgets.QWidget):
         self.label.setTextFormat(QtCore.Qt.PlainText)
         self.label.setWordWrap(True)
         layout.addWidget(self.label)
-        self.setAccessibleName('任务节点进度')
+        self.setAccessibleName('外环总进度，内环当前节点进度')
 
     def set_state(self, status, progress=None):
         self.status = status
         progress = progress or {}
-        self.percent = progress_percent(status, progress, self.percent)
+        self.overall, self.percent = progress_pair(status, progress)
         messages = {'SUBMITTING': '准备 / 等待提交', 'LOCAL_WAIT': '等待提交',
                     'QUEUED': '云端排队中', 'RUNNING': '运行中 · 等待节点进度',
                     'DOWNLOADING': '生成完成 · 下载 / 处理输出中',
@@ -103,7 +134,8 @@ class CircularProgress(QtWidgets.QWidget):
 
     def set_message(self, text):
         self.label.setText(str(text))
-        self.setAccessibleDescription(f'{self.percent}% · {text}')
+        self.setAccessibleDescription(f'总进度 {self.overall if self.overall is not None else "未知"}；当前节点 {self.percent if self.percent is not None else "未知"} · {text}')
+        self.setToolTip('外环：总进度（按内部节点完成数量）\n内环：当前节点进度\n' + str(text))
         self.update()
 
     def paintEvent(self, event):
@@ -114,7 +146,7 @@ class CircularProgress(QtWidgets.QWidget):
         font = QtGui.QFont(self.font())
         font.setPointSize(max(14, int(24 * diameter / 124)))
         font.setBold(True)
-        draw_circular_progress(painter, rect, self.percent, self.status, colors, font=font)
+        draw_circular_progress(painter, rect, self.percent, self.status, colors, font=font, overall=self.overall)
         painter.end()
 
     def set_available_height(self, available):
@@ -162,7 +194,7 @@ def update_card_progress(owner, card, status, progress=None):
 
 
 class NodeProgress:
-    """Bounded state; cached nodes and node transitions never imply total percent."""
+    """Count completed nodes only against a verified complete workflow map."""
     def __init__(self, task_id):
         self.task_id = str(task_id)
         self.prompt_id = None
@@ -170,6 +202,21 @@ class NodeProgress:
         self.done = set()
         self.percent = self.value = self.maximum = None
         self.finished = False
+        self.node_names = {}
+        self.mapping_mismatch = False
+
+    def set_nodes(self, nodes):
+        if isinstance(nodes, dict) and 0 < len(nodes) <= 10000:
+            self.node_names = {str(key): str(value)[:120] for key, value in nodes.items()}
+            self.mapping_mismatch = not self.done.issubset(self.node_names) or bool(self.node and self.node not in self.node_names)
+        return self.snapshot()
+
+    def snapshot(self):
+        total = len(self.node_names) if self.node_names and not self.mapping_mismatch else None
+        overall = 100 if self.finished else (min(100, len(self.done) / total * 100) if total else None)
+        return dict(node=self.node, node_name=self.node_names.get(self.node, ''), percent=self.percent,
+                    value=self.value, maximum=self.maximum, completed=len(self.done), total=total,
+                    overall_percent=overall, finished=self.finished, stale=False)
 
     def receive(self, message):
         if not isinstance(message, str) or len(message) > 65536:
@@ -199,6 +246,7 @@ class NodeProgress:
             self.done.clear()
             self.node = None
             self.percent = self.value = self.maximum = None
+            self.mapping_mismatch = False
         elif kind == 'execution_cached':
             nodes = data.get('nodes')
             if not isinstance(nodes, list):
@@ -207,11 +255,16 @@ class NodeProgress:
             if len(self.done) > 10000:
                 self.done = set(sorted(self.done)[:10000])
         elif kind == 'execution_success':
+            if self.node:
+                self.done.add(self.node)
             self.finished = True
             self.percent = self.value = self.maximum = None
         elif kind == 'executing':
             node = data.get('node')
-            if self.node and node != self.node and len(self.done) < 10000:
+            node = str(node)[:100] if node is not None else None
+            if node == self.node:
+                return None
+            if self.node and len(self.done) < 10000:
                 self.done.add(self.node)
             self.node = str(node)[:100] if node is not None else None
             self.percent = self.value = self.maximum = None
@@ -230,8 +283,9 @@ class NodeProgress:
             self.maximum = maximum
             self.value = min(value, maximum)
             self.percent = self.value / maximum * 100
-        return dict(node=self.node, percent=self.percent, value=self.value, maximum=self.maximum,
-                    completed=len(self.done), finished=self.finished, stale=False)
+        if self.node_names and (not self.done.issubset(self.node_names) or self.node and self.node not in self.node_names):
+            self.mapping_mismatch = True
+        return self.snapshot()
 
 
 class ProgressMonitor(QtCore.QObject):
@@ -240,6 +294,7 @@ class ProgressMonitor(QtCore.QObject):
         self.owner = owner
         self.socket_factory = socket_factory or (lambda: QtWebSockets.QWebSocket(parent=self))
         self.connections = {}
+        self._suspended = OrderedDict()
         self.pending = {}
         self.flush_timer = QtCore.QTimer(self)
         self.flush_timer.setSingleShot(True)
@@ -263,7 +318,8 @@ class ProgressMonitor(QtCore.QObject):
         if parsed.scheme() != 'wss' or not parsed.host() or parsed.userInfo():
             return
         socket = self.socket_factory()
-        state = dict(socket=socket, parser=NodeProgress(task_id), seen=time.monotonic(), connected=False)
+        state = dict(socket=socket, parser=self._suspended.pop(task_id, None) or NodeProgress(task_id),
+                     seen=time.monotonic(), connected=False)
         self.connections[task_id] = state
         if hasattr(socket, 'setMaxAllowedIncomingMessageSize'):
             socket.setMaxAllowedIncomingMessageSize(2 * 1024 * 1024)
@@ -285,7 +341,12 @@ class ProgressMonitor(QtCore.QObject):
         lifecycle = self.owner._rh_task_lifecycle
         with lifecycle.lock:
             lifecycle._progress_connected.add(task_id)
-        self.queue(task_id, dict(node=None, percent=None, completed=0, stale=False))
+        self.queue(task_id, state['parser'].snapshot())
+
+    def set_nodes(self, task_id, nodes):
+        state = self.connections.get(task_id)
+        if state is not None:
+            self.queue(task_id, state['parser'].set_nodes(nodes))
 
     def message(self, task_id, state, text):
         if self.connections.get(task_id) is not state:
@@ -304,12 +365,17 @@ class ProgressMonitor(QtCore.QObject):
         if self.connections.get(task_id) is not state:
             return
         previous = self.pending.get(task_id) or self.owner._rh_progress_entries.get(task_id) or {}
-        self.stop_task(task_id)
+        self.stop_task(task_id, preserve_parser=True)
         if self.owner._rh_status_entries.get(task_id) == 'RUNNING':
             self.queue(task_id, dict(previous, stale=True))
 
-    def stop_task(self, task_id):
+    def stop_task(self, task_id, preserve_parser=False):
         state = self.connections.pop(task_id, None)
+        self._suspended.pop(task_id, None)
+        if preserve_parser and state is not None:
+            self._suspended[task_id] = state['parser']
+            while len(self._suspended) > 64:
+                self._suspended.popitem(last=False)
         self.pending.pop(task_id, None)
         lifecycle = getattr(self.owner, '_rh_task_lifecycle', None)
         if lifecycle is not None:
@@ -358,5 +424,6 @@ class ProgressMonitor(QtCore.QObject):
         for task_id in list(self.connections):
             self.stop_task(task_id)
         self.pending.clear()
+        self._suspended.clear()
         self.flush_timer.stop()
         self.heartbeat.stop()

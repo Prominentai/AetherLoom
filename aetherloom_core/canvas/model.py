@@ -21,7 +21,7 @@ MEDIA_SUFFIXES = {
 }
 TITLES = {'app': 'App', 'image': '图像导入', 'video': '视频导入',
           'audio': '音频导入', 'text': '文本', 'select': '结果选择', 'preview': '预览 / 保存'}
-RUNTIME_FIELDS = frozenset({'results', 'result_signatures', 'fingerprint', 'status', 'progress',
+RUNTIME_FIELDS = frozenset({'results', 'result_signatures', 'fingerprint', 'status', 'progress', 'node_progress',
                             'message', 'error', 'generation', 'cached', 'stale', 'activated',
                             '_restored_missing_results', '_restored_positions_ambiguous'})
 

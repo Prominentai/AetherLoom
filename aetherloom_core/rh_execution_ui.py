@@ -7,6 +7,7 @@ import weakref
 from PyQt5 import QtCore, QtWidgets, sip
 
 from aetherloom_core.rh_storage import app_output_directories
+from aetherloom_core.rh_tasks import output_group
 
 
 def ensure_execution_service(owner):
@@ -89,17 +90,7 @@ class AppResultBridge(QtCore.QObject):
 
     @staticmethod
     def _record_group(record):
-        status = str(record.get('status') or '').upper()
-        if record.get('task_id') or status in {
-            'SUCCESS', 'FAILED', 'CANCELED', 'UNKNOWN', 'PAUSED', 'SKIPPED', 'INTERRUPTED',
-            'CANCELING', 'CANCEL_FAILED',
-        }:
-            return 'active'
-        if 'submission_admitted' in record:
-            return 'active' if record['submission_admitted'] else 'waiting'
-        # Legacy task metadata predates admission tracking. A cloud task or a
-        # status beyond local submission is already in the running/results set.
-        return 'waiting' if status in {'PENDING', 'PREPARING', 'LOCAL_WAIT', 'SUBMITTING', 'WAITING_FOR_KEY'} else 'active'
+        return output_group(record)
 
     def bind(self, wid, page, add_card, update_card, remove_card=None, output_layout=None):
         wid = str(wid)
@@ -183,8 +174,6 @@ class AppResultBridge(QtCore.QObject):
     def _update_meta(self, page, run_id, record):
         group = self._record_group(record)
         previous = page._rh_shared_meta.get(run_id)
-        if previous and previous[0] == 'active':
-            group = 'active'  # Admission is permanent, including late queued signals.
         try:
             created = float(record.get('created_at') or 0)
         except (ValueError, TypeError):
@@ -374,23 +363,17 @@ class AppResultBridge(QtCore.QObject):
             self.owner._rh_local_cards.add(card)
             page._rh_run_enabled = True
             origin = record.get('origin') or {}
-            if origin.get('canvas_id'):
-                label = QtWidgets.QLabel('画布 · ' + str(origin.get('canvas_name') or origin['canvas_id'])
-                                        + ' / ' + str(origin.get('node_title') or origin.get('node_id', '')))
-                label.setObjectName('rhMuted')
-                label.setWordWrap(True)
-                label.setToolTip(str(origin))
-                card.layout().insertWidget(1, label)
-            decode_label = QtWidgets.QLabel()
-            decode_label.setObjectName('rhMuted')
-            decode_label.setWordWrap(True)
-            card.layout().insertWidget(1, decode_label)
-            card._rh_decode_summary_label = decode_label
+            badge = card._rh_source_badge
+            badge.setText('画布' if origin.get('canvas_id') else '')
+            badge.setVisible(bool(origin.get('canvas_id')))
         summary, summary_hint = self._decode_summary(record)
-        decode_label = card._rh_decode_summary_label
-        if decode_label.text() != summary:
-            decode_label.setText(summary)
-            decode_label.setToolTip(summary_hint)
+        origin = record.get('origin') or {}
+        source = ('画布 · ' + str(origin.get('canvas_name') or origin['canvas_id'])
+                  + ' / ' + str(origin.get('node_title') or origin.get('node_id', ''))
+                  if origin.get('canvas_id') else 'App 页面发起')
+        details = source + '\n' + summary + '\n' + summary_hint
+        card._rh_source_badge.setToolTip(details)
+        card._rh_actions_button.setToolTip(details + '\n查看任务参数、取消任务或管理结果')
         card._rh_task_document = record.get('task_document')
         task_id = record.get('task_id')
         if task_id:
@@ -431,6 +414,8 @@ class AppResultBridge(QtCore.QObject):
                 card.setToolTip(str(message))
         if status in {'SUCCESS', 'FAILED', 'CANCELED', 'UNKNOWN', 'PAUSED', 'INTERRUPTED'}:
             update(card, None, {'timer_stop': True})
+            if card._timer_label.text() == '等待结果':
+                card._timer_label.setText('已完成' if status == 'SUCCESS' else '')
         card._rh_shared_revision = record.get('updated_at')
 
 

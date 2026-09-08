@@ -5142,8 +5142,8 @@ class MainLayoutMixin:
                                         preview_frame.setObjectName('rhResultPanel')
                                         preview_frame.setFrameShape(QtWidgets.QFrame.NoFrame)
                                         preview_layout = QtWidgets.QVBoxLayout(preview_frame)
-                                        preview_layout.setContentsMargins(18, 18, 18, 18)
-                                        preview_layout.setSpacing(14)
+                                        preview_layout.setContentsMargins(12, 12, 12, 12)
+                                        preview_layout.setSpacing(8)
                                         preview_heading_row = QtWidgets.QHBoxLayout()
                                         preview_heading = QtWidgets.QLabel('生成结果')
                                         preview_heading.setObjectName('rhSectionTitle')
@@ -5156,8 +5156,9 @@ class MainLayoutMixin:
                                         preview_hint = QtWidgets.QLabel('查看生成内容，双击预览可在本地打开。')
                                         preview_hint.setObjectName('rhMuted')
                                         preview_hint.setWordWrap(True)
-                                        preview_layout.addWidget(preview_hint)
-                                        from aetherloom_core.rh_output_groups import RhOutputGroups, OutputCard
+                                        preview_heading.setToolTip(preview_hint.text())
+                                        preview_hint.deleteLater()
+                                        from aetherloom_core.rh_output_groups import RhOutputGroups, OutputCard, ResultTitle
                                         preview_stack = RhOutputGroups(app_page)
                                         app_page._rh_output_groups = preview_stack
                                         app_page._rh_result_count_label = preview_count_label
@@ -5469,13 +5470,13 @@ class MainLayoutMixin:
                                             except Exception:
                                                 pass
                                             toggle_row.addWidget(toggle_btn)
-                                            preview_layout.addLayout(toggle_row)
+                                            app_layout.insertLayout(1, toggle_row)
                                         except Exception:
                                             pass
 
                                         # add the preview scroll area and the sidebar into the container
                                         try:
-                                            pc_h.addWidget(sidebar_frame)
+                                            app_layout.insertWidget(2, sidebar_frame)
                                             pc_h.addWidget(preview_stack, 1)
                                         except Exception:
                                             try:
@@ -5903,6 +5904,8 @@ class MainLayoutMixin:
                                                 outputs = getattr(card, '_outputs', []) or []
                                                 if wrap is not None:
                                                     wrap.setVisible(len(outputs) > 1)
+                                                    index = int(getattr(card, '_output_idx', 0))
+                                                    card._nav_count.setText(f'{index + 1}/{len(outputs)}')
                                             except Exception:
                                                 pass
 
@@ -5938,8 +5941,7 @@ class MainLayoutMixin:
                                                 nav_wrap = QtWidgets.QWidget()
                                                 nav_layout = QtWidgets.QHBoxLayout(nav_wrap)
                                                 nav_layout.setContentsMargins(0, 0, 0, 0)
-                                                nav_layout.setSpacing(4)
-                                                nav_layout.addStretch(1)
+                                                nav_layout.setSpacing(0)
                                                 btn_prev = QtWidgets.QToolButton()
                                                 try:
                                                     btn_prev.setAutoRaise(True)
@@ -5965,10 +5967,18 @@ class MainLayoutMixin:
                                                 except Exception:
                                                     pass
                                                 nav_layout.addWidget(btn_prev)
+                                                nav_count = QtWidgets.QLabel()
+                                                nav_count.setObjectName('rhMuted')
+                                                nav_count.setAlignment(Qt.AlignCenter)
+                                                nav_layout.addWidget(nav_count)
                                                 nav_layout.addWidget(btn_next)
+                                                for button in (btn_prev, btn_next):
+                                                    button.setObjectName('rhToolButton')
+                                                    button.setFixedSize(24, 26)
                                                 nav_wrap.setVisible(False)
                                                 try:
                                                     card._nav_wrap = nav_wrap
+                                                    card._nav_count = nav_count
                                                     card._nav_prev = btn_prev
                                                     card._nav_next = btn_next
                                                 except Exception:
@@ -6001,8 +6011,8 @@ class MainLayoutMixin:
                                                     pass
                                                 card.setObjectName('nodePreviewCard')
                                                 card_layout = QtWidgets.QVBoxLayout(card)
-                                                card_layout.setContentsMargins(12, 8, 12, 12)
-                                                card_layout.setSpacing(6)
+                                                card_layout.setContentsMargins(8, 6, 8, 6)
+                                                card_layout.setSpacing(4)
 
                                                 # create a preview widget: image label or text view for textual files
                                                 try:
@@ -6105,7 +6115,7 @@ class MainLayoutMixin:
                                                             pass
 
                                                 # Keep the result title distinct from timing and actions.
-                                                title_lbl = QtWidgets.QLabel('')
+                                                title_lbl = ResultTitle('')
                                                 try:
                                                     if title:
                                                         title_lbl.setText(title)
@@ -6114,9 +6124,9 @@ class MainLayoutMixin:
                                                 try:
                                                     title_lbl.setObjectName('rhResultTitle')
                                                     title_lbl.setTextFormat(Qt.PlainText)
-                                                    title_lbl.setWordWrap(True)
+                                                    title_lbl.setWordWrap(False)
                                                     title_lbl.setMinimumWidth(0)
-                                                    title_lbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+                                                    title_lbl.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
                                                 except Exception:
                                                     pass
                                                 
@@ -6126,7 +6136,12 @@ class MainLayoutMixin:
                                                     hdr_layout.setContentsMargins(0, 0, 0, 0)
                                                 except Exception:
                                                     hdr_layout = QtWidgets.QHBoxLayout(hdr_w)
-                                                hdr_layout.addWidget(title_lbl)
+                                                hdr_layout.addWidget(title_lbl, 1)
+                                                source_badge = QtWidgets.QLabel('画布')
+                                                source_badge.setObjectName('rhMuted')
+                                                source_badge.hide()
+                                                hdr_layout.addWidget(source_badge)
+                                                card._rh_source_badge = source_badge
                                                 timer_lbl = QtWidgets.QLabel('等待结果' if not path else '')
                                                 try:
                                                     timer_lbl.setObjectName('rhMuted')
@@ -6189,10 +6204,12 @@ class MainLayoutMixin:
                                                 card_layout.addWidget(lbl)
                                                 card_meta_row = QtWidgets.QHBoxLayout()
                                                 card_meta_row.setContentsMargins(0, 0, 0, 0)
+                                                card_meta_row.setSpacing(2)
                                                 card_meta_row.addWidget(timer_lbl)
                                                 card_meta_row.addStretch(1)
                                                 card_actions_btn = QtWidgets.QToolButton()
-                                                card_actions_btn.setText('操作 ···')
+                                                card_actions_btn.setText('···')
+                                                card_actions_btn.setAccessibleName('任务与结果操作')
                                                 card_actions_btn.setObjectName('rhToolButton')
                                                 card_actions_btn.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
                                                 card_actions_btn.setToolTip('取消运行中的任务，或打开、保存与删除结果')
@@ -6210,9 +6227,9 @@ class MainLayoutMixin:
                                                     _ensure_nav(card)
                                                     if getattr(card, '_nav_wrap', None) is not None:
                                                         try:
-                                                            card_layout.addWidget(card._nav_wrap, 0, Qt.AlignRight)
+                                                            card_meta_row.insertWidget(2, card._nav_wrap)
                                                         except Exception:
-                                                            card_layout.addWidget(card._nav_wrap)
+                                                            card_meta_row.insertWidget(2, card._nav_wrap)
                                                 except Exception:
                                                     pass
 
@@ -7029,8 +7046,8 @@ class MainLayoutMixin:
                                         splitter.addWidget(preview_frame)
                                         preview_frame.setMinimumWidth(300)
                                         app_page._rh_splitter = splitter
-                                        splitter.setStretchFactor(0, 4)
-                                        splitter.setStretchFactor(1, 5)
+                                        splitter.setStretchFactor(0, 3)
+                                        splitter.setStretchFactor(1, 7)
                                         # Restore the user's divider while keeping both panes usable.
                                         try:
                                             # attempt to restore previously saved sizes
@@ -7044,10 +7061,10 @@ class MainLayoutMixin:
                                                 try:
                                                     splitter.setSizes([int(saved[0]), int(saved[1])])
                                                 except Exception:
-                                                    splitter.setSizes([420, 520])
+                                                    splitter.setSizes([340, 700])
                                             else:
                                                 # set a sensible 1:2 pixel fallback
-                                                splitter.setSizes([420, 520])
+                                                splitter.setSizes([340, 700])
                                         except Exception:
                                             pass
 

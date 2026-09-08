@@ -8,6 +8,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from PyQt5 import QtCore
+from aetherloom_core.rh_progress import progress_pair
 
 from . import model
 
@@ -16,7 +17,7 @@ TERMINAL = frozenset({'SUCCESS', 'FAILED', 'CANCELED', 'UNKNOWN', 'BLOCKED', 'SK
 ACTIVE = frozenset({'SUBMITTING', 'LOCAL_WAIT', 'QUEUED', 'RUNNING', 'DOWNLOADING',
                     'DOWNLOAD_FAILED', 'POLL_TIMEOUT', 'WAITING_FOR_KEY',
                     'WAITING_FOR_SECRET', 'CANCEL_FAILED', 'CANCELING'})
-RUNTIME_FIELDS = ('results', 'result_signatures', 'fingerprint', 'status', 'progress',
+RUNTIME_FIELDS = ('results', 'result_signatures', 'fingerprint', 'status', 'progress', 'node_progress',
                   'message', 'generation', 'cached', 'stale', '_restored_missing_results',
                   '_restored_positions_ambiguous', 'activated')
 
@@ -959,7 +960,10 @@ class CanvasEngine(QtCore.QObject):
             current = self._documents.get(canvas_id)
             if current is not None and canvas_id not in self._forgotten:
                 if self._merge_progress(current, record):
-                    self._publish_locked(current, save=False)
+                    # The shared progress monitor already coalesces updates.
+                    # Dropping the last value here can leave the canvas stale
+                    # indefinitely when a node stops emitting progress events.
+                    self._publish_locked(current, save=False, force_notify=True)
                     return
                 merged = self._merged_record(current, record)
                 if merged is None:
@@ -990,6 +994,17 @@ class CanvasEngine(QtCore.QObject):
             for document in updated:
                 self._cancel_halted(document)
 
+    @staticmethod
+    def _node_progress(state):
+        items = state.get('items') or []
+        current = next((item for item in reversed(items) if item.get('status') == 'RUNNING' and item.get('node_progress')), {})
+        detail = copy.deepcopy(current.get('node_progress') or {})
+        totals = [progress_pair(item.get('status'), item.get('node_progress'))[0] for item in items]
+        detail['overall_percent'] = (sum(totals) / len(totals) if totals and all(v is not None for v in totals) else None)
+        if len(items) > 1:
+            detail['finished'] = all(item.get('status') == 'SUCCESS' for item in items)
+        state['node_progress'] = detail
+
     def _merge_progress(self, document, record):
         """Progress changes no durability boundary and need no full graph copy."""
         origin, run = record.get('origin') or {}, document.get('run') or {}
@@ -1006,14 +1021,16 @@ class CanvasEngine(QtCore.QObject):
                 or record.get('task_id') != item.get('task_id')):
             return False
         item.update(progress=record.get('progress', 0), message=record.get('message', ''),
+                    node_progress=copy.deepcopy(record.get('node_progress') or {}),
                     updated_at=record.get('updated_at', item.get('updated_at', 0)))
         state['progress'] = sum(100 if value.get('status') == 'SUCCESS' else float(value.get('progress') or 0)
                                 for value in state['items']) / max(1, len(state['items']))
         if not state.get('_halt_status'):
             state['message'] = record.get('message', '')
+        self._node_progress(state)
         node = next((value for value in document['nodes'] if value['id'] == node_id), None)
         if node:
-            node.update(progress=state['progress'], message=state.get('message', ''))
+            node.update(progress=state['progress'], node_progress=copy.deepcopy(state['node_progress']), message=state.get('message', ''))
         return True
 
     def _merged_record(self, source_document, record):
@@ -1042,7 +1059,8 @@ class CanvasEngine(QtCore.QObject):
             if previous_status != 'INTERRUPTED' or not is_download_recovery(record):
                 return  # Durable completion outranks a stale generating-task index.
         item.update(task_id=record.get('task_id') or item.get('task_id', ''), status=status,
-                    message=record.get('message', ''), progress=record.get('progress', 0))
+                    message=record.get('message', ''), progress=record.get('progress', 0),
+                    node_progress=copy.deepcopy(record.get('node_progress') or {}))
         for key in ('input_files', 'output_files', 'snapshot', 'origin', 'created_at', 'updated_at',
                     'cloud_success', 'task_document'):
             if key in record:
@@ -1115,6 +1133,7 @@ class CanvasEngine(QtCore.QObject):
                               if value in active_statuses), 'PREPARING')
             state.update(status=aggregate,
                          progress=sum(percentages) / max(1, len(percentages)), message=record.get('message', ''))
+        self._node_progress(state)
         state['activated'] = True
         if status in {'FAILED', 'UNKNOWN', 'CANCELED'}:
             self._halt_branch(document, node_id, status, record.get('message') or '任务未成功')

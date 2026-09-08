@@ -21,7 +21,7 @@ import requests
 from PyQt5 import QtCore
 
 from aetherloom_core.rh_tasks import (TERMINAL_STATUSES, TaskStore, normalize_base_url,
-                                      normalize_api_keys, api_key_id, is_download_recovery)
+                                      normalize_api_keys, api_key_id, is_download_recovery, output_group)
 from aetherloom_core.rh_submission_queue import get_submission_queue, SubmissionCancelled
 
 
@@ -236,14 +236,13 @@ class RhExecutionService(QtCore.QObject):
     @staticmethod
     def _document_state(record):
         """Mutable projection; immutable submission inputs are written once."""
-        state_fields = ('status', 'progress', 'message', 'warning', 'submission_error', 'cancel_requested',
+        state_fields = ('status', 'progress', 'node_progress', 'message', 'warning', 'submission_error', 'cancel_requested',
                         'cloud_success', 'created_at', 'updated_at')
         return dict(task_id=record.get('task_id'),
                     state={key: copy.deepcopy(record[key]) for key in state_fields if key in record},
                     queue=dict(submission_order=record.get('submission_order'),
                                submission_admitted=bool(record.get('submission_admitted')),
-                               group='active' if record.get('submission_admitted') or record.get('task_id')
-                                     or record.get('status') in FINAL else 'waiting'),
+                               group=output_group(record)),
                     results=copy.deepcopy(record.get('results') or []),
                     output_files=copy.deepcopy(record.get('output_files') or []),
                     input_files=copy.deepcopy(record.get('input_files') or []))
@@ -1003,7 +1002,7 @@ class RhExecutionService(QtCore.QObject):
             value = progress_entries.get(record.get('task_id'))
             if record['status'] == 'RUNNING' and value:
                 try:
-                    percent = 100 if value.get('finished') else float(value.get('percent') or 0)
+                    percent = 100 if value.get('finished') else float(value.get('overall_percent') or 0)
                     self._publish(record['run_id'], progress=percent, node_progress=value)
                 except Exception:
                     pass  # Optional visual progress must not stop recovery.

@@ -228,6 +228,40 @@ def get_progress_connection(api_key: str, task_id: str, *, base_url: str = DEFAU
     return url
 
 
+def get_app_progress_nodes(webapp_id: str, api_key: str, *, base_url: str = DEFAULT_BASE_URL,
+                           timeout: int = 4) -> Dict[str, str]:
+    """Optional full workflow map. App parameter fields are never a denominator.
+
+    Only follow an explicit workflowId returned by the official App metadata API;
+    App IDs and workflow IDs are different identities. Private Apps may omit it.
+    """
+    origin = site_base_url(base_url)
+    result = _request_json('GET', origin + '/api/webapp/apiCallDemo', 'Get application progress metadata',
+                           headers={'Host': urlsplit(origin).netloc},
+                           params={'apiKey': api_key, 'webappId': webapp_id}, timeout=timeout)
+    validate_response(result, 'Get application progress metadata', api_key=api_key)
+    data = result.get('data')
+    workflow_id = data.get('workflowId') if isinstance(data, dict) else None
+    if not isinstance(workflow_id, (str, int)) or isinstance(workflow_id, bool) or not str(workflow_id).isdigit():
+        return {}
+    result = _request_json('POST', origin + '/api/openapi/getJsonApiFormat', 'Get workflow progress nodes',
+                           headers={'Host': urlsplit(origin).netloc},
+                           json={'apiKey': api_key, 'workflowId': str(workflow_id)}, timeout=timeout)
+    validate_response(result, 'Get workflow progress nodes', api_key=api_key)
+    data = result.get('data')
+    prompt = data.get('prompt') if isinstance(data, dict) else None
+    if isinstance(prompt, str) and len(prompt) <= 8 * 1024 * 1024:
+        try:
+            prompt = json.loads(prompt)
+        except ValueError:
+            return {}
+    if (not isinstance(prompt, dict) or not 0 < len(prompt) <= 10000
+            or not all(isinstance(value, dict) and isinstance(value.get('class_type'), str)
+                       and isinstance(value.get('inputs'), dict) for value in prompt.values())):
+        return {}
+    return {str(key): value['class_type'][:120] for key, value in prompt.items()}
+
+
 def get_nodeinfo(webapp_id: str, api_key: str, *, base_url: str = DEFAULT_BASE_URL,
                  timeout: int = 15) -> bytes:
     """Return UTF-8 node-list JSON bytes, distinguishing errors from a valid []."""

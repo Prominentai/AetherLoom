@@ -7,7 +7,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from aetherloom_core.rh_ui import palette
 from aetherloom_core.media_limits import MAX_DECODE_PIXELS
-from aetherloom_core.rh_progress import draw_circular_progress, progress_percent
+from aetherloom_core.rh_progress import draw_circular_progress, progress_percent, progress_pair, progress_text
 from .model import input_ports, output_types
 from . import model
 
@@ -264,7 +264,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
         return QtCore.QRectF(self.width - 66, 13, 52, 25)
 
     def progress_rect(self):
-        return QtCore.QRectF(self.run_rect().center().x() - 19, 6, 38, 38)
+        return QtCore.QRectF(self.run_rect().center().x() - 22, 2, 44, 44)
 
     def shows_progress(self):
         return (self.node['kind'] == 'app' and node_is_active(self.node)
@@ -385,9 +385,9 @@ class NodeItem(QtWidgets.QGraphicsObject):
         if show_progress:
             progress_font = QtGui.QFont(font)
             progress_font.setPixelSize(10)
-            draw_circular_progress(painter, self.progress_rect(),
-                                   progress_percent(self.node.get('status'), self.node.get('progress')),
-                                   self.node.get('status'), p, stroke=3, font=progress_font)
+            overall, current = progress_pair(self.node.get('status'), self.node.get('node_progress'))
+            draw_circular_progress(painter, self.progress_rect(), current,
+                                   self.node.get('status'), p, stroke=2, font=progress_font, overall=overall)
         else:
             painter.setBrush(QtGui.QColor(p['accent_soft']))
             painter.setPen(QtCore.Qt.NoPen)
@@ -662,6 +662,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
                 item.output.kind = next(iter(types)) if len(types) == 1 else 'any'
                 item.output.refresh_connection()
                 item.setToolTip(str(node.get('error') or node.get('message') or '')
+                                + '\n外环：总进度；内环：当前节点进度\n' + progress_text(node.get('node_progress'))
                                 + '\n拖动右下角调整大小；双击结果可在设置面板中查看。')
                 item.update()
 

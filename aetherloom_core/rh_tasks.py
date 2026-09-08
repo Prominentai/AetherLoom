@@ -17,6 +17,22 @@ ACTIVE_STATUSES = frozenset({
 })
 
 
+def output_group(record):
+    """One display grouping for task JSON projections and App output cards."""
+    status = str(record.get('status') or '').upper()
+    if record.get('task_id') or status in TERMINAL_STATUSES | {
+        'UNKNOWN', 'PAUSED', 'SKIPPED', 'CANCELING', 'CANCEL_FAILED',
+    }:
+        return 'active'
+    # Admission grants retry permission, not a place in the results section.
+    # Keep each POST attempt here too, avoiding group churn during retries.
+    if status in {'PENDING', 'PREPARING', 'LOCAL_WAIT', 'SUBMITTING', 'RETRYING', 'WAITING_FOR_KEY'}:
+        return 'waiting'
+    if 'submission_admitted' in record:
+        return 'active' if record['submission_admitted'] else 'waiting'
+    return 'active'
+
+
 def is_download_recovery(value):
     """Only explicitly generated, unfinished local results survive a session."""
     if not isinstance(value, dict) or value.get('cancel_requested'):
@@ -248,6 +264,7 @@ class TaskLifecycle:
         self._download_retry_due = {}
         self._progress_due = {}
         self._progress_connected = set()
+        self._progress_node_maps = OrderedDict()
         self._receipt_maintenance_due = 0
         self._receipt_maintenance_worker = None
         # Cancellation shares the bounded status pool. No per-task retry threads.
@@ -302,6 +319,15 @@ class TaskLifecycle:
             service.lifecycle_event(webapp_id, event)
         submission_status = None
         with self.lock:
+            if event.startswith('TASK_PROGRESS_NODES:'):
+                _, task_id, payload = event.split(':', 2)
+                monitor = getattr(self.owner, '_rh_progress_monitor', None)
+                if monitor is not None and self.owner._rh_task_to_wid.get(task_id) == webapp_id:
+                    try:
+                        monitor.set_nodes(task_id, json.loads(payload))
+                    except (ValueError, TypeError):
+                        pass
+                return
             if event.startswith('TASK_PROGRESS_SOURCE:'):
                 parts = event.split(':', 2)
                 if len(parts) != 3:
@@ -451,10 +477,42 @@ class TaskLifecycle:
             url = self._api().get_progress_connection(api_key, task_id, base_url=base_url, timeout=8)
             if url and not self._cancelled(task_id):
                 self.emit(str(webapp_id), f'TASK_PROGRESS_SOURCE:{task_id}:{url}')
+                self._load_progress_nodes(task_id, webapp_id, api_key, base_url)
         except Exception:
             # Do not let an optional channel turn a RUNNING task into failure,
             # and do not log exceptions that might contain signed credentials.
             pass
+
+    def _load_progress_nodes(self, task_id, webapp_id, api_key, base_url):
+        # Optional metadata uses the existing worker. Share both successes and
+        # permission failures by site/App/key, without repeated status polling.
+        key = (normalize_base_url(base_url), str(webapp_id), api_key_id(api_key))
+        with self.lock:
+            cached = self._progress_node_maps.get(key)
+            if cached is None:
+                self._progress_node_maps[key] = (time.monotonic(), None)
+                while len(self._progress_node_maps) > 64:
+                    self._progress_node_maps.popitem(last=False)
+        if cached is not None:
+            nodes = cached[1]
+            if nodes:
+                self.emit(str(webapp_id), f'TASK_PROGRESS_NODES:{task_id}:' + json.dumps(nodes))
+            return
+        try:
+            nodes = self._api().get_app_progress_nodes(webapp_id, api_key, base_url=base_url, timeout=4)
+        except Exception:
+            nodes = {}
+        with self.lock:
+            self._progress_node_maps[key] = (time.monotonic(), nodes)
+            while len(self._progress_node_maps) > 64:
+                self._progress_node_maps.popitem(last=False)
+            recipients = [tid for tid, context in self.owner._rh_task_contexts.items()
+                          if str(context.get('webapp_id')) == str(webapp_id)
+                          and normalize_base_url(context.get('base_url')) == key[0]
+                          and api_key_id(context.get('api_key', '')) == key[2]]
+        if nodes:
+            for tid in set(recipients) | {str(task_id)}:
+                self.emit(str(webapp_id), f'TASK_PROGRESS_NODES:{tid}:' + json.dumps(nodes))
 
     def cancel_task(self, task_id, webapp_id=None):
         """Persist intent immediately; the bounded recovery pool confirms it.
