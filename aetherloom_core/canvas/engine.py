@@ -8,7 +8,6 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from PyQt5 import QtCore
-from aetherloom_core.rh_progress import progress_pair
 
 from . import model
 
@@ -999,8 +998,8 @@ class CanvasEngine(QtCore.QObject):
         items = state.get('items') or []
         current = next((item for item in reversed(items) if item.get('status') == 'RUNNING' and item.get('node_progress')), {})
         detail = copy.deepcopy(current.get('node_progress') or {})
-        totals = [progress_pair(item.get('status'), item.get('node_progress'))[0] for item in items]
-        detail['overall_percent'] = (sum(totals) / len(totals) if totals and all(v is not None for v in totals) else None)
+        for key in ('overall_percent', 'overall_reason', 'total'):
+            detail.pop(key, None)  # Discard legacy total-progress metadata on restore.
         if len(items) > 1:
             detail['finished'] = all(item.get('status') == 'SUCCESS' for item in items)
         state['node_progress'] = detail

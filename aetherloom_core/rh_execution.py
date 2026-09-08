@@ -1002,7 +1002,7 @@ class RhExecutionService(QtCore.QObject):
             value = progress_entries.get(record.get('task_id'))
             if record['status'] == 'RUNNING' and value:
                 try:
-                    percent = 100 if value.get('finished') else float(value.get('overall_percent') or 0)
+                    percent = 100 if value.get('finished') else float(value.get('percent') or 0)
                     self._publish(record['run_id'], progress=percent, node_progress=value)
                 except Exception:
                     pass  # Optional visual progress must not stop recovery.

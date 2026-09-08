@@ -7,7 +7,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from aetherloom_core.rh_ui import palette
 from aetherloom_core.media_limits import MAX_DECODE_PIXELS
-from aetherloom_core.rh_progress import draw_circular_progress, progress_percent, progress_pair, progress_text
+from aetherloom_core.rh_progress import draw_circular_progress, progress_percent, current_node_percent, progress_text
 from .model import input_ports, output_types
 from . import model
 
@@ -383,11 +383,9 @@ class NodeItem(QtWidgets.QGraphicsObject):
                          QtGui.QFontMetrics(font).elidedText(title, QtCore.Qt.ElideRight, int(self.width - 91)))
         show_progress = self.shows_progress()
         if show_progress:
-            progress_font = QtGui.QFont(font)
-            progress_font.setPixelSize(10)
-            overall, current = progress_pair(self.node.get('status'), self.node.get('node_progress'))
+            current = current_node_percent(self.node.get('status'), self.node.get('node_progress'))
             draw_circular_progress(painter, self.progress_rect(), current,
-                                   self.node.get('status'), p, stroke=2, font=progress_font, overall=overall)
+                                   self.node.get('status'), p, stroke=2)
         else:
             painter.setBrush(QtGui.QColor(p['accent_soft']))
             painter.setPen(QtCore.Qt.NoPen)
@@ -662,7 +660,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
                 item.output.kind = next(iter(types)) if len(types) == 1 else 'any'
                 item.output.refresh_connection()
                 item.setToolTip(str(node.get('error') or node.get('message') or '')
-                                + '\n外环：总进度；内环：当前节点进度\n' + progress_text(node.get('node_progress'))
+                                + '\n当前节点进度\n' + progress_text(node.get('node_progress'))
                                 + '\n拖动右下角调整大小；双击结果可在设置面板中查看。')
                 item.update()
 
