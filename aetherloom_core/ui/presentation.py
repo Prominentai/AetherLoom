@@ -626,11 +626,6 @@ class PresentationMixin:
             QScrollBar::handle:vertical:pressed { background: qradialgradient(cx:0.5, cy:0.5, radius:0.7, fx:0.5, fy:0.5, stop:0 #ffffff, stop:0.32 rgba(27, 82, 181, 0.95), stop:1 rgba(27, 82, 181, 0.85)); }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; width: 0px; }
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
-            QMenu { background: #ffffff; border: 1px solid #d4daec; border-radius: 8px; padding: 6px; color: #1f2430; }
-            QMenu::item { padding: 6px 16px; border-radius: 6px; }
-            QMenu::item:selected { background: rgba(34, 101, 216, 0.16); color: #0f1626; }
-            QMenu::item:disabled { color: #9aa5c0; }
-            QMenu::separator { height: 1px; background: #e3e7f4; margin: 4px 8px; }
         '''
 
         dark_css = '''
@@ -673,11 +668,6 @@ class PresentationMixin:
             QTabBar::tab { background: #151b2b; color: #cfd7ff; border: 1px solid rgba(255, 255, 255, 0.08); border-bottom: none; border-top-left-radius: 10px; border-top-right-radius: 10px; padding: 6px 18px; margin-right: 6px; }
             QTabBar::tab:selected { background: #2b8bd5; color: #ffffff; border-color: #349ff3; }
             QTabBar::tab:hover { background: rgba(255, 255, 255, 0.08); }
-            QMenu { background: #131a27; border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 8px; padding: 6px; color: #f0f5ff; }
-            QMenu::item { padding: 6px 16px; border-radius: 6px; }
-            QMenu::item:selected { background: rgba(53, 167, 255, 0.32); color: #ffffff; }
-            QMenu::item:disabled { color: rgba(255, 255, 255, 0.35); }
-            QMenu::separator { height: 1px; background: rgba(255, 255, 255, 0.12); margin: 4px 8px; }
         '''
 
         # Solid scroll thumbs and keyboard focus remain visible in either theme.
@@ -700,7 +690,9 @@ class PresentationMixin:
                 light_css += detail_css
             else:
                 dark_css += detail_css
-        return {'light': light_css, 'dark': dark_css}
+        from aetherloom_core.ui.menus import stylesheet as menu_stylesheet
+        return {'light': light_css + menu_stylesheet('light'),
+                'dark': dark_css + menu_stylesheet('dark')}
 
 
     def _apply_theme(self, mode=None):
@@ -723,6 +715,10 @@ class PresentationMixin:
         if css:
             self.setStyleSheet(css)
             self._fit_sidebar_to_theme()
+        from aetherloom_core.ui.menus import MenuTheme
+        if not hasattr(self, '_menu_theme'):
+            self._menu_theme = MenuTheme(self)
+        self._menu_theme.refresh()
         if hasattr(self, 'local_page'):
             from aetherloom_core.local_browser_ui import stylesheet as local_browser_stylesheet
             self.local_page.setStyleSheet(local_browser_stylesheet(mode))

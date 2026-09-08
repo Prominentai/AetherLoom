@@ -87,6 +87,8 @@ def workflow_document(document):
     result['batch_count'] = normalize_batch_count(document.get('batch_count', 1))
     result['view'] = result.get('view') or {}
     for node in result['nodes']:
+        # Obsolete node repetition settings must not survive the next save/export.
+        node.pop('run_count', None)
         for key in RUNTIME_FIELDS:
             node.pop(key, None)
         if node.get('kind') in MEDIA:
@@ -98,6 +100,7 @@ def initialize_runtime(document):
     document['batch_count'] = normalize_batch_count(document.get('batch_count', 1))
     document.setdefault('run', {})
     for node in document['nodes']:
+        node.pop('run_count', None)
         node.setdefault('results', [])
         node.setdefault('status', 'IDLE')
         node.setdefault('fingerprint', '')
@@ -115,9 +118,10 @@ def new_node(kind, title=None, **values):
     if kind not in KINDS:
         raise ValueError('不支持的节点类型')
     node = {'id': uuid.uuid4().hex, 'kind': kind, 'title': title or TITLES[kind],
-            'x': 0, 'y': 0, 'params': {}, 'run_count': 1, 'filter_repeats': False,
+            'x': 0, 'y': 0, 'params': {}, 'filter_repeats': False,
             'decode_settings': {}, 'results': [], 'fingerprint': '', 'status': 'IDLE'}
     node.update(copy.deepcopy(values))
+    node.pop('run_count', None)
     if kind in MEDIA:
         node['params'].setdefault('files', [])
     elif kind == 'text':
@@ -249,9 +253,6 @@ def validate_node(node):
         raise ValueError('画布包含无效节点')
     if not isinstance(node.get('params', {}), dict) or not isinstance(node.get('decode_settings', {}), dict):
         raise ValueError('节点参数格式错误')
-    count = node.get('run_count', 1)
-    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 99:
-        raise ValueError('节点运行次数必须在 1 至 99 之间')
     if node['kind'] == 'app':
         if not isinstance(node.get('app', {}), dict):
             raise ValueError('App 定义格式错误')
@@ -580,7 +581,8 @@ def fingerprint(node, inputs, edges=()):
     payload = {'kind': node['kind'], 'params': params, 'nodes': fields,
                'app': {key: app.get(key) for key in ('webapp_id', 'base_url')},
                'decode_settings': node.get('decode_settings', {}),
-               'run_count': node.get('run_count', 1),
+               # Preserve cache identity for legacy single-run nodes only.
+               'run_count': 1,
                'inputs': {key: [result_signature(r) for r in values] for key, values in inputs.items()},
                'edges': [{key: edge.get(key) for key in ('source', 'input', 'mode', 'indices')}
                          for edge in edges]}

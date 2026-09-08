@@ -109,12 +109,25 @@ class CircularProgress(QtWidgets.QWidget):
     def paintEvent(self, event):
         colors = palette(getattr(self.owner, '_theme_mode', 'dark'))
         painter = QtGui.QPainter(self)
-        rect = QtCore.QRectF((self.width() - 124) / 2, 20, 124, 124)
+        diameter = getattr(self, '_diameter', 124)
+        rect = QtCore.QRectF((self.width() - diameter) / 2, 16, diameter, diameter)
         font = QtGui.QFont(self.font())
-        font.setPointSize(24)
+        font.setPointSize(max(14, int(24 * diameter / 124)))
         font.setBold(True)
         draw_circular_progress(painter, rect, self.percent, self.status, colors, font=font)
         painter.end()
+
+    def set_available_height(self, available):
+        text_height = max(self.label.fontMetrics().height(), self.label.heightForWidth(max(1, self.width() - 16)))
+        height = max(text_height + 98, min(248, available))
+        diameter = max(64, min(124, self.width() - 24, height - text_height - 38))
+        self._diameter = diameter
+        margins = QtCore.QMargins(8, diameter + 28, 8, 10)
+        if self.layout().contentsMargins() != margins:
+            self.layout().setContentsMargins(margins)
+        if self.minimumHeight() != height or self.maximumHeight() != height:
+            self.setFixedHeight(height)
+        self.update()
 
 
 def update_card_progress(owner, card, status, progress=None):

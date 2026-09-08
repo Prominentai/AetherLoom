@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 
+import requests
 from PyQt5 import QtCore
 
 from aetherloom_core.rh_tasks import (TERMINAL_STATUSES, TaskStore, normalize_base_url,
@@ -28,6 +29,34 @@ FINAL = TERMINAL_STATUSES | {'UNKNOWN'}
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff', '.gif', '.avif', '.heic'}
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v'}
 AUDIO_EXTENSIONS = {'.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac', '.opus'}
+
+
+def submission_diagnostic(error, response=None):
+    """Keep actionable failure metadata without request bodies or credentials."""
+    from api_calls.call_rh import RunningHubResponseError
+    detail = {'exception_type': type(error).__name__}
+    http_status = getattr(getattr(error, 'response', None), 'status_code', None)
+    if isinstance(http_status, int):
+        detail['http_status'] = http_status
+    if isinstance(response, dict):
+        try:
+            detail['response_code'] = int(response.get('code'))
+        except (ValueError, TypeError, OverflowError):
+            pass
+    if isinstance(error, requests.Timeout):
+        reason = '提交请求超时，未能确认服务端是否创建任务'
+    elif isinstance(error, requests.ConnectionError):
+        reason = '提交连接中断，未能确认服务端是否收到请求'
+    elif isinstance(error, requests.HTTPError):
+        reason = '提交接口返回 HTTP {}'.format(http_status if isinstance(http_status, int) else '错误')
+    elif isinstance(error, RunningHubResponseError):
+        reason = '提交接口未返回可确认的 taskId'
+        if 'response_code' in detail:
+            reason += '（code={}）'.format(detail['response_code'])
+    else:
+        reason = '提交处理异常（{}）'.format(type(error).__name__)
+    detail['reason'] = reason
+    return detail
 
 
 class MissingDecodePassword(RuntimeError):
@@ -207,7 +236,7 @@ class RhExecutionService(QtCore.QObject):
     @staticmethod
     def _document_state(record):
         """Mutable projection; immutable submission inputs are written once."""
-        state_fields = ('status', 'progress', 'message', 'warning', 'cancel_requested',
+        state_fields = ('status', 'progress', 'message', 'warning', 'submission_error', 'cancel_requested',
                         'cloud_success', 'created_at', 'updated_at')
         return dict(task_id=record.get('task_id'),
                     state={key: copy.deepcopy(record[key]) for key in state_fields if key in record},
@@ -506,6 +535,7 @@ class RhExecutionService(QtCore.QObject):
         post_attempted = False
         post_document = {}
         post_count = 0
+        submission_response = None
         try:
             from api_calls.call_rh import (accepted_task_id, submission_response_kind,
                 validate_response, RunningHubResponseError, RunningHubAPIError)
@@ -559,7 +589,7 @@ class RhExecutionService(QtCore.QObject):
                 return nodes
 
             def request():
-                nonlocal post_attempted, api_key, post_document, post_count
+                nonlocal post_attempted, api_key, post_document, post_count, submission_response
                 busy_response, failures = None, []
                 for key_index, key in enumerate(api_keys, 1):
                     if self._stopped(run_id):
@@ -594,6 +624,7 @@ class RhExecutionService(QtCore.QObject):
                                 raise SubmissionCancelled()
                             self._post_inflight.add(run_id)
                             post_attempted = True
+                        submission_response = None
                         response = api.run_task(snapshot['webapp_id'], key, nodes,
                                                 base_url=snapshot['base_url'], timeout=30)
                     except SubmissionCancelled:
@@ -607,6 +638,7 @@ class RhExecutionService(QtCore.QObject):
                                 response = error.response.json()
                             except (AttributeError, TypeError, ValueError):
                                 response = None
+                        submission_response = response
                         if accepted_task_id(response):
                             pass
                         elif isinstance(error, RunningHubAPIError):
@@ -620,6 +652,7 @@ class RhExecutionService(QtCore.QObject):
                                                  {'post': dict(post_document, phase='unknown')})
                             raise
                     outcome = submission_response_kind(response)
+                    submission_response = response
                     if outcome == 'accepted':
                         api_key = key
                         snapshot['api_key'] = key
@@ -748,10 +781,11 @@ class RhExecutionService(QtCore.QObject):
             else:
                 unknown = post_attempted and not isinstance(error, (RunningHubAPIError, SubmissionKeysRejected))
                 status = 'UNKNOWN' if unknown else 'FAILED'
-                message = ('提交结果未知，未自动重试；请在 RunningHub 确认任务' if unknown else
+                diagnostic = submission_diagnostic(error, submission_response)
+                message = ('提交结果未知：' + diagnostic['reason'] + '。未重复提交，请在 RunningHub 确认任务' if unknown else
                            str(error) if isinstance(error, (ValueError, RunningHubAPIError, SubmissionKeysRejected)) else
                            '运行失败：' + type(error).__name__)
-                self._publish(run_id, status=status, message=message)
+                self._publish(run_id, status=status, message=message, submission_error=diagnostic)
         finally:
             self.queue.release_order(order)
             if task_id:

@@ -335,6 +335,8 @@ class CanvasPage(QtWidgets.QWidget):
         self.view = CanvasView(self.scene)
         self.scene.selectionChanged.connect(self._selection_changed)
         self.scene.nodes_moved.connect(self._move_nodes)
+        self.scene.nodes_resized.connect(self._resize_nodes)
+        self.scene.result_requested.connect(self._focus_result)
         self.scene.connect_requested.connect(self._connect_nodes)
         self.scene.reconnect_requested.connect(self._reconnect_nodes)
         self.scene.disconnect_requested.connect(self._disconnect_edge)
@@ -362,11 +364,11 @@ class CanvasPage(QtWidgets.QWidget):
         self.batch_spin.setRange(1, 99)
         self.batch_spin.setValue(self.document.get('batch_count', 1))
         self.batch_spin.setKeyboardTracking(False)
-        self.batch_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.batch_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.UpDownArrows)
         self.batch_spin.setAlignment(QtCore.Qt.AlignCenter)
-        self.batch_spin.setFixedWidth(58)
+        self.batch_spin.setFixedWidth(80)
         self.batch_spin.setMinimumHeight(34)
-        self.batch_spin.setToolTip('整张画布连续执行的批次数（1–99）；单节点运行始终只执行一批，不改变 App 每组输入运行次数。')
+        self.batch_spin.setToolTip('整张画布连续执行的批次数（1–99）；单节点运行始终只执行一批，每个 App 节点对每组输入执行一次。')
         self.batch_spin.valueChanged.connect(self._batch_count_changed)
         batch_layout.addWidget(self.batch_label)
         batch_layout.addWidget(self.batch_spin)
@@ -527,7 +529,7 @@ class CanvasPage(QtWidgets.QWidget):
         if requests:
             pieces.append(f'此画布缺少 {len(requests)} 个 App，涉及 {count} 个节点。添加后保留各节点参数。')
         if issues:
-            pieces.append(f'{len(issues)} 个节点的 App 链接无效，请在节点设置中修正。')
+            pieces.append(f'{len(issues)} 个节点的 App 引用无效，请重新添加对应 App 节点。')
         if self._install_summary:
             pieces.append(self._install_summary)
         self.missing_label.setText(' '.join(pieces))
@@ -647,11 +649,7 @@ class CanvasPage(QtWidgets.QWidget):
             self.apps[value] = copy.deepcopy(app)
             decode = copy.deepcopy((getattr(self.owner, 'rh_local_decode_settings', {}) or {}).get(value, {}))
             decode = dict({'enabled': False, 'mode': 'grc', 'password': '', 'grid_cols': 32, 'delete_original': True}, **decode)
-            count = 1
             if cached_page is not None:
-                count_editor = getattr(cached_page, '_rh_run_count', None)
-                if count_editor is not None:
-                    count = int(count_editor.value())
                 for key, name, getter in (
                     ('enabled', '_rh_local_decode_cb', 'isChecked'),
                     ('mode', '_rh_local_mode_combo', 'currentData'),
@@ -662,7 +660,7 @@ class CanvasPage(QtWidgets.QWidget):
                     if widget is not None:
                         decode[key] = getattr(widget, getter)()
             node = model.new_node('app', app['name'], app=app, decode_settings=decode,
-                                  params={model.parameter_key(field): copy.deepcopy(field.get('fieldValue', '')) for field in app['nodes']}, run_count=count)
+                                  params={model.parameter_key(field): copy.deepcopy(field.get('fieldValue', '')) for field in app['nodes']})
             model.normalize_app_urls({'nodes': [node]})
         else:
             node = model.new_node(value)
@@ -910,6 +908,13 @@ class CanvasPage(QtWidgets.QWidget):
                 node['x'], node['y'] = positions[node['id']]
         self._edited()
 
+    def _resize_nodes(self, sizes):
+        self._checkpoint()
+        for node in self.document['nodes']:
+            if node['id'] in sizes:
+                node['size'] = list(sizes[node['id']])
+        self._edited()
+
     def _connect_nodes(self, source, target, port):
         self._reconnect_nodes('', source, target, port)
 
@@ -1015,7 +1020,11 @@ class CanvasPage(QtWidgets.QWidget):
             if is_app:
                 open_app = QtWidgets.QPushButton('查看 App 输出卡片')
                 open_app.clicked.connect(lambda unused=False, app_id=str(node.node.get('app', {}).get('webapp_id', '')): self._open_app(app_id))
-                inspector.form.insertWidget(2, open_app)
+                inspector.tab_forms[3].insertWidget(0, open_app)
+                previous = self._inspector
+                if (isinstance(previous, Inspector) and previous.tabs is not None
+                        and previous.node['id'] == node.node['id']):
+                    inspector.tabs.setCurrentIndex(previous.tabs.currentIndex())
         elif edge:
             inspector = EdgeInspector(edge.edge)
             inspector.changed.connect(lambda key, value, edge_id=edge.edge['id']: self._edge_changed(edge_id, key, value))
@@ -1052,8 +1061,27 @@ class CanvasPage(QtWidgets.QWidget):
         self.inspector_action.setChecked(True)
         self._selection_changed(force=True)
         if isinstance(self._inspector, Inspector) and self._inspector.decode_group:
-            self.inspector_scroll.ensureWidgetVisible(self._inspector.decode_group)
+            self._inspector.tabs.setCurrentIndex(1)
+            self._inspector.tabs.widget(1).ensureWidgetVisible(self._inspector.decode_group)
             self._inspector.decode_group.setFocus()
+
+    def _focus_result(self, node_id, index):
+        item = self.scene.nodes.get(node_id)
+        if item is None:
+            return
+        self.inspector_action.setChecked(True)
+        self.scene.clearSelection()
+        item.setSelected(True)
+        inspector = self._inspector
+        if isinstance(inspector, Inspector) and inspector.results_list is not None:
+            if inspector.tabs is not None:
+                inspector.tabs.setCurrentIndex(3)
+            listing = inspector.results_list
+            if 0 <= index < listing.count():
+                listing.setCurrentRow(index)
+                listing.scrollToItem(listing.item(index))
+            if inspector.tabs is None:
+                self.inspector_scroll.ensureWidgetVisible(listing)
 
     def _open_app(self, app_id):
         button = (getattr(self.owner, '_rh_app_buttons', {}) or {}).get(app_id)
@@ -1509,6 +1537,9 @@ class CanvasPage(QtWidgets.QWidget):
     def refresh_theme(self):
         mode = getattr(self.owner, '_theme_mode', 'dark')
         p = palette(mode)
+        arrow_root = Path(current_dir) / 'icons'
+        up_arrow = (arrow_root / f'ui-chevron-up-{mode}.svg').as_posix()
+        down_arrow = (arrow_root / f'ui-chevron-down-{mode}.svg').as_posix()
         self.scene.colors = p
         self.scene.refresh_ports()
         self.scene.update()
@@ -1544,6 +1575,13 @@ class CanvasPage(QtWidgets.QWidget):
             QWidget#aetherloomCanvasPage QAbstractSpinBox QLineEdit {{ border: none; background: transparent; padding: 0; }}
             QWidget#aetherloomCanvasPage QSpinBox#canvasBatchCount {{ padding: 3px 5px; }}
             QWidget#aetherloomCanvasPage QSpinBox#canvasBatchCount:focus {{ border-color: {p['accent']}; }}
+            QSpinBox#canvasBatchCount::up-button {{ subcontrol-origin: border; subcontrol-position: top right;
+                width: 23px; height: 17px; border: none; border-left: 1px solid {p['border']}; background: transparent; }}
+            QSpinBox#canvasBatchCount::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right;
+                width: 23px; height: 17px; border: none; border-left: 1px solid {p['border']}; background: transparent; }}
+            QSpinBox#canvasBatchCount::up-button:hover, QSpinBox#canvasBatchCount::down-button:hover {{ background: {p['hover']}; }}
+            QSpinBox#canvasBatchCount::up-arrow {{ image: url("{up_arrow}"); width: 12px; height: 12px; }}
+            QSpinBox#canvasBatchCount::down-arrow {{ image: url("{down_arrow}"); width: 12px; height: 12px; }}
             QWidget#aetherloomCanvasPage QPushButton, QWidget#aetherloomCanvasPage QToolButton {{ background: {p['input']}; border: 1px solid {p['border']}; border-radius: 6px; padding: 7px 9px; }}
             QWidget#aetherloomCanvasPage QPushButton:hover, QWidget#aetherloomCanvasPage QToolButton:hover {{ background: {p['hover']}; border-color: {p['muted']}; }}
             QWidget#aetherloomCanvasPage QToolButton:checked {{ background: {p['accent_soft']}; color: {p['accent']}; }}
@@ -1556,6 +1594,14 @@ class CanvasPage(QtWidgets.QWidget):
             QWidget#aetherloomCanvasPage QToolButton#qt_toolbar_ext_button {{ min-width: 24px; min-height: 28px; padding: 2px; }}
             QWidget#aetherloomCanvasPage QGroupBox {{ border: 1px solid {p['border']}; border-radius: 7px; margin-top: 10px; padding-top: 12px; }}
             QWidget#aetherloomCanvasPage QGroupBox::title {{ subcontrol-origin: margin; left: 9px; padding: 0 4px; }}
+            QTabWidget#canvasNodeSettingsTabs::pane {{ border: none; border-top: 1px solid {p['border']}; }}
+            QScrollArea#canvasNodeTabScroll, QWidget#canvasNodeTabContent {{ background: {p['surface']}; border: none; }}
+            QTabWidget#canvasNodeSettingsTabs QTabBar {{ font-size: 11px; }}
+            QTabWidget#canvasNodeSettingsTabs QTabBar::tab {{ background: transparent; color: {p['muted']};
+                border: none; border-bottom: 2px solid transparent; padding: 8px 2px; margin: 0; font-size: 11px; }}
+            QTabWidget#canvasNodeSettingsTabs QTabBar::tab:selected {{ color: {p['accent']};
+                background: {p['accent_soft']}; border-bottom-color: {p['accent']}; }}
+            QTabWidget#canvasNodeSettingsTabs QTabBar::tab:hover {{ background: {p['hover']}; }}
             QWidget#aetherloomCanvasPage QSplitter::handle {{ background: transparent; width: 8px; }}
             QWidget#aetherloomCanvasPage QScrollBar:vertical {{ width: 8px; background: transparent; }}
             QWidget#aetherloomCanvasPage QScrollBar::handle:vertical {{ background: {p['border']}; border-radius: 4px; min-height: 26px; }}

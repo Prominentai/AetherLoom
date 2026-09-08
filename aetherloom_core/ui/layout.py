@@ -5157,13 +5157,13 @@ class MainLayoutMixin:
                                         preview_hint.setObjectName('rhMuted')
                                         preview_hint.setWordWrap(True)
                                         preview_layout.addWidget(preview_hint)
-                                        from aetherloom_core.rh_output_groups import RhOutputGroups
+                                        from aetherloom_core.rh_output_groups import RhOutputGroups, OutputCard
                                         preview_stack = RhOutputGroups(app_page)
                                         app_page._rh_output_groups = preview_stack
                                         app_page._rh_result_count_label = preview_count_label
                                         _preview_cards = []
                                         app_page._rh_preview_cards = _preview_cards
-                                        _card_fixed_w = 280
+                                        # OutputCard and its group own responsive preview geometry.
 
                                         def _reflow_preview_cards():
                                             # The shared bridge owns both current pages and their ordering.
@@ -5485,12 +5485,15 @@ class MainLayoutMixin:
 
                                         preview_layout.addWidget(preview_container, 1)
 
-                                        # no dynamic rescale; cards keep fixed preview size and only reflow positions
+                                        # OutputCard scales cached previews after layout changes.
 
                                         # render preview content for a card (does not modify history)
                                         def _render_preview_content(card, rpath, rtitle=None):
                                             try:
+                                                card._preview_size_key = None
                                                 lbl = getattr(card, '_img_label', None)
+                                                if isinstance(lbl, QtWidgets.QLabel):
+                                                    lbl._orig_pixmap = None
                                                 # detect file type early so we can switch widget type when needed
                                                 try:
                                                     ext = os.path.splitext(rpath)[1].lower() if rpath else ''
@@ -5521,8 +5524,8 @@ class MainLayoutMixin:
                                                         except Exception:
                                                             pass
                                                         try:
-                                                            new_lbl0.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-                                                            new_lbl0.setFixedWidth(_card_fixed_w - 24)
+                                                            new_lbl0.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                                                            new_lbl0.setMinimumWidth(0)
                                                             new_lbl0.setMinimumHeight(30)
                                                         except Exception:
                                                             pass
@@ -5657,8 +5660,8 @@ class MainLayoutMixin:
                                                                     try:
                                                                         new_txt.setReadOnly(True)
                                                                         new_txt.setAcceptRichText(False)
-                                                                        new_txt.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Minimum)
-                                                                        new_txt.setFixedWidth(_card_fixed_w - 24)
+                                                                        new_txt.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                                                                        new_txt.setMinimumWidth(0)
                                                                     except Exception:
                                                                         pass
                                                                     try:
@@ -5705,8 +5708,8 @@ class MainLayoutMixin:
                                                                     except Exception:
                                                                         pass
                                                                     try:
-                                                                        lbl.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Minimum)
-                                                                        lbl.setFixedWidth(_card_fixed_w - 24)
+                                                                        lbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                                                                        lbl.setMinimumWidth(0)
                                                                     except Exception:
                                                                         pass
                                                                 else:
@@ -5765,8 +5768,8 @@ class MainLayoutMixin:
                                                                         except Exception:
                                                                             pass
                                                                         try:
-                                                                            new_lbl2.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-                                                                            new_lbl2.setFixedWidth(_card_fixed_w - 24)
+                                                                            new_lbl2.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                                                                            new_lbl2.setMinimumWidth(0)
                                                                             new_lbl2.setMinimumHeight(30)
                                                                         except Exception:
                                                                             pass
@@ -5853,7 +5856,7 @@ class MainLayoutMixin:
                                                         except Exception:
                                                             pass
                                                         try:
-                                                            target_w = max(120, _card_fixed_w - 32)
+                                                            target_w = max(1, card.preview_width() - 8)
                                                             try:
                                                                 scaled = pix.scaledToWidth(target_w, QtCore.Qt.SmoothTransformation)
                                                             except Exception:
@@ -5889,6 +5892,10 @@ class MainLayoutMixin:
                                                             pass
                                             except Exception:
                                                 pass
+
+                                            finally:
+                                                if card is not None:
+                                                    card.refresh_preview()
 
                                         def _refresh_nav(card):
                                             try:
@@ -5980,7 +5987,7 @@ class MainLayoutMixin:
 
                                         def _add_preview_card(path, title=None):
                                             try:
-                                                card = QtWidgets.QFrame()
+                                                card = OutputCard()
                                                 card.setFrameShape(QtWidgets.QFrame.StyledPanel)
                                                 try:
                                                     # default to collapsed for cards until a preview path is set
@@ -5988,8 +5995,8 @@ class MainLayoutMixin:
                                                 except Exception:
                                                     pass
                                                 try:
-                                                    card.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-                                                    card.setFixedWidth(_card_fixed_w)
+                                                    card.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                                                    card.setMinimumWidth(0)
                                                 except Exception:
                                                     pass
                                                 card.setObjectName('nodePreviewCard')
@@ -6007,8 +6014,8 @@ class MainLayoutMixin:
                                                     # use a read-only text edit for textual previews
                                                     lbl = QtWidgets.QTextEdit()
                                                     lbl.setReadOnly(True)
-                                                    lbl.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Minimum)
-                                                    lbl.setFixedWidth(_card_fixed_w - 24)
+                                                    lbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                                                    lbl.setMinimumWidth(0)
                                                     try:
                                                         lbl.setAcceptRichText(False)
                                                     except Exception:
@@ -6055,8 +6062,8 @@ class MainLayoutMixin:
                                                 else:
                                                     lbl = QtWidgets.QLabel()
                                                     lbl.setAlignment(Qt.AlignCenter)
-                                                    lbl.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-                                                    lbl.setFixedWidth(_card_fixed_w - 24)
+                                                    lbl.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                                                    lbl.setMinimumWidth(0)
                                                     lbl.setMinimumHeight(30)
                                                     # ensure label will scale to right-side container width
                                                     try:
@@ -6068,8 +6075,8 @@ class MainLayoutMixin:
                                                         if not pix.isNull():
                                                             lbl._orig_pixmap = pix
                                                             try:
-                                                                # fixed preview width; do not rescale on container resize
-                                                                target_w = max(120, _card_fixed_w - 32)
+                                                                # Initial preview; OutputCard fits it after placement.
+                                                                target_w = max(1, card.preview_width() - 8)
                                                                 scaled = pix.scaledToWidth(target_w, QtCore.Qt.SmoothTransformation)
                                                                 lbl.setPixmap(scaled)
                                                                 try:

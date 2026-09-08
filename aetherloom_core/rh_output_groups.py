@@ -1,5 +1,92 @@
 """Two bounded, independently paged result sections for an RH App."""
-from PyQt5 import QtCore, QtWidgets, sip
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
+
+
+class OutputCard(QtWidgets.QFrame):
+    """Resize existing preview content without reopening files or media players."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self._preview_size_key = None
+        self._available_height = 0
+        self._preview_timer = QtCore.QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self._fit_preview)
+
+    def preview_width(self):
+        margins = self.layout().contentsMargins() if self.layout() else QtCore.QMargins()
+        return max(1, self.contentsRect().width() - margins.left() - margins.right())
+
+    def refresh_preview(self):
+        if not self._preview_timer.isActive():
+            self._preview_timer.start(0)
+
+    def set_available_size(self, width, height):
+        self.setFixedWidth(width)
+        if height != self._available_height:
+            self._available_height = height
+            self.refresh_preview()
+
+    def _height_limit(self, label, width):
+        layout = self.layout()
+        margins = layout.contentsMargins()
+        overhead = margins.top() + margins.bottom() + 2 * self.frameWidth()
+        visible = 0
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item.isEmpty():
+                continue
+            visible += 1
+            if item.widget() is label:
+                continue
+            height = item.heightForWidth(width) if item.hasHeightForWidth() else item.sizeHint().height()
+            overhead += max(0, height)
+        overhead += max(0, visible - 1) * layout.spacing()
+        return max(96, min(420, self._available_height - overhead)) if self._available_height else 420
+
+    def event(self, event):
+        if event.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Show,
+                            QtCore.QEvent.LayoutRequest, QtCore.QEvent.FontChange):
+            if hasattr(self, '_preview_timer'):
+                self.refresh_preview()
+        return super().event(event)
+
+    def _fit_preview(self):
+        label = getattr(self, '_img_label', None)
+        if label is None or sip.isdeleted(label) or not self.isVisible():
+            return
+        width = self.preview_width()
+        progress = getattr(self, '_rh_progress_widget', None)
+        if progress is not None and not sip.isdeleted(progress) and not progress.isHidden():
+            progress.set_available_height(self._height_limit(progress, width))
+            return
+        height_limit = self._height_limit(label, width)
+        label.setMinimumWidth(0)
+        label.setMaximumWidth(QtWidgets.QWIDGETSIZE_MAX)
+        label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        if isinstance(label, QtWidgets.QTextEdit):
+            # Wrapping follows the actual viewport; long text remains scrollable.
+            height = int(label.document().documentLayout().documentSize().height()) + 12
+            height = max(96, min(height, height_limit, max(160, min(360, width))))
+        elif isinstance(label, QtWidgets.QLabel):
+            pixmap = getattr(label, '_orig_pixmap', None)
+            if isinstance(pixmap, QtGui.QPixmap) and not pixmap.isNull():
+                limit = QtCore.QSize(max(1, width - 8), max(1, min(height_limit - 12, int(width * 1.35))))
+                key = (id(label), pixmap.cacheKey(), limit.width(), limit.height())
+                if key != self._preview_size_key:
+                    scaled = pixmap.scaled(limit, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                    label.setPixmap(scaled)
+                    self._preview_size_key = key
+                height = label.pixmap().height() + 12
+            else:
+                label.setWordWrap(True)
+                height = max(48, min(160, label.heightForWidth(width)))
+        else:
+            return
+        if label.minimumHeight() != height or label.maximumHeight() != height:
+            label.setFixedHeight(height)
 
 
 class _OutputGroup(QtWidgets.QFrame):
@@ -11,6 +98,11 @@ class _OutputGroup(QtWidgets.QFrame):
         self.key, self.title = key, title
         self._cards = []
         self._columns = 0
+        self._card_width = 0
+        self._available_height = 0
+        self._reflow_timer = QtCore.QTimer(self)
+        self._reflow_timer.setSingleShot(True)
+        self._reflow_timer.timeout.connect(self._reflow)
         self.setMinimumWidth(0)
         self.setObjectName('rhOutputGroup')
         layout = QtWidgets.QVBoxLayout(self)
@@ -65,7 +157,7 @@ class _OutputGroup(QtWidgets.QFrame):
         body_layout.addWidget(self.empty)
         body_layout.addWidget(self.scroll, 1)
         layout.addWidget(self.body, 1)
-        self.content.installEventFilter(self)
+        self.scroll.viewport().installEventFilter(self)
         self.previous.clicked.connect(lambda: self.page_requested.emit(key, -1))
         self.following.clicked.connect(lambda: self.page_requested.emit(key, 1))
         self.toggle.toggled.connect(self._toggle)
@@ -96,20 +188,34 @@ class _OutputGroup(QtWidgets.QFrame):
         self._reflow()
 
     def _reflow(self):
-        columns = max(1, self.content.width() // 292)
-        if columns == self._columns:
+        # The viewport is authoritative. Content width can still reflect the
+        # previous grid's minimum size when the window is being narrowed.
+        available = max(1, self.scroll.viewport().width())
+        height = self.scroll.viewport().height()
+        spacing = self.grid.horizontalSpacing()
+        columns = max(1, (available + spacing) // (240 + spacing))
+        width = max(1, (available - spacing * (columns - 1)) // columns)
+        if columns == self._columns and width == self._card_width and height == self._available_height:
             return
-        self._columns = columns
-        while self.grid.count():
-            self.grid.takeAt(0)
+        rebuild = columns != self._columns
+        self._columns, self._card_width = columns, width
+        self._available_height = height
+        if rebuild:
+            while self.grid.count():
+                self.grid.takeAt(0)
         for index, card in enumerate(self._cards):
             if not sip.isdeleted(card):
-                self.grid.addWidget(card, index // columns, index % columns)
+                if isinstance(card, OutputCard):
+                    card.set_available_size(width, height)
+                else:
+                    card.setFixedWidth(width)
+                if rebuild:
+                    self.grid.addWidget(card, index // columns, index % columns, QtCore.Qt.AlignTop)
                 card.show()
 
     def eventFilter(self, watched, event):
-        if watched is self.content and event.type() == QtCore.QEvent.Resize:
-            self._reflow()
+        if watched is self.scroll.viewport() and event.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Show):
+            self._reflow_timer.start(16)
         return False
 
 

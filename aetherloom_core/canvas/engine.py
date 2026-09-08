@@ -123,7 +123,7 @@ class CanvasEngine(QtCore.QObject):
                                 node[key] = copy.deepcopy(before[key])
                     frozen = snapshot_nodes.get(node['id'])
                     if frozen and any(node.get(key) != frozen.get(key) for key in
-                                      ('params', 'app', 'decode_settings', 'run_count')):
+                                      ('params', 'app', 'decode_settings')):
                         node['stale'] = True
                 if updated.get('edges') != previous.get('edges'):
                     for node in updated['nodes']:
@@ -800,13 +800,10 @@ class CanvasEngine(QtCore.QObject):
 
     def _execute_app(self, canvas_id, round_id, node, prepared, batches, digest, stop):
         node_id = node['id']
-        repetitions = int(node.get('run_count', 1))
-        if repetitions < 1 or repetitions > 99:
-            raise ValueError('运行次数必须在 1 至 99 之间')
         base_fields = prepared.get('nodes') or model.canonical_fields(node)
-        task_count = len(batches) * repetitions
+        task_count = len(batches)
         # Validate linked values before the first paid submission, but keep only
-        # one prepared definition instead of batch_count * repeat_count copies.
+        # one prepared definition instead of a copy per input group.
         for batch in batches:
             for field in base_fields:
                 key = model.parameter_key(field)
@@ -822,8 +819,7 @@ class CanvasEngine(QtCore.QObject):
                 raise ValueError('恢复输入数量与原执行不一致，请重新运行画布')
             if not existing:
                 state['items'] = [{'run_id': uuid.uuid4().hex, 'task_id': '', 'status': 'PENDING',
-                                   'batch_index': index // repetitions,
-                                   'repeat_index': index % repetitions, 'results': []}
+                                   'batch_index': index, 'results': []}
                                   for index in range(task_count)]
             state['fingerprint'] = digest
             self._publish_locked(self._document_locked(canvas_id))
@@ -841,7 +837,7 @@ class CanvasEngine(QtCore.QObject):
             if item.get('task_id') or item.get('status') in ACTIVE | {'UNKNOWN'}:
                 # Resume waits for the one existing service/recovery task.
                 continue
-            batch_index, repeat_index = divmod(index, repetitions)
+            batch_index = index
             snapshot = {key: copy.deepcopy(value) for key, value in prepared.items() if key != 'nodes'}
             snapshot['nodes'] = copy.deepcopy(base_fields)
             for field in snapshot['nodes']:
@@ -853,7 +849,7 @@ class CanvasEngine(QtCore.QObject):
                                   'node_id': node_id, 'node_title': node.get('title', 'App'),
                                   'round_id': round_id, 'execution_id': round_id,
                                   'canvas_batch_index': canvas_batch_index,
-                                  'batch_index': batch_index, 'repeat_index': repeat_index}
+                                  'batch_index': batch_index}
             for key in ('workflow_group_id', 'workflow_job_id', 'workflow_group_document', 'workflow_job_document'):
                 if workflow_origin.get(key):
                     snapshot['origin'][key] = workflow_origin[key]

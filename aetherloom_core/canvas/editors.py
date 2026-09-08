@@ -92,12 +92,40 @@ class Inspector(QtWidgets.QWidget):
         self.install_button = None
         self.numeric = []
         self.histories = histories
+        self.tabs = None
+        self.tab_forms = []
         self.form = QtWidgets.QVBoxLayout(self)
         self.form.setContentsMargins(15, 14, 15, 16)
         self.form.setSpacing(11)
         title = QtWidgets.QLabel('节点设置')
         title.setObjectName('canvasSectionTitle')
         self.form.addWidget(title)
+        root_form = self.form
+        if node['kind'] == 'app':
+            root_form.setContentsMargins(10, 14, 10, 16)
+            self.tabs = QtWidgets.QTabWidget()
+            self.tabs.setObjectName('canvasNodeSettingsTabs')
+            self.tabs.setDocumentMode(True)
+            self.tabs.setUsesScrollButtons(True)
+            self.tabs.tabBar().setExpanding(True)
+            self.tabs.tabBar().setDrawBase(False)
+            self.tabs.tabBar().setElideMode(QtCore.Qt.ElideNone)
+            for label in ('应用设置', '本地解码设置', '其他设置', '最近结果'):
+                scroll = QtWidgets.QScrollArea()
+                scroll.setObjectName('canvasNodeTabScroll')
+                scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+                scroll.setWidgetResizable(True)
+                scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+                content = QtWidgets.QWidget()
+                content.setObjectName('canvasNodeTabContent')
+                layout = QtWidgets.QVBoxLayout(content)
+                layout.setContentsMargins(2, 12, 5, 8)
+                layout.setSpacing(11)
+                scroll.setWidget(content)
+                self.tabs.addTab(scroll, label)
+                self.tab_forms.append(layout)
+            root_form.addWidget(self.tabs, 1)
+            self.form = self.tab_forms[0]
         name = QtWidgets.QLineEdit(str(node.get('title', '')))
         name.setPlaceholderText('节点名称')
         name.editingFinished.connect(lambda: self.changed.emit('title', name.text().strip() or '节点'))
@@ -125,8 +153,19 @@ class Inspector(QtWidgets.QWidget):
             self.form.addWidget(rebind)
         self.decode_group = None
         if node['kind'] == 'app':
-            self._app_link(node)
             self._app_fields(node, doc_id, edges)
+            self.form.addStretch(1)
+            self.form = self.tab_forms[1]
+            self._decode_settings(node)
+            self.form.addStretch(1)
+            self.form = self.tab_forms[2]
+            self._app_options(node)
+            self.form.addStretch(1)
+            self.form = self.tab_forms[3]
+            self._results(node)
+            self.form.addStretch(1)
+            self.form = root_form
+            return
         elif node['kind'] in FILE_FILTERS:
             self._files(node)
         elif node['kind'] == 'text':
@@ -157,42 +196,6 @@ class Inspector(QtWidgets.QWidget):
         if node.get('results') or node['kind'] in ('app', 'select', 'preview'):
             self._results(node)
         self.form.addStretch(1)
-
-    def _app_link(self, node):
-        from .model import app_reference
-        app = node.get('app') or {}
-        self.form.addWidget(QtWidgets.QLabel('App 链接 · ' + str(app.get('webapp_id') or '')))
-        self.app_url_editor = QtWidgets.QLineEdit()
-        self.app_url_editor.setMaxLength(2048)
-        self.app_url_editor.setPlaceholderText('https://www.runninghub.cn/webapp/…')
-        self.app_url_error = QtWidgets.QLabel()
-        self.app_url_error.setWordWrap(True)
-        self.app_url_error.setObjectName('canvasWarning')
-        try:
-            reference = app_reference(app)
-            self.app_url_editor.setText(reference['url'])
-            self.app_url_editor.setToolTip(reference['url'])
-            self.app_url_error.hide()
-        except ValueError as error:
-            self.app_url_error.setText(str(error))
-        def commit():
-            candidate = dict(app, url=self.app_url_editor.text().strip())
-            try:
-                if not candidate['url']:
-                    raise ValueError('请填写此 App 的官方链接。')
-                candidate.pop('url_error', None)
-                reference = app_reference(candidate)
-            except ValueError as error:
-                self.app_url_error.setText(str(error))
-                self.app_url_error.show()
-                return
-            self.app_url_error.hide()
-            self.app_url_editor.setText(reference['url'])
-            self.app_url_editor.setToolTip(reference['url'])
-            self.changed.emit('app.url', reference['url'])
-        self.app_url_editor.editingFinished.connect(commit)
-        self.form.addWidget(self.app_url_editor)
-        self.form.addWidget(self.app_url_error)
 
     def _indices_changed(self, editor, path):
         try:
@@ -273,23 +276,20 @@ class Inspector(QtWidgets.QWidget):
             editor.setEnabled(key not in connected)
             if key in connected:
                 editor.setToolTip('运行时使用连线输入；断开连线后恢复此处保存的值。')
-        row = QtWidgets.QFormLayout()
-        count = RhNumberSpinBox(integer=True)
-        count.configure({'min': 1, 'max': 99, 'step': 1})
-        count.setValue(node.get('run_count', 1))
-        count.valueChanged.connect(lambda value: self.changed.emit('run_count', int(value)))
-        self.numeric.append(count)
-        row.addRow('每组输入运行次数', count)
-        self.form.addLayout(row)
+
+    def _app_options(self, node):
         reuse = QtWidgets.QCheckBox('过滤重复运行')
         reuse.setObjectName('canvasAppFilterRepeats')
         reuse.setChecked(bool(node.get('filter_repeats', False)))
         reuse.setToolTip('开启后，参数、实际输入和结果均未变化时复用，包括后续画布批次。默认关闭；强制重跑忽略此设置。')
         reuse.toggled.connect(lambda value: self.changed.emit('filter_repeats', value))
         self.form.addWidget(reuse)
+
+    def _decode_settings(self, node):
         self.decode_group = QtWidgets.QGroupBox('本地解码')
         decode = node.get('decode_settings', {})
         group = QtWidgets.QFormLayout(self.decode_group)
+        group.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
         enabled = QtWidgets.QCheckBox('下载后进行本地解码')
         enabled.setChecked(bool(decode.get('enabled', False)))
         enabled.toggled.connect(lambda value: self.changed.emit('decode_settings.enabled', value))
@@ -305,7 +305,7 @@ class Inspector(QtWidgets.QWidget):
         password.setPlaceholderText('此密码不会打包导出')
         password.editingFinished.connect(lambda: self.changed.emit('decode_settings.password', password.text()))
         group.addRow('密码', password)
-        supply_password = QtWidgets.QPushButton('为未完成任务补充解码密码')
+        supply_password = QtWidgets.QPushButton('补充任务解码密码')
         supply_password.setToolTip('仅继续等待密码的本地解码，不会重新提交云端生成任务。')
         supply_password.clicked.connect(lambda: self.password_requested.emit(node['id']))
         group.addRow(supply_password)
@@ -462,6 +462,13 @@ class Inspector(QtWidgets.QWidget):
     def validate(self):
         for editor in self.numeric:
             if editor.isEnabled() and not editor.commit():
+                if self.tabs is not None:
+                    for index in range(self.tabs.count()):
+                        scroll = self.tabs.widget(index)
+                        if scroll.isAncestorOf(editor):
+                            self.tabs.setCurrentIndex(index)
+                            scroll.ensureWidgetVisible(editor)
+                            break
                 editor.setFocus()
                 return False
         return True

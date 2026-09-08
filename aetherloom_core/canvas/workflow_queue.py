@@ -12,6 +12,7 @@ from collections import defaultdict, deque
 from PyQt5 import QtCore
 
 from . import model
+from .engine import DetachedExecution
 from .storage import _remove_secrets
 
 
@@ -362,8 +363,12 @@ class WorkflowQueue(QtCore.QObject):
         release = getattr(self.engine, 'release_document', None)
         if not callable(release):
             return
+        active_group = self._by_id.get(self._active[0]) if self._active else None
+        active_canvas = active_group.get('canvas_id') if active_group else None
         for canvas_id in list(self._release_candidates):
-            if canvas_id != selected and release(canvas_id):
+            # The engine may finish before the queued final notification reaches
+            # this coordinator. Retain its state until _dispatch consumes it.
+            if canvas_id not in (selected, active_canvas) and release(canvas_id):
                 self._release_candidates.discard(canvas_id)
 
     def _find(self, group_id, job_id=None):
@@ -571,6 +576,10 @@ class WorkflowQueue(QtCore.QObject):
             if self._sync_job(group, job, document):
                 important = previous != job['status'] or previous_ids != [node.get('task_ids') for node in job['nodes']]
                 self._emit(persist=important)
+            self._wake()
+        except DetachedExecution:
+            # Queued Qt signals can outlive a completed canvas evicted while
+            # opening/editing another one. They carry no new execution state.
             self._wake()
         except (OSError, ValueError, TypeError) as error:
             self._timer.stop()

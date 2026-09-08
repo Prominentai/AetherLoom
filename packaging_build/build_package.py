@@ -47,7 +47,7 @@ CORE_MODULE_FILES = (
     'thumbnail_resources.py', 'autocomplete.py', 'application.py',
     'paths.py', 'resources.py', 'platform_utils.py',
     'ui/__init__.py', 'ui/widgets.py', 'ui/compare.py', 'ui/main_window.py',
-    'ui/layout.py', 'ui/presentation.py', 'ui/local_browser.py', 'ui/settings.py', 'ui/preferences.py', 'ui/home.py', 'ui/decode.py',
+    'ui/layout.py', 'ui/presentation.py', 'ui/menus.py', 'ui/local_browser.py', 'ui/settings.py', 'ui/preferences.py', 'ui/home.py', 'ui/decode.py',
     'rh_progress.py', 'rh_dashboard.py', 'ui/responsive.py', 'tasks/__init__.py', 'tasks/media.py', 'tasks/decoding.py',
     'services/__init__.py', 'services/decoding.py',
     'rh_execution.py', 'rh_execution_ui.py', 'rh_output_groups.py', 'rh_connections.py', 'rh_app_install.py',
