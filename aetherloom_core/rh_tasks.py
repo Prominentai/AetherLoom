@@ -494,7 +494,8 @@ class TaskLifecycle:
                     return True
             context.update(cancel_requested=True, cancel_attempts=0, cancel_retry_at=0,
                            cancel_generation=context.get('cancel_generation', 0) + 1,
-                           cancel_acknowledged=False, cancel_retry_available=False, status='CANCELING')
+                           cancel_acknowledged=bool(context.get('cancel_acknowledged')),
+                           cancel_retry_available=False, status='CANCELING')
             # Write before exposing cancellation or scheduling a network request.
             self.store.put(task_id, context)
             self.owner._rh_task_contexts[task_id] = context
@@ -589,10 +590,20 @@ class TaskLifecycle:
                 context['api_key'], task_id, base_url=context['base_url'], timeout=15))
             value = reply.get('data')
             remote_status = value.strip().upper() if isinstance(value, str) else ''
-        except Exception:
-            # Even an acknowledged cancel plus 805/807 cannot prove a terminal
-            # state: those errors can also mean unknown status or inaccessible ID.
-            pass
+        except Exception as error:
+            # RH can remove/interrupt a task after a successful cancel instead
+            # of returning a CANCELED status. Only combine these business codes
+            # with a successful cancel on this task's bound site/credential.
+            # A bare missing ID, auth error or timeout is never confirmation.
+            code = getattr(error, 'code', None)
+            if context.get('cancel_acknowledged') and str(code) in {'805', '807', '423', '1004'}:
+                remote_status = 'CANCELED'
+            elif code is not None:
+                try:
+                    safe_code = str(int(code))
+                except (ValueError, TypeError, OverflowError):
+                    safe_code = '未知'
+                self._note(context['webapp_id'], task_id, '取消尚未确认：状态查询返回错误码 ' + safe_code)
         if not self._recovery_stopped(task_id):
             self._cancel_status_result(task_id, context, remote_status)
 
