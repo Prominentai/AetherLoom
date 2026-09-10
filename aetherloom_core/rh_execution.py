@@ -145,6 +145,9 @@ class RhExecutionService(QtCore.QObject):
     def __init__(self, owner):
         super().__init__(owner if isinstance(owner, QtCore.QObject) else None)
         self.owner = owner
+        from .canvas.cache_cleanup import run_files
+        self.temporary = run_files()
+        self._input_leases = {}
         self.lifecycle = owner._rh_task_lifecycle
         self.queue = get_submission_queue(owner)
         self._condition = threading.Condition(threading.RLock())
@@ -445,6 +448,8 @@ class RhExecutionService(QtCore.QObject):
                 raise RuntimeError('客户端正在关闭，无法提交新任务')
             if run_id in self._records:
                 raise ValueError('运行标识已存在，不能重复提交')
+            self._input_leases[run_id] = self.temporary.retain(
+                node.get('fieldValue','') for node in snapshot.get('nodes',[]) if isinstance(node,dict))
             self._snapshots[run_id] = snapshot
             self._records[run_id] = dict(
                 run_id=run_id, task_id=None, webapp_id=webapp_id,
@@ -472,6 +477,7 @@ class RhExecutionService(QtCore.QObject):
                 self._condition.notify_all()
             self._dispatch_submissions()
         except Exception:
+            self._release_inputs(run_id)
             self.queue.release_order(order)
             with self._condition:
                 self._pending_runs.pop(run_id, None)
@@ -480,6 +486,12 @@ class RhExecutionService(QtCore.QObject):
                 self._condition.notify_all()
             raise
         return run_id
+
+    def _release_inputs(self, run_id):
+        with self._condition:
+            lease = self._input_leases.pop(run_id,set())
+        self.temporary.finish('app-' + run_id)
+        self.temporary.release(lease)
 
     def _dispatch_submissions(self):
         """Launch only eligible work; accepted QUEUED slots own no thread."""
@@ -520,6 +532,7 @@ class RhExecutionService(QtCore.QObject):
                 self._snapshots.pop(run_id, None)
                 self._condition.notify_all()
         finally:
+            self._release_inputs(run_id)
             self._dispatch_submissions()
 
     def _stopped(self, run_id):
@@ -538,6 +551,8 @@ class RhExecutionService(QtCore.QObject):
         try:
             from api_calls.call_rh import (accepted_task_id, submission_response_kind,
                 validate_response, RunningHubResponseError, RunningHubAPIError)
+            lease = self.temporary.retain([self.temporary.directory('app-' + run_id)])
+            with self._condition:self._input_leases.setdefault(run_id,set()).update(lease)
             api_keys = normalize_api_keys(snapshot.get('api_keys')) or normalize_api_keys(snapshot.get('api_key'))
             if not api_keys:
                 raise ValueError('请先配置当前 RunningHub 站点的 API Key')
@@ -548,6 +563,23 @@ class RhExecutionService(QtCore.QObject):
             # Upload IDs are account-scoped. Cache each credential separately,
             # preserving successful uploads across FIFO retry rounds.
             uploads, copied_inputs = {}, set()
+            from .mask_assets import matches, materialize
+            # Mask settings belong to this immutable submission, never live widgets.
+            for node in original_nodes:
+                mask = node.pop('_mask',None)
+                source = node.get('fieldValue','')
+                if mask and matches(mask,source):
+                    if self._stopped(run_id):raise SubmissionCancelled()
+                    folder = self.temporary.directory('app-' + run_id)
+                    assets={}
+                    node['fieldValue'],mask_path = materialize(source,mask,
+                        snapshot.get('input_dir') or str(self.temporary.project / 'input'),folder,assets=assets)
+                    for frozen in snapshot['nodes']:
+                        if frozen.get('nodeId') == node.get('nodeId') and frozen.get('fieldName') == node.get('fieldName'):
+                            frozen['_mask']['path'] = mask_path
+                            if assets.get('paint_path'):frozen['_mask']['paint_path']=assets['paint_path']
+            self._publish(run_id, snapshot=public_snapshot(snapshot))
+            self.documents.patch('applications', run_id, {'request':public_snapshot(snapshot)})
 
             def nodes_for_key(key):
                 nodes = copy.deepcopy(original_nodes)
@@ -575,7 +607,7 @@ class RhExecutionService(QtCore.QObject):
                             raise ValueError('上传失败，未返回文件标识')
                         key_uploads[source] = token
                         input_dir = snapshot.get('input_dir')
-                        if input_dir and source not in copied_inputs:
+                        if input_dir and source not in copied_inputs and not Path(value).resolve().is_relative_to(self.temporary.root):
                             try:
                                 os.makedirs(input_dir, exist_ok=True)
                                 destination = os.path.join(input_dir, os.path.basename(value))
@@ -1042,6 +1074,7 @@ class RhExecutionService(QtCore.QObject):
             # Canvas observers first stop dependent queued items, then this
             # cancellation can release the next shared FIFO position.
             self.queue.release_order(pending[0])
+            self._release_inputs(run_id)
         self.queue.cancel_matching(lambda entry: entry.get('run_id') == run_id)
         self.queue.wake()
         if record.get('task_id'):
@@ -1060,6 +1093,7 @@ class RhExecutionService(QtCore.QObject):
             self._condition.notify_all()
         if pending is not None:
             self.queue.release_order(pending[0])
+            self._release_inputs(run_id)
             self._publish(run_id, status='PAUSED', message='本地等待已暂停')
         # Unlike cancel_matching this does not mark a card cancelled: if POST
         # returns a taskId during the pause, shared recovery must keep following it.
@@ -1164,6 +1198,7 @@ class RhExecutionService(QtCore.QObject):
             if header.get('task_id'):
                 self.lifecycle._status(header['webapp_id'], header['task_id'], 'INTERRUPTED')
         self.queue.release_orders(entry[0] for _, entry in pending)
+        for run_id,_ in pending:self._release_inputs(run_id)
         self.queue.wake()
         retained = self.lifecycle.store.read()
         self.documents.close([str(context.get('run_id') or 'recovered-' + task_id)

@@ -383,7 +383,7 @@ class WorkflowQueue(QtCore.QObject):
                      webapp_id=(by_id[node_id].get('app') or {}).get('webapp_id', ''),
                      status='PENDING', progress=0, activated=False, cached=False,
                      task_ids=[], run_ids=[])
-                for node_id in order if node_id in scope and by_id[node_id]['kind'] == 'app']
+                for node_id in order if node_id in scope and by_id[node_id]['kind'] in {'app'} | set(model.MODEL_KINDS)]
 
     def enqueue(self, document, target=None, force=False, batch_count=None, prepare_app=None):
         if self._closed:
@@ -402,8 +402,8 @@ class WorkflowQueue(QtCore.QObject):
         group_id = uuid.uuid4().hex
         group = dict(id=group_id, canvas_id=frozen['id'], name=frozen.get('name', '画布'),
                      order=self._order + 1,
-                     target=target, target_title=next((node.get('title', '节点') for node in frozen['nodes']
-                                                       if node['id'] == target), ''),
+                     target=target, target_title=(f'选中 {len(target)} 个节点' if isinstance(target,(list,tuple)) else next((node.get('title', '节点') for node in frozen['nodes']
+                                                       if node['id'] == target), '')),
                      force=bool(force), batch_count=count, created_at=time.time(),
                      cancel_requested=False, snapshot=frozen, prepared=captured, scope_nodes=nodes,
                      jobs=[dict(id=uuid.uuid4().hex, index=index, status='QUEUED', run_id='',
@@ -441,6 +441,8 @@ class WorkflowQueue(QtCore.QObject):
         prepared = copy.deepcopy(group.get('prepared', {}))
         connection = getattr(self.owner, '_rh_connection_settings', None)
         for node_id, options in prepared.items():
+            if options.get('model_node') or options.get('local_node'):
+                continue  # API/Agent credentials must never be replaced by RH keys.
             if connection is not None:
                 credentials = connection.snapshot(options.get('base_url'))
                 options.update(api_key=credentials['api_key'], api_keys=credentials['api_keys'])
@@ -509,7 +511,7 @@ class WorkflowQueue(QtCore.QObject):
         for node in job.get('nodes', []):
             state = run.get('nodes', {}).get(node['id'], {})
             previous = dict(node)
-            for key in ('status', 'progress', 'activated', 'cached', 'message', 'reused_app_tasks', 'result_references'):
+            for key in ('status', 'progress', 'activated', 'cached', 'bypassed', 'message', 'reused_app_tasks', 'result_references'):
                 if key in state:
                     node[key] = copy.deepcopy(state[key])
             node['task_ids'] = [item['task_id'] for item in state.get('items', []) if item.get('task_id')]

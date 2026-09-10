@@ -797,7 +797,8 @@ class MainLayoutMixin:
                     if api_manager and hasattr(api_manager, 'PROVIDERS'):
                         provs = getattr(api_manager, 'PROVIDERS') or {}
                         for pk, pv in provs.items():
-                            if pk == 'custom':
+                            if (pk in ('custom','free_translate','llm_translate') or str(pk).startswith('agent_')
+                                    or isinstance(pv, dict) and str(pv.get('template', '')).startswith('agent_')):
                                 continue
                             name = pv.get('name', pk) if isinstance(pv, dict) else pk
                             items.append((name, pk))
@@ -1090,6 +1091,8 @@ class MainLayoutMixin:
                     except Exception:
                         pass
 
+                    if hasattr(self, '_api_provider_editor'):
+                        self._api_provider_editor.refresh_all()
                     if show_feedback:
                         QtWidgets.QMessageBox.information(self, '保存完成', 'API 密钥已保存。')
                 except Exception:
@@ -1128,7 +1131,7 @@ class MainLayoutMixin:
                                for entry in api_manager.get_visible_api_categories()]
                               if api_manager and hasattr(api_manager, 'get_visible_api_categories')
                               else [entry for entry in getattr(self, 'api_categories', [])
-                                    if entry[0] in ('vision', 'llm', 'translator')])
+                                    if entry[0] in ('vision', 'llm', 'translator', 'text2img', 'image_edit')])
         for key, title, subtitle in visible_categories:
             card = CollapsibleApiCard(title, subtitle)
             card_layout = card.body_layout
@@ -1164,6 +1167,10 @@ class MainLayoutMixin:
                 provider_combo.addItem(text, val)
 
             saved_provider = str(cfg.get('provider', '') or '')
+            if (key in ('text2img', 'image_edit') and saved_provider and
+                    not saved_provider.startswith('custom') and provider_combo.findData(saved_provider) < 0):
+                label = api_manager.PROVIDERS.get(saved_provider, {}).get('name', saved_provider)
+                provider_combo.addItem(f'{label} · 旧配置（需核对）', saved_provider)
             provider_found = False
             for i in range(provider_combo.count()):
                 candidate = provider_combo.itemData(i)
@@ -1272,10 +1279,10 @@ class MainLayoutMixin:
             custom_key_save_btn = QtWidgets.QPushButton('保存密钥')
             custom_key_save_btn.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
             api_key_row.addWidget(custom_key_save_btn)
-            custom_key_save_btn.setVisible(provider_combo.currentData() == 'custom')
+            custom_key_save_btn.hide()
             provider_combo.currentIndexChanged.connect(
                 lambda _index, combo=provider_combo, button=custom_key_save_btn:
-                button.setVisible(combo.currentData() == 'custom'))
+                button.setVisible(False))
             custom_key_save_btn.clicked.connect(_write_apikeys_file)
             def _sync_custom_key_memory(_text=None, combo=provider_combo, widget=api_key, cat=key):
                 if combo.currentData() != 'custom':
@@ -1479,7 +1486,8 @@ class MainLayoutMixin:
                             elif models:
                                 model_widget.setCurrentIndex(0)
                             else:
-                                model_widget.setEditText(str(cfg_snapshot.get('model', '')))
+                                template = profile.get('template', sel) if isinstance(profile, dict) else sel
+                                model_widget.setEditText('' if str(template).startswith('agent_') else str(cfg_snapshot.get('model', '')))
                             if isinstance(profile, dict):
                                 prof_model = profile.get('model')
                                 if prof_model:
@@ -1581,6 +1589,7 @@ class MainLayoutMixin:
             card_layout.addLayout(form)
 
             self.api_config_fields[key] = {
+                'form': form, 'model_row': model_row_widget, 'key_row': api_key_row_widget,
                 'provider': provider_combo,
                 'endpoint': endpoint,
                 'api_key': api_key,
@@ -1767,6 +1776,16 @@ class MainLayoutMixin:
                         'model': ((fields['model'].currentText() if hasattr(fields['model'], 'currentText') else str(fields['model'].text())).strip()) if fields.get('model') is not None else '',
                         'timeout': int(fields['timeout'].value()),
                     }
+                    collected[k]['protocol'] = api_manager.effective_protocol(k, current_provider, self._get_api_provider_profile(k, current_provider))
+                    if k in ('llm', 'vision'):
+                        from aetherloom_core.agent_search import PROVIDERS, enabled
+                        if collected[k]['protocol'] in PROVIDERS:
+                            collected[k]['web_search'] = enabled(collected[k]['protocol'], self._get_api_provider_profile(k, current_provider))
+                    if k in ('text2img', 'image_edit'):
+                        from aetherloom_core.image_prompts import request_options
+                        collected[k].update(request_options(getattr(self, 'settings', {}), k, collected[k]['protocol']))
+                    if fields.get('translation_prompt') is not None:
+                        collected[k]['translation_prompt'] = fields['translation_prompt'].toPlainText()
                     # for custom provider (either 'custom' or 'custom_<category>'), persist endpoint/model/timeout (no api_key)
                     try:
                         prov = str(collected[k].get('provider', '') or '')
@@ -1786,6 +1805,8 @@ class MainLayoutMixin:
             return collected
 
         self._collect_api_settings_from_ui = _collect_api_settings_from_ui
+        from aetherloom_core.api_provider_editor import ProviderEditor
+        self._api_provider_editor = ProviderEditor(self)
 
         # Ensure apikeys from apikeys.json populate API cards on startup
         try:
@@ -3676,6 +3697,10 @@ class MainLayoutMixin:
                                                     pass
                                                 row_l.addWidget(le)
                                                 row_l.addWidget(btn_b)
+                                                if ftype == 'IMAGE':
+                                                    from aetherloom_core.mask_editor import add_mask_button
+                                                    add_mask_button(row_l, le, self, node.get('_mask'),
+                                                        lambda value,n=node:n.update(_mask=value))
                                                 try:
                                                     row_w.setToolTip(f"{fname} ({ftype})")
                                                 except Exception:
@@ -3960,67 +3985,12 @@ class MainLayoutMixin:
                                                                 self.tlang = tlang
                                                                 self.signals = _TranslateSignals()
 
-                                                            # capture owner (MainWindow) into closure for worker thread
-                                                            pass
-                                                            
                                                             def run(self):
-                                                                res = None
-                                                                timeout = 30
-                                                                # attempt configured translator API first (from UI settings/apikeys)
                                                                 try:
-                                                                    owner = getattr(self, '_owner_ref', None) or None
+                                                                    from aetherloom_core.translation import translate
+                                                                    res = translate(self.config, self.text, self.tlang)
                                                                 except Exception:
-                                                                    owner = None
-                                                                try:
-                                                                    if owner is None:
-                                                                        owner = locals().get('self_owner', None)
-                                                                except Exception:
-                                                                    owner = owner
-
-                                                                tried_api = False
-                                                                try:
-                                                                    if owner is not None:
-                                                                        try:
-                                                                            api_cfg = getattr(owner, 'api_settings', None) or (owner.settings.get('api_settings') if isinstance(getattr(owner, 'settings', None), dict) else {})
-                                                                        except Exception:
-                                                                            api_cfg = {}
-                                                                        try:
-                                                                            tcfg = (api_cfg or {}).get('translator') or {}
-                                                                        except Exception:
-                                                                            tcfg = {}
-                                                                        api_url = tcfg.get('endpoint') or tcfg.get('api_url') or ''
-                                                                        model = tcfg.get('model') or ''
-                                                                        provider = tcfg.get('provider')
-                                                                        try:
-                                                                            timeout = int(tcfg.get('timeout') or 30)
-                                                                        except Exception:
-                                                                            timeout = 30
-
-                                                                        # Resolve only the selected translation provider's credentials.
-                                                                        from aetherloom_core.api_credentials import get_credentials
-                                                                        credentials = get_credentials(getattr(owner, '_apikeys', None), provider, 'translator')
-                                                                        api_key = credentials.get('api_key', '')
-                                                                        has_credentials = bool(api_key or (credentials.get('appid') and credentials.get('secret')))
-
-                                                                        if api_url and has_credentials:
-                                                                            tried_api = True
-                                                                            try:
-                                                                                from api_calls.call_translate import translate_text
-                                                                                alt = translate_text(api_url, api_key, model or '', self.text, self.tlang or 'en', timeout=timeout, provider=provider, extra={name: credentials[name] for name in ('appid', 'secret') if credentials.get(name)})
-                                                                                if alt:
-                                                                                    res = alt
-                                                                            except Exception:
-                                                                                pass
-                                                                except Exception:
-                                                                    pass
-
-                                                                # if configured API did not produce result, fall back to internal translators.translate_auto
-                                                                if not res:
-                                                                    try:
-                                                                        from api_calls.translators import translate_auto
-                                                                        res = translate_auto(self.text, self.tlang, verbose=False, timeout=timeout)
-                                                                    except Exception:
-                                                                        res = None
+                                                                    res = None
 
                                                                 try:
                                                                     self.signals.finished.emit(res)
@@ -4029,11 +3999,8 @@ class MainLayoutMixin:
 
                                                         try:
                                                             job = _TranslateJob(cur, target_lang)
-                                                            try:
-                                                                # attach reference to MainWindow so worker can read settings/apikeys
-                                                                job._owner_ref = self
-                                                            except Exception:
-                                                                pass
+                                                            from aetherloom_core.translation import snapshot
+                                                            job.config = snapshot(self.api_settings, self._apikeys)
                                                             def _on_done(res):
                                                                 try:
                                                                     if res is not None:
@@ -4139,19 +4106,18 @@ class MainLayoutMixin:
                                                             except (OSError, ValueError, TypeError):
                                                                 pass
 
+                                                        protocol = api_cfg.get('protocol') or provider if isinstance(api_cfg, dict) else provider
+                                                        search_setting = api_cfg.get('web_search') if isinstance(api_cfg, dict) else None
+                                                        sys_prompt = (getattr(self, 'settings', {}) or {}).get('expand_system_prompt', '扩写提示词')
                                                         def _worker_call():
                                                             try:
                                                                 if endpoint and (api_key or provider == 'ollama') and model:
                                                                     from api_calls.call_llm import call_llm
                                                                     try:
-                                                                        sys_prompt = '扩写提示词'
-                                                                        try:
-                                                                            sys_prompt = (getattr(self, 'settings', {}) or {}).get('expand_system_prompt', sys_prompt)
-                                                                        except Exception:
-                                                                            pass
-                                                                        return call_llm(endpoint, api_key or '', model, sys_prompt, cur, temperature=0.6, timeout=timeout, provider=provider)
-                                                                    except Exception:
-                                                                        return None
+                                                                        return call_llm(endpoint, api_key or '', model, sys_prompt, cur, temperature=0.6, timeout=timeout, provider=protocol, web_search=search_setting)
+                                                                    except Exception as error:
+                                                                        from api_calls.provider_client import ProviderAPIError
+                                                                        return {'error': str(error) if isinstance(error, ProviderAPIError) else '扩写请求失败，请检查模型配置和网络。'}
                                                                 return None
                                                             except Exception:
                                                                 return None
@@ -4160,7 +4126,9 @@ class MainLayoutMixin:
                                                             job = _ExpandWorker(_worker_call)
                                                             def _on_done_expand(res):
                                                                 try:
-                                                                    if res is not None:
+                                                                    if isinstance(res, dict) and res.get('error'):
+                                                                        QtWidgets.QMessageBox.warning(self, '扩写失败', res['error'])
+                                                                    elif res is not None:
                                                                         try:
                                                                             _history.apply_result(res, 'expansion')
                                                                         except Exception:
@@ -4608,6 +4576,16 @@ class MainLayoutMixin:
 
                                                     watcher = _PrevWatcher(prev_label)
                                                     prev_label.installEventFilter(watcher)
+                                                    if ftype in ('IMAGE','VIDEO','AUDIO','UPLOAD'):
+                                                        from aetherloom_core.image_import import ImageDropFilter
+                                                        from aetherloom_core.canvas.media_inputs import accepts as _accept_image
+                                                        _import_kind=ftype.lower() if ftype!='UPLOAD' else 'file'
+                                                        def _import_image(paths,_le=le,_kind=_import_kind):
+                                                            kinds=('image','video','audio') if _kind=='file' else (_kind,)
+                                                            if paths and os.path.isfile(paths[0]) and any(_accept_image(paths[0],k) for k in kinds):
+                                                                _le.setText(paths[0]);_le.editingFinished.emit()
+                                                        prev_label._image_drop=ImageDropFilter(prev_label,_import_image,_import_kind)
+                                                        le._image_drop=ImageDropFilter(le,_import_image,_import_kind)
 
                                                     try:
                                                         prev_label.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -4667,6 +4645,9 @@ class MainLayoutMixin:
                                                                 except Exception:
                                                                     pass
                                                                 try:
+                                                                    if getattr(_lbl,'_image_drop',None) is not None and md is not None:
+                                                                        from aetherloom_core.image_import import accepts_mime
+                                                                        ok_enable=ok_enable or accepts_mime(md)
                                                                     act_paste.setEnabled(bool(ok_enable))
                                                                 except Exception:
                                                                     pass
@@ -4681,7 +4662,10 @@ class MainLayoutMixin:
                                                                 except Exception:
                                                                     pth = None
 
-                                                                if action == act_paste and ok_enable and candidate:
+                                                                if action == act_paste and getattr(_lbl,'_image_drop',None) is not None and md is not None and accepts_mime(md):
+                                                                    from aetherloom_core.image_import import import_mime
+                                                                    import_mime(cb.mimeData(),_lbl,_lbl._image_drop.callback,_lbl._image_drop.kind)
+                                                                elif action == act_paste and ok_enable and candidate:
                                                                     try:
                                                                         p = os.path.abspath(candidate)
                                                                     except Exception:

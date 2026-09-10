@@ -31,6 +31,8 @@ from .provider_client import ProviderAPIError, validated_json
 
 def _is_google(api_url: str, provider: Optional[str]) -> bool:
     provider_hint = (provider or "").lower()
+    if provider_hint == 'baidu_translate':
+        return False
     if provider_hint in ("google_v2", "google_translate"):
         return True
     return urlsplit(api_url).hostname == "translation.googleapis.com"
@@ -38,6 +40,8 @@ def _is_google(api_url: str, provider: Optional[str]) -> bool:
 
 def _is_baidu(api_url: str, provider: Optional[str]) -> bool:
     provider_hint = (provider or "").lower()
+    if provider_hint in ('google_v2', 'google_translate'):
+        return False
     if provider_hint == "baidu_translate":
         return True
     return urlsplit(api_url).hostname in {"fanyi.baidu.com", "api.fanyi.baidu.com", "fanyi-api.baidu.com"}

@@ -36,7 +36,7 @@ RUNTIME_FILES = (
     'AetherLoom.py', 'Duck_Dec_local.py', 'Grid_Reversal_Dec_local.py',
     'get_apps.py',
     'app_icon.ico', 'app_icon.png', 'README.md', 'autocomplete.txt',
-    'requirements.txt',
+    'requirements.txt', 'THIRD_PARTY_NOTICES.txt',
 )
 CORE_MODULE_FILES = (
     '__init__.py', 'api_credentials.py', 'api_manager.py', 'api_manager_ui.py',
@@ -56,12 +56,22 @@ CORE_MODULE_FILES = (
     'rh_model_favorites.py', 'rh_model_favorite_editor.py', 'rh_model_library.py',
     'rh_model_covers.py', 'rh_model_import.py', 'rh_model_import_ui.py', 'rh_model_browser.py', 'rh_model_browser_storage.py',
     'rh_model_bases.py', 'rh_model_http.py', 'rh_model_dialogs.py',
+    'api_provider_editor.py', 'api_model_selector.py', 'translation.py',
+    'agent_catalog.py', 'agent_auth.py', 'agent_client.py', 'agent_ui.py', 'agent_search.py', 'image_prompts.py',
+    'image_model_catalog.py', 'mask_editor.py', 'mask_assets.py', 'mask_canvas.py', 'mask_panel.py', 'image_import.py', 'media_import.py',
     'canvas/__init__.py', 'canvas/model.py', 'canvas/storage.py', 'canvas/engine.py',
+    'canvas/model_nodes.py', 'canvas/model_editor.py',
+    'canvas/save_results.py',
+    'canvas/media_inputs.py',
+    'canvas/file_nodes.py',
+    'canvas/cache_cleanup.py',
+    'canvas/run_outputs.py', 'canvas/inline_text.py',
+    'canvas/selection.py',
     'canvas/graphics.py', 'canvas/appearance.py', 'canvas/controls.py', 'canvas/editors.py', 'canvas/page.py', 'canvas/workflow_queue.py', 'canvas/workflow_queue_panel.py',
 )
 API_MODULE_FILES = (
     '__init__.py', 'call_llm.py', 'call_rh.py', 'call_translate.py',
-    'call_vision.py', 'translators.py', 'provider_client.py',
+    'call_vision.py', 'call_images.py', 'translators.py', 'provider_client.py',
 )
 ICON_SUFFIXES = {'.svg', '.png', '.ico', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'}
 

@@ -106,6 +106,7 @@ class ModelDetailsDialog(ModelDialog):
             layout.addWidget(label('本地备注','rhModelFieldLabel'));layout.addWidget(label(str(local['notes'])))
         self.body.addStretch()
         self.button('关闭',self.reject)
+        self.button('打开官网',card.open_website).setEnabled(bool(card.website_url))
         self.button('复制 model name',self.copy_name,primary=picker.library).setEnabled(bool(version.get('node_token')))
         if not picker.library:
             self.button('使用此版本',self.use_version,primary=True).setEnabled(card.use.isEnabled())

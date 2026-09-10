@@ -52,6 +52,7 @@ def call_vision(
     timeout: int = 60,
     provider=None,
     max_tokens=None,
+    web_search=None,
 ) -> str:
     return complete_text(api_url, api_key, model, '', user_text, timeout=timeout,
-                         provider=provider, max_tokens=max_tokens, image=_encode_image_data(image_path))
+                         provider=provider, max_tokens=max_tokens, image=_encode_image_data(image_path), web_search=web_search)

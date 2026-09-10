@@ -10,7 +10,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from aetherloom_core.paths import current_dir
 from aetherloom_core.prompt_history import TextSnapshot
 from aetherloom_core.rh_ui import palette
-from aetherloom_core.rh_parameters import collect_node_values
+from aetherloom_core.rh_parameters import collect_node_values, RhEnumComboBox
 from . import model
 from .storage import CanvasStore
 from .engine import CanvasEngine
@@ -21,7 +21,7 @@ from .editors import Inspector, EdgeInspector
 from .controls import CanvasStatus
 
 
-RUNTIME_FIELDS = ('results', 'result_signatures', 'fingerprint', 'status', 'progress', 'node_progress', 'message', 'error', 'generation', 'cached', 'stale', 'activated', '_restored_missing_results', '_restored_positions_ambiguous')
+RUNTIME_FIELDS = ('results', 'result_signatures', 'fingerprint', 'status', 'progress', 'node_progress', 'message', 'error', 'generation', 'cached', 'stale', 'activated', 'bypassed', '_restored_missing_results', '_restored_positions_ambiguous')
 
 
 class _BatchCountSpinBox(QtWidgets.QSpinBox):
@@ -71,6 +71,11 @@ class NodeSearchPopup(QtWidgets.QFrame):
         title = QtWidgets.QLabel('添加兼容节点' if anchor else '添加节点')
         title.setObjectName('canvasSearchTitle')
         layout.addWidget(title)
+        self.category = RhEnumComboBox()
+        self.category.addItem('全部分类', '')
+        for key, label in model.NODE_CATEGORIES.items():self.category.addItem(label, key)
+        self.category.currentIndexChanged.connect(lambda:self._filter(self.search.text()))
+        layout.addWidget(self.category)
         self.search = QtWidgets.QLineEdit()
         self.search.setPlaceholderText('搜索节点名称、App 或输入类型…')
         self.search.installEventFilter(self)
@@ -95,6 +100,7 @@ class NodeSearchPopup(QtWidgets.QFrame):
         text = text.strip().casefold()
         self.listing.clear()
         for choice in self.choices:
+            if self.category.currentData() and choice['group'] != self.category.currentData():continue
             if text and text not in choice.get('search', choice['label']).casefold():
                 continue
             item = QtWidgets.QListWidgetItem(choice['label'])
@@ -147,6 +153,8 @@ class NodeSearchPopup(QtWidgets.QFrame):
             QLabel#canvasSearchTitle {{ font-size: 14px; font-weight: 600; }}
             QLabel#canvasSearchHint {{ color: {colors['muted']}; font-size: 11px; }}
             QFrame#canvasNodeSearch QLineEdit {{ background: {colors['input']}; color: {colors['text']}; border: 1px solid {colors['accent']}; border-radius: 6px; padding: 8px; }}
+            QFrame#canvasNodeSearch QComboBox {{ background: {colors['input']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 6px; padding: 7px; }}
+            QFrame#canvasNodeSearch QComboBox QAbstractItemView {{ background: {colors['surface']}; color: {colors['text']}; selection-background-color: {colors['accent_soft']}; selection-color: {colors['accent']}; }}
             QFrame#canvasNodeSearch QListWidget {{ color: {colors['text']}; background: transparent; border: none; outline: none; }}
             QFrame#canvasNodeSearch QListWidget::item {{ border-radius: 5px; padding: 5px; }}
             QFrame#canvasNodeSearch QListWidget::item:selected {{ color: {colors['accent']}; background: {colors['accent_soft']}; }}
@@ -178,6 +186,10 @@ class CanvasPage(QtWidgets.QWidget):
         engine = existing_queue.engine if existing_queue is not None else CanvasEngine(service, self._prepare_node, self.store, owner)
         self.workflow_queue = ensure_workflow_queue(owner, engine=engine, store=self.store)
         self.engine = self.workflow_queue.engine
+        from .model_nodes import prepare as prepare_model
+        self.engine.prepare_model = lambda node: prepare_model(owner, node)
+        self.engine.output_root = lambda: str(owner.output_dir)
+        self.engine.input_root = lambda: str(owner.input_dir)
         self.store = self.engine.store
         self.document = model.new_document()
         self.apps = {}
@@ -191,7 +203,7 @@ class CanvasPage(QtWidgets.QWidget):
         self._node_search = None
         self._queue_panel_bound = None
         self._responsive_mode = None
-        self._wide_panel_preferences = (True, True)
+        self._wide_library_visible = True
         self._package_busy = False
         self._install_job = None
         self._install_busy = False
@@ -224,6 +236,12 @@ class CanvasPage(QtWidgets.QWidget):
         self._watch_workflow_directory()
         self._prune_workflows()
         self.refresh_theme()
+        from .cache_cleanup import CanvasCacheCleaner
+        cleaner = getattr(owner, '_canvas_cache_cleaner', None)
+        if cleaner is None:
+            owner._canvas_cache_cleaner = CanvasCacheCleaner(self)
+        else:
+            cleaner.page = self
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -257,12 +275,13 @@ class CanvasPage(QtWidgets.QWidget):
         package_menu.addSeparator()
         package_menu.addAction('导入工作流 JSON…', self.import_canvas)
         package_menu.addAction('导出工作流 JSON…', self.export_canvas)
+        package_menu.addSeparator();package_menu.addAction('删除当前画布…',self.delete_canvas)
         def add_menu(menu):
             action=menu.menuAction();toolbar.addAction(action)
             toolbar.widgetForAction(action).setPopupMode(QtWidgets.QToolButton.InstantPopup)
         add_menu(package_menu)
         self.add_node_action=toolbar.addAction('＋ 添加节点',self._quick_add_node)
-        self.add_node_action.setToolTip('搜索并添加 App 或基础节点 · 画布内按 Tab')
+        self.add_node_action.setToolTip('按分类搜索并添加节点 · 画布内按 Tab')
         toolbar.widgetForAction(self.add_node_action).setObjectName('canvasAddNodeButton')
         toolbar.addSeparator()
         self.run_action = QtWidgets.QAction('运行画布', self)
@@ -270,10 +289,6 @@ class CanvasPage(QtWidgets.QWidget):
         self.stop_action = QtWidgets.QAction('全部终止', self)
         self.stop_action.setToolTip('取消当前画布正在运行与排队的全部工作流组；保留已完成结果')
         self.stop_action.triggered.connect(self.stop_canvas)
-        self.inspector_action = QtWidgets.QAction('显示节点设置',self)
-        self.inspector_action.setCheckable(True)
-        self.inspector_action.setChecked(True)
-        self.inspector_action.toggled.connect(self._toggle_inspector)
         edit_menu=QtWidgets.QMenu('编辑',toolbar);self.edit_menu=edit_menu
         self.undo_action=edit_menu.addAction('撤销\tCtrl+Z',self.undo)
         self.redo_action=edit_menu.addAction('重做\tCtrl+Y',self.redo)
@@ -281,9 +296,10 @@ class CanvasPage(QtWidgets.QWidget):
         edit_menu.addAction('复制节点\tCtrl+C',self.copy_nodes)
         edit_menu.addAction('粘贴节点\tCtrl+V',self.paste_nodes)
         edit_menu.addAction('删除所选\tDelete',self.delete_selected)
+        edit_menu.addAction('全选节点\tCtrl+A',self.select_all_nodes)
         add_menu(edit_menu)
         view_menu=QtWidgets.QMenu('视图',toolbar);self.view_menu=view_menu
-        view_menu.addAction(self.palette_action);view_menu.addAction(self.inspector_action);view_menu.addSeparator()
+        view_menu.addAction(self.palette_action);view_menu.addSeparator()
         view_menu.addAction('适应全部节点',lambda:self.view.fit_nodes())
         view_menu.addAction('恢复 100% 缩放',self._reset_canvas_zoom)
         add_menu(view_menu)
@@ -327,11 +343,12 @@ class CanvasPage(QtWidgets.QWidget):
         library_close=QtWidgets.QToolButton();library_close.setText('×');library_close.setToolTip('收起节点库，可从“视图”重新打开')
         library_close.clicked.connect(lambda:self.palette_action.setChecked(False));library_heading.addWidget(library_close)
         library_layout.addLayout(library_heading)
-        self.library_tabs=QtWidgets.QTabBar();self.library_tabs.setObjectName('canvasLibraryTabs')
-        for name in ('全部','App','基础'):self.library_tabs.addTab(name)
-        self.library_tabs.setExpanding(True);self.library_tabs.setDrawBase(False);library_layout.addWidget(self.library_tabs)
+        self.library_tabs=RhEnumComboBox();self.library_tabs.setObjectName('canvasLibraryCategory')
+        self.library_tabs.addItem('全部分类', '')
+        for key, label in model.NODE_CATEGORIES.items():self.library_tabs.addItem(label, key)
+        library_layout.addWidget(self.library_tabs)
         self.search = QtWidgets.QLineEdit()
-        self.search.setPlaceholderText('搜索 App 或基础节点')
+        self.search.setPlaceholderText('搜索节点名称或分类')
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._filter_library)
         library_layout.addWidget(self.search)
@@ -350,7 +367,7 @@ class CanvasPage(QtWidgets.QWidget):
         refresh = QtWidgets.QPushButton('刷新已添加 App')
         refresh.clicked.connect(self.refresh_apps)
         library_layout.addWidget(refresh)
-        self.library_tabs.currentChanged.connect(self._filter_library)
+        self.library_tabs.currentIndexChanged.connect(self._filter_library)
         self.library_list.currentItemChanged.connect(lambda current,previous:add.setEnabled(current is not None and not current.isHidden()))
         self.splitter.addWidget(self.library)
         self.center = QtWidgets.QFrame()
@@ -360,7 +377,9 @@ class CanvasPage(QtWidgets.QWidget):
         center_layout.setContentsMargins(0, 0, 0, 0)
         self.scene = CanvasScene(self)
         self.view = CanvasView(self.scene)
-        self.scene.selectionChanged.connect(self._selection_changed)
+        self._selection_timer=QtCore.QTimer(self);self._selection_timer.setSingleShot(True)
+        self._selection_timer.timeout.connect(self._selection_changed)
+        self.scene.selectionChanged.connect(self._queue_selection_changed)
         self.scene.nodes_moved.connect(self._move_nodes)
         self.scene.nodes_resized.connect(self._resize_nodes)
         self.scene.result_requested.connect(self._focus_result)
@@ -370,6 +389,11 @@ class CanvasPage(QtWidgets.QWidget):
         self.scene.add_requested.connect(self._show_node_search)
         self.scene.run_requested.connect(lambda node_id, force: self.run_canvas(target=node_id, force=force))
         self.scene.decode_requested.connect(self._focus_decode)
+        self.scene.mask_requested.connect(self._edit_mask)
+        self.scene.options_requested.connect(self._other_settings)
+        self.scene.option_changed.connect(self._node_changed)
+        self.scene.batch_option_changed.connect(self._batch_node_changed)
+        self.scene.run_selection_requested.connect(lambda ids,force:self.run_canvas(target=ids[0] if len(ids)==1 else ids,force=force))
         self.scene.action_requested.connect(self._action)
         self.view.files_dropped.connect(self._drop_files)
         self.view.node_dropped.connect(lambda choice,position:self._insert_choice(choice,position))
@@ -452,9 +476,9 @@ class CanvasPage(QtWidgets.QWidget):
             if active:
                 self.document = self.store.load(active)
             else:
-                saved = self.store.list(lightweight=True)
-                if saved:
-                    self.document = self.store.load(saved[0]['id'])
+                # An empty/new session starts blank; unrelated saved workflows
+                # must not populate its nodes merely because they exist on disk.
+                self.document = model.new_document()
             self._set_document(self.document)
         except (OSError, ValueError, TypeError, KeyError) as error:
             self._set_document(model.new_document())
@@ -489,15 +513,17 @@ class CanvasPage(QtWidgets.QWidget):
                 continue
         self.apps = apps
         self.library_list.clear()
-        for kind in ('image', 'text', 'video', 'audio', 'select', 'preview'):
+        for kind in model.LIBRARY_KINDS:
             item = QtWidgets.QListWidgetItem('＋  ' + model.TITLES[kind])
-            item.setData(QtCore.Qt.UserRole, ('base', kind))
+            group = model.node_category(kind)
+            item.setData(QtCore.Qt.UserRole, (group, kind))
+            item.setToolTip(model.NODE_CATEGORIES[group] + ' · ' + model.TITLES[kind])
             item.setSizeHint(QtCore.QSize(150, 36))
             self.library_list.addItem(item)
         for app_id, app in sorted(apps.items(), key=lambda pair: pair[1]['name'].lower()):
             item = QtWidgets.QListWidgetItem('APP  ' + app['name'])
             item.setData(QtCore.Qt.UserRole, ('app', app_id))
-            item.setToolTip(app['name'] + '\n' + app_id)
+            item.setToolTip(model.NODE_CATEGORIES['app'] + ' · ' + app['name'] + '\n' + app_id)
             item.setSizeHint(QtCore.QSize(170, 42))
             self.library_list.addItem(item)
         self._filter_library()
@@ -617,11 +643,11 @@ class CanvasPage(QtWidgets.QWidget):
 
     def _filter_library(self):
         text = self.search.text().strip().lower()
-        category=self.library_tabs.currentIndex();visible=[]
+        category=self.library_tabs.currentData();visible=[]
         for index in range(self.library_list.count()):
             item = self.library_list.item(index)
             group,_=item.data(QtCore.Qt.UserRole)
-            item.setHidden(text not in (item.text()+item.toolTip()).lower() or (category==1 and group!='app') or (category==2 and group!='base'))
+            item.setHidden(text not in (item.text()+item.toolTip()).lower() or bool(category and group!=category))
             if not item.isHidden():visible.append(item)
         current=self.library_list.currentItem()
         if current is None or current.isHidden():self.library_list.setCurrentItem(visible[0] if visible else None)
@@ -707,15 +733,19 @@ class CanvasPage(QtWidgets.QWidget):
                                   params={model.parameter_key(field): copy.deepcopy(field.get('fieldValue', '')) for field in app['nodes']})
             model.normalize_app_urls({'nodes': [node]})
         else:
-            node = model.new_node(value)
+            if value in model.MODEL_KINDS:
+                from .model_nodes import create
+                node = create(self.owner, value)
+            else:
+                node = model.new_node(value)
             if value == 'select':
                 node['params']['indices'] = [1]
         return node
 
     def _search_choices(self, anchor):
         choices = []
-        prototypes = [('base', kind, model.TITLES[kind], model.new_node(kind))
-                      for kind in ('image', 'text', 'video', 'audio', 'select', 'preview')]
+        prototypes = [(model.node_category(kind), kind, model.TITLES[kind], model.new_node(kind))
+                      for kind in model.LIBRARY_KINDS]
         prototypes += [('app', key, app['name'], model.new_node('app', app=app)) for key, app in self.apps.items()]
         anchor_node = next((node for node in self.document['nodes'] if anchor and node['id'] == anchor['node_id']), None)
         if anchor and anchor_node is None:
@@ -728,9 +758,9 @@ class CanvasPage(QtWidgets.QWidget):
         type_names = {'text': '文本', 'image': '图像', 'audio': '音频', 'video': '视频',
                       'number': '数值', 'scalar': '枚举', 'file': '文件', 'any': '任意结果'}
         for group, value, title, prototype in prototypes:
-            prefix = 'APP · ' if group == 'app' else ''
+            prefix = model.NODE_CATEGORIES[group] + ' · '
             choice = {'group': group, 'value': value, 'label': prefix + title,
-                      'search': title + ' ' + str(value)}
+                      'search': prefix + title + ' ' + str(value)}
             if anchor and anchor['output']:
                 for port in model.input_ports(prototype):
                     if any(model.types_compatible(kind, port['type']) for kind in model.output_types(anchor_node)):
@@ -989,21 +1019,28 @@ class CanvasPage(QtWidgets.QWidget):
         self._mark_stale(edge['target'])
         self._edited(rebuild=True, select=edge['target'])
         target = next((node for node in self.document['nodes'] if node['id'] == edge['target']), {})
-        self._message('连接已断开，输入恢复使用节点内部值。' if target.get('kind') == 'app' else '连接已断开，请连接上游结果后运行。')
+        internal = target.get('kind') in {'app'} | set(model.MODEL_KINDS) or target.get('kind') == 'rename' and edge.get('input') in ('name', 'extension')
+        self._message('连接已断开，输入恢复使用节点内部值。' if internal else '连接已断开，请连接上游结果后运行。')
 
     def _mark_stale(self, node_id):
-        pending, found = [node_id], set()
+        self._mark_stale_many([node_id])
+
+    def _mark_stale_many(self, node_ids):
+        outgoing={}
+        for edge in self.document['edges']:outgoing.setdefault(edge['source'],[]).append(edge['target'])
+        pending, found = list(node_ids), set()
         while pending:
             current = pending.pop()
             if current in found:
                 continue
             found.add(current)
-            pending.extend(edge['target'] for edge in self.document['edges'] if edge['source'] == current)
+            pending.extend(outgoing.get(current,[]))
         for node in self.document['nodes']:
             if node['id'] in found and (node.get('results') or self.engine.is_running(self.document['id'])):
                 node['_ui_stale'] = True
 
     def _node_changed(self, node_id, path, value):
+        if self._closed:return
         node = next((node for node in self.document['nodes'] if node['id'] == node_id), None)
         if node is None:
             return
@@ -1019,7 +1056,8 @@ class CanvasPage(QtWidgets.QWidget):
             except ValueError as error:
                 self._message(str(error))
                 return
-        self._checkpoint((node_id, path))
+        if not (node['kind']=='text' and path=='params.text'):
+            self._checkpoint((node_id, path))
         container[key] = copy.deepcopy(value)
         if path == 'app.url':
             container['url'] = reference['url']
@@ -1038,21 +1076,57 @@ class CanvasPage(QtWidgets.QWidget):
             self._edited()
             self.scene.edges[edge_id].update_path()
 
+    def _other_settings(self,node_id):
+        item=self.scene.nodes.get(node_id)
+        if item:
+            if not item.isSelected():
+                with QtCore.QSignalBlocker(self.scene):self.scene.clearSelection();item.setSelected(True)
+            self._selection_changed(force=True)
+            if self._inspector:self._inspector.focus_other_settings()
+
+    def _batch_node_changed(self,node_ids,path,value):
+        from .selection import options
+        ids=set(node_ids);nodes=[n for n in self.document['nodes'] if n['id'] in ids]
+        eligible=set(next((o['ids'] for o in options(nodes) if o['path']==path),[]))
+        keys=path.split('.',1);changes=[]
+        for node in nodes:
+            if node['id'] not in eligible:continue
+            container=node.setdefault(keys[0],{}) if len(keys)>1 else node
+            if bool(container.get(keys[-1],False))!=bool(value):changes.append((node,container))
+        if not changes:return
+        self._checkpoint()
+        for node,container in changes:container[keys[-1]]=bool(value)
+        self._mark_stale_many([node['id'] for node,unused in changes]);self._edited()
+        self._selection_changed(force=True)
+        self._message(f'已更新 {len(changes)} 个节点，可一次撤销。')
+
+    def _queue_selection_changed(self):
+        if not self._updating and not self._closed:self._selection_timer.start(0)
+
     def _selection_changed(self, force=False):
+        if self._closed:
+            return
         if self._updating:
             return
+        if not force and self.view._rubber_selecting:return
+        self._selection_timer.stop()
         selected = self.scene.selectedItems()
+        nodes=sorted([item for item in selected if isinstance(item,NodeItem)],key=lambda item:item.node['id'])
         node = next((item for item in selected if isinstance(item, NodeItem)), None)
         edge = next((item for item in selected if isinstance(item, EdgeItem)), None)
-        identity = ('node', node.node['id']) if node else ('edge', edge.edge['id']) if edge else None
+        identity = ('batch',tuple(item.node['id'] for item in nodes)) if len(nodes)>1 else ('node', node.node['id']) if node else ('edge', edge.edge['id']) if edge else None
         if identity == self._selection_identity and not force:
             return
         self._selection_identity = identity
         self._last_edit_path = None
-        if node:
+        if len(nodes)>1:
+            from .selection import BatchInspector
+            inspector=BatchInspector([item.node for item in nodes]);inspector.changed.connect(self._batch_node_changed)
+        elif node:
             definition = self.apps.get(str(node.node.get('app', {}).get('webapp_id', '')))
             is_app = node.node['kind'] == 'app'
             inspector = Inspector(node.node, self.document['id'], self.document['edges'], self.histories,
+                                  model_owner=self.owner,
                                   missing_app=is_app and definition is None,
                                   changed_definition=is_app and definition is not None and _schema(definition['nodes']) != _schema(node.node.get('app', {}).get('nodes', [])))
             inspector.changed.connect(lambda path, value, node_id=node.node['id']: self._node_changed(node_id, path, value))
@@ -1065,10 +1139,10 @@ class CanvasPage(QtWidgets.QWidget):
                 open_app = QtWidgets.QPushButton('查看 App 输出卡片')
                 open_app.clicked.connect(lambda unused=False, app_id=str(node.node.get('app', {}).get('webapp_id', '')): self._open_app(app_id))
                 inspector.tab_forms[3].insertWidget(0, open_app)
-                previous = self._inspector
-                if (isinstance(previous, Inspector) and previous.tabs is not None
-                        and previous.node['id'] == node.node['id']):
-                    inspector.tabs.setCurrentIndex(previous.tabs.currentIndex())
+            previous = self._inspector
+            if (isinstance(previous, Inspector) and previous.tabs is not None
+                    and inspector.tabs is not None and previous.node['id'] == node.node['id']):
+                inspector.tabs.setCurrentIndex(previous.tabs.currentIndex())
         elif edge:
             inspector = EdgeInspector(edge.edge)
             inspector.changed.connect(lambda key, value, edge_id=edge.edge['id']: self._edge_changed(edge_id, key, value))
@@ -1082,44 +1156,50 @@ class CanvasPage(QtWidgets.QWidget):
         self._inspector = inspector
         self.inspector_scroll.setWidget(inspector)
         self._refresh_placeholder_palette()
+        self._place_inspector()
 
     def _empty_inspector(self):
         old = self.inspector_scroll.takeWidget()
         if old:
             old.deleteLater()
-        widget = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(widget)
-        layout.setContentsMargins(18, 22, 18, 22)
-        title = QtWidgets.QLabel('在画布中连接想法')
-        title.setObjectName('canvasSectionTitle')
-        layout.addWidget(title)
-        hint = QtWidgets.QLabel('从左侧添加已保存的 App 或素材节点。\n\n选中节点可独立设置参数；选中连线可选择结果。\n\n画布任务与 App 页面共享队列、进度和输出。')
-        hint.setWordWrap(True)
-        hint.setObjectName('canvasMuted')
-        layout.addWidget(hint)
-        layout.addStretch()
         self._inspector = None
-        self.inspector_scroll.setWidget(widget)
+        self.inspector_scroll.hide()
+        self._place_inspector()
 
     def _focus_decode(self, node_id):
-        self.inspector_action.setChecked(True)
+        item = self.scene.nodes.get(node_id)
+        if item is None:
+            return
+        if not item.isSelected():
+            self.scene.clearSelection()
+            item.setSelected(True)
         self._selection_changed(force=True)
         if isinstance(self._inspector, Inspector) and self._inspector.decode_group:
             self._inspector.tabs.setCurrentIndex(1)
             self._inspector.tabs.widget(1).ensureWidgetVisible(self._inspector.decode_group)
             self._inspector.decode_group.setFocus()
 
+    def _edit_mask(self, node_id):
+        item = self.scene.nodes.get(node_id)
+        if item is None or item.node['kind'] != 'image':return
+        self.scene.clearSelection();item.setSelected(True)
+        self._selection_changed(force=True)
+        inspector = self._inspector
+        if isinstance(inspector, Inspector):
+            files = inspector.findChild(QtWidgets.QListWidget, 'canvasInputFiles')
+            if files is not None:inspector._edit_input_mask(files)
+
     def _focus_result(self, node_id, index):
         item = self.scene.nodes.get(node_id)
         if item is None:
             return
-        self.inspector_action.setChecked(True)
         self.scene.clearSelection()
         item.setSelected(True)
+        self._selection_changed(force=True)
         inspector = self._inspector
         if isinstance(inspector, Inspector) and inspector.results_list is not None:
             if inspector.tabs is not None:
-                inspector.tabs.setCurrentIndex(3)
+                inspector.tabs.setCurrentIndex(inspector.tabs.count() - 1)
             listing = inspector.results_list
             if 0 <= index < listing.count():
                 listing.setCurrentRow(index)
@@ -1167,9 +1247,26 @@ class CanvasPage(QtWidgets.QWidget):
         self._edited(rebuild=True, select=node_id)
 
     def _action(self, action):
-        method = {'copy': self.copy_nodes, 'paste': self.paste_nodes, 'delete': self.delete_selected, 'undo': self.undo, 'redo': self.redo}.get(action)
+        method = {'copy': self.copy_nodes, 'paste': self.paste_nodes, 'delete': self.delete_selected, 'undo': self.undo, 'redo': self.redo,'select_all':self.select_all_nodes}.get(action)
         if method:
             method()
+
+    def select_all_nodes(self):
+        with QtCore.QSignalBlocker(self.scene):
+            self.scene.clearSelection()
+            for item in self.scene.nodes.values():item.setSelected(True)
+        self._selection_changed(force=True)
+
+    def delete_canvas(self):
+        canvas_id=self.document['id'];name=self.document.get('name','未命名画布')
+        reply=QtWidgets.QMessageBox.question(self,'删除画布',f'删除“{name}”及其快照、运行临时文件？\n该画布排队和运行中的任务会取消；输入素材和正式输出文件保留。',QtWidgets.QMessageBox.Yes|QtWidgets.QMessageBox.No,QtWidgets.QMessageBox.No)
+        if reply!=QtWidgets.QMessageBox.Yes:return
+        try:
+            self.workflow_queue.cancel_canvas(canvas_id)
+            self._autosave.stop();self.store.delete(canvas_id);self._mark_workflow_deleted(canvas_id)
+            self._set_document(model.new_document())
+            self._message('画布已删除；仍被任务读取的临时文件会在释放后清理。')
+        except (OSError,ValueError,RuntimeError) as error:self._message('删除画布失败：'+str(error))
 
     def copy_nodes(self):
         ids = {item.node['id'] for item in self.scene.selectedItems() if isinstance(item, NodeItem)}
@@ -1216,10 +1313,15 @@ class CanvasPage(QtWidgets.QWidget):
         self._edited(rebuild=True)
 
     def _restore_edit(self, restored):
+        selected={item.node['id'] for item in self.scene.selectedItems() if isinstance(item,NodeItem)}
+        live_nodes={node['id']:node for node in self.document['nodes']}
         runtime = dict(self._removed_runtime)
-        runtime.update({node['id']: node for node in self.document['nodes']})
+        runtime.update(live_nodes)
         restored['run'] = copy.deepcopy(self.document.get('run', {}))
         for node in restored['nodes']:
+            live=live_nodes.get(node['id'])
+            if node['kind']=='text' and live:
+                node.setdefault('params',{})['text']=live.get('params',{}).get('text','')
             if node['id'] in runtime:
                 for key in RUNTIME_FIELDS:
                     if key in runtime[node['id']]:
@@ -1233,6 +1335,10 @@ class CanvasPage(QtWidgets.QWidget):
         self.document = restored
         self.name_edit.setText(restored['name'])
         self._edited(rebuild=True)
+        with QtCore.QSignalBlocker(self.scene):
+            for node_id in selected:
+                if node_id in self.scene.nodes:self.scene.nodes[node_id].setSelected(True)
+        self._selection_changed(force=True)
 
     def undo(self):
         if self._undo:
@@ -1246,26 +1352,24 @@ class CanvasPage(QtWidgets.QWidget):
 
     def _drop_files(self, paths, position):
         groups = {}
+        folders = [path for path in paths if os.path.isdir(path)]
+        if folders:
+            label, accepted = QtWidgets.QInputDialog.getItem(self, '导入文件夹', '读取文件类型', ['图像', '视频', '音频'], 0, False)
+            if accepted:groups[{'图像': 'image', '视频': 'video', '音频': 'audio'}[label]] = folders
         for path in paths:
             if not os.path.isfile(path):
                 continue
             extension = Path(path).suffix.lower()
-            if extension in ('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff'):
-                kind = 'image'
-            elif extension in ('.mp4', '.webm', '.mov', '.mkv', '.avi'):
-                kind = 'video'
-            elif extension in ('.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac'):
-                kind = 'audio'
-            else:
-                continue
+            kind = next((kind for kind, suffixes in model.MEDIA_SUFFIXES.items() if extension in suffixes), None)
+            if kind is None:continue
             groups.setdefault(kind, []).append(path)
         if not groups:
-            self._message('请拖入图像、视频或音频文件。')
+            self._message('请拖入支持的图像、视频、音频文件或素材文件夹。')
             return
         self._checkpoint()
         created, offset = [], 0
         for index, (kind, files) in enumerate(groups.items()):
-            node = model.new_node(kind, params={'files': files}, x=position.x() + offset, y=position.y())
+            node = model.new_node(kind, params={'files': list(dict.fromkeys(files))}, x=position.x() + offset, y=position.y())
             node['size'] = self.view.initial_node_size(node)
             offset += node['size'][0] + 48
             created.append(node['id'])
@@ -1392,6 +1496,8 @@ class CanvasPage(QtWidgets.QWidget):
             if node['id'] not in ids:
                 continue
             texts = {'text': node.get('params', {}).get('text', '')} if node['kind'] == 'text' else {}
+            if node['kind'] in model.MODEL_KINDS:
+                texts = {key: node.get('params', {}).get(key, '') for key in ('prompt', 'system_prompt')}
             if node['kind'] == 'app':
                 for field in node.get('app', {}).get('nodes', []):
                     if model.field_type(field) == 'text':
@@ -1513,10 +1619,6 @@ class CanvasPage(QtWidgets.QWidget):
     def _message(self, text):
         self.status_label.setText(str(text))
 
-    def _toggle_inspector(self, checked):
-        self.inspector_scroll.setVisible(checked)
-        self._place_inspector()
-
     def _place_inspector(self):
         self._run_layout.setDirection(QtWidgets.QBoxLayout.TopToBottom if self.center.width() < 370
                                       else QtWidgets.QBoxLayout.LeftToRight)
@@ -1528,15 +1630,13 @@ class CanvasPage(QtWidgets.QWidget):
         if mode != previous:
             self._responsive_mode = mode
             if mode != 'wide' and previous in (None, 'wide'):
-                self._wide_panel_preferences = (self.palette_action.isChecked(), self.inspector_action.isChecked())
-                self.inspector_action.setChecked(False)
+                self._wide_library_visible = self.palette_action.isChecked()
             if mode == 'compact':
                 self.palette_action.setChecked(False)
             elif previous == 'compact':
-                self.palette_action.setChecked(self._wide_panel_preferences[0])
+                self.palette_action.setChecked(self._wide_library_visible)
             if mode == 'wide' and previous not in (None, 'wide'):
-                self.palette_action.setChecked(self._wide_panel_preferences[0])
-                self.inspector_action.setChecked(self._wide_panel_preferences[1])
+                self.palette_action.setChecked(self._wide_library_visible)
         narrow = mode != 'wide'
         if narrow:
             if self.inspector_scroll.parent() is self.splitter:
@@ -1544,12 +1644,11 @@ class CanvasPage(QtWidgets.QWidget):
             width = min(315, max(230, self.center.width() - 36))
             self.inspector_scroll.setGeometry(max(0, self.center.width() - width - 10), 10, width,
                                                max(100, self.center.height() - self.run_panel.height() - 38))
-            self.inspector_scroll.setVisible(self.inspector_action.isChecked())
             self.inspector_scroll.raise_()
         elif self.inspector_scroll.parent() is not self.splitter:
             self.splitter.addWidget(self.inspector_scroll)
-            self.inspector_scroll.setVisible(self.inspector_action.isChecked())
             self.splitter.setSizes([210, max(400, self.width() - 550), 300])
+        self.inspector_scroll.setVisible(self._inspector is not None)
         self.view.overlay_exclusion = self.inspector_scroll.width() + 20 if narrow and self.inspector_scroll.isVisible() else 0
         self.view.bottom_exclusion = self.run_panel.height() + 12
         self.view.schedule_adapt()
@@ -1588,6 +1687,7 @@ class CanvasPage(QtWidgets.QWidget):
         arrow_root = Path(current_dir) / 'icons'
         up_arrow = (arrow_root / f'ui-chevron-up-{mode}.svg').as_posix()
         down_arrow = (arrow_root / f'ui-chevron-down-{mode}.svg').as_posix()
+        check_icon = (arrow_root / 'ui-check.svg').as_posix()
         self.scene.colors = p
         self.scene.refresh_ports()
         self.scene.update()
@@ -1604,6 +1704,11 @@ class CanvasPage(QtWidgets.QWidget):
             QWidget#aetherloomCanvasPage QLabel {{ background: transparent; border: none; }}
             QWidget#aetherloomCanvasPage QLabel#canvasPageTitle {{ font-size: 23px; font-weight: 700; padding-right: 12px; }}
             QWidget#aetherloomCanvasPage QLabel#canvasSectionTitle {{ font-size: 14px; font-weight: 600; }}
+            QWidget#canvasBatchInspector QCheckBox {{ background: transparent; padding: 8px 4px; spacing: 8px; border: none; border-radius: 6px; }}
+            QWidget#canvasBatchInspector QCheckBox:hover {{ background: {p['hover']}; }}
+            QWidget#canvasBatchInspector QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {p['muted']}; border-radius: 4px; background: {p['input']}; image: none; }}
+            QWidget#canvasBatchInspector QCheckBox::indicator:checked {{ background: {p['accent']}; border-color: {p['accent']}; image: url("{check_icon}"); }}
+            QWidget#canvasBatchInspector QCheckBox::indicator:indeterminate {{ background: {p['accent_soft']}; border: 4px solid {p['accent']}; width: 10px; height: 10px; }}
             QWidget#aetherloomCanvasPage QLabel#canvasMuted {{ color: {p['muted']}; }}
             QWidget#aetherloomCanvasPage QLabel#canvasBuiltinReuseHint {{ color: {p['muted']}; font-size: 11px; }}
             QWidget#aetherloomCanvasPage QLabel#canvasWarning {{ color: {p['warning']}; }}
@@ -1645,9 +1750,6 @@ class CanvasPage(QtWidgets.QWidget):
             QWidget#aetherloomCanvasPage QWidget#canvasToolbarSpacer {{ background: transparent; border: none; }}
             QWidget#aetherloomCanvasPage QToolBar QToolButton:checked {{ background: {p['accent_soft']}; color: {p['accent']}; }}
             QWidget#aetherloomCanvasPage QToolBar QToolButton#canvasAddNodeButton {{ background: {p['accent_soft']}; color: {p['accent']}; padding: 7px 13px; font-weight: 600; }}
-            QTabBar#canvasLibraryTabs::tab {{ background: transparent; color: {p['muted']}; border: none; border-radius: 6px; padding: 6px 8px; }}
-            QTabBar#canvasLibraryTabs::tab:selected {{ background: {p['accent_soft']}; color: {p['accent']}; }}
-            QTabBar#canvasLibraryTabs::tab:hover {{ background: {p['hover']}; }}
             QWidget#aetherloomCanvasPage QToolButton#qt_toolbar_ext_button {{ min-width: 24px; min-height: 28px; padding: 2px; }}
             QWidget#aetherloomCanvasPage QGroupBox {{ border: 1px solid {p['border']}; border-radius: 7px; margin-top: 10px; padding-top: 12px; }}
             QWidget#aetherloomCanvasPage QGroupBox::title {{ subcontrol-origin: margin; left: 9px; padding: 0 4px; }}
@@ -1685,6 +1787,7 @@ class CanvasPage(QtWidgets.QWidget):
             self.save(automatic=True)
         self._prune_workflows()
         self._closed = True
+        self._selection_timer.stop()
         if getattr(self.engine, '_view_canvas', None) == self.document['id']:
             self.engine.set_view_canvas('')
         self._autosave.stop()
@@ -1693,5 +1796,6 @@ class CanvasPage(QtWidgets.QWidget):
         # The owner holds the execution FIFO and engine. Closing an editing
         # surface must not stop accepted or queued workflow snapshots.
         for entries in self.histories.values():
-            entries.clear()
+            if isinstance(entries,list):entries.clear()
+            elif isinstance(entries,QtGui.QTextDocument):entries.clearUndoRedoStacks()
         self.histories.clear()

@@ -6,6 +6,10 @@ def get_credentials(store, provider, category=''):
     name = str(provider or '')
     if name == 'custom':
         name = 'custom_' + str(category)
+    from .agent_catalog import AGENTS, credential_ref
+    from .api_manager import PROVIDERS
+    if name in AGENTS or PROVIDERS.get(name, {}).get('template') in AGENTS:
+        return {'api_key': credential_ref(name)}
     record = store.get(name, {})
     if isinstance(record, str):
         return {'api_key': record.strip()}

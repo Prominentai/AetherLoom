@@ -186,11 +186,12 @@ class LocalBrowserMixin:
                 finished = QtCore.pyqtSignal(object)
 
             class _ImageReverseWorker(QtCore.QRunnable):
-                def __init__(self, paths, api_url, api_key, model, timeout, out_dir, user_text=None, provider=None):
+                def __init__(self, paths, api_url, api_key, model, timeout, out_dir, user_text=None, provider=None, web_search=None):
                     super().__init__()
                     self.paths = paths
                     self.api_url = api_url
                     self.provider = provider
+                    self.web_search = web_search
                     self.api_key = api_key
                     self.model = model
                     self.timeout = timeout
@@ -223,7 +224,7 @@ class LocalBrowserMixin:
                             # fallback default
                             if not prompt:
                                 prompt = '描述该图像'
-                            resp_text = call_vision(self.api_url, self.api_key or '', self.model or '', p, prompt, timeout=self.timeout, provider=self.provider)
+                            resp_text = call_vision(self.api_url, self.api_key or '', self.model or '', p, prompt, timeout=self.timeout, provider=self.provider, web_search=self.web_search)
                         except Exception as e:
                             results.append({'path': p, 'ok': False, 'error': str(e)})
                             continue
@@ -328,7 +329,7 @@ class LocalBrowserMixin:
 
                 for p in (paths or []):
                     try:
-                        job = _ImageReverseWorker([p], api_url, api_key, model, timeout, out_dir, user_text=user_text_cfg, provider=provider)
+                        job = _ImageReverseWorker([p], api_url, api_key, model, timeout, out_dir, user_text=user_text_cfg, provider=api_conf.get('protocol') or provider, web_search=api_conf.get('web_search'))
                         try:
                             job.signals.finished.connect(_make_on_done(p))
                         except Exception:

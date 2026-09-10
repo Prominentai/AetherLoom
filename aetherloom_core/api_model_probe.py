@@ -64,10 +64,16 @@ def test_response(snapshot):
         endpoint = str(config.get('endpoint') or '')
         key, model = config.get('api_key', ''), str(config.get('model') or '')
         if category == 'translator':
-            text = translate_text(endpoint, key, model, 'Hello', 'zh', source_lang='en',
-                                  timeout=config['timeout'], provider=provider,
-                                  extra={name: config[name] for name in ('appid', 'secret') if config.get(name)})
+            if config.get('translation_mode') in ('free','llm'):
+                from .translation import translate
+                text = translate(config, 'Hello', 'zh')
+            else:
+                text = translate_text(endpoint, key, model, 'Hello', 'zh', source_lang='en',
+                                      timeout=config['timeout'], provider=provider,
+                                      extra={name: config[name] for name in ('appid', 'secret') if config.get(name)})
         elif category in ('llm', 'vision'):
+            from .agent_search import enabled
+            use_search = enabled(provider, config)
             protocol, _ = completion_endpoint(endpoint, provider)
             modern = reasoning_model(model)
             deepseek_v4 = model.lower().startswith('deepseek-v4')
@@ -75,16 +81,39 @@ def test_response(snapshot):
             # DeepSeek supports disabling thinking for this connectivity probe.
             budget = config.get('max_tokens') or (256 if deepseek_v4 else 4096)
             text = complete_text(endpoint, key, model, '',
-                                 'Describe the dominant color of this image in one short word.' if category == 'vision' else 'Reply with OK.',
+                                 ('Use web search to find the official Python documentation website. Return its title and cite its URL.' +
+                                  (' Also state the dominant color of the attached image.' if category == 'vision' else '')) if use_search else
+                                 ('Describe the dominant color of this image in one short word.' if category == 'vision' else 'Reply with OK.'),
                                  provider=provider, timeout=config['timeout'], max_tokens=int(budget),
                                  image=_probe_image() if category == 'vision' else None,
                                  reasoning_effort='low' if modern and not deepseek_v4 else None,
-                                 thinking=False if deepseek_v4 else None)
+                                 thinking=False if deepseek_v4 else None, web_search=use_search)
+        elif category == 'image_edit':
+            from .agent_client import edit_images
+            results = edit_images(provider, key, model, 'Change the red square to blue.',
+                                  [_probe_image()], timeout=config['timeout'],
+                                  system_prompt=config.get('system_prompt'),
+                                  merge_system_prompt=config.get('merge_system_prompt', False))
+            return dict(ok=True, status='ok', message='图像编辑响应通过，已收到有效图片（测试图片未保存）。',
+                        elapsed_ms=_elapsed(started), status_code=200, text=f'收到 {len(results)} 张图片')
+        elif category == 'text2img':
+            from .agent_client import generate_images
+            results = generate_images(provider, key, model, 'A blue circle on a plain white background.', timeout=config['timeout'],
+                                      system_prompt=config.get('system_prompt'),
+                                      merge_system_prompt=config.get('merge_system_prompt', False))
+            return dict(ok=True, status='ok', message='图像生成响应通过，已收到有效图片（测试图片未保存）。',
+                        elapsed_ms=_elapsed(started), status_code=200, text=f'收到 {len(results)} 张图片')
         else:
             raise ProviderAPIError('此类别暂不支持文本/图片响应测试。', status='unsupported')
         excerpt = _excerpt(text, config)
-        return dict(ok=True, status='ok', message='响应测试通过，已收到有效文本。', elapsed_ms=_elapsed(started),
-                    status_code=200, text=excerpt, response_excerpt=excerpt)
+        from .agent_search import enabled
+        searching = enabled(provider, config)
+        searched = bool(getattr(text, 'searched', False))
+        message = ('联网搜索响应通过，已确认搜索工具执行完成。' if searched else
+                   '文本响应通过，但模型未调用搜索工具；联网搜索尚未验证。') if searching else '响应测试通过，已收到有效文本。'
+        return dict(ok=True, status='ok', message=message, elapsed_ms=_elapsed(started),
+                    status_code=200, text=excerpt, response_excerpt=excerpt, search_performed=searched,
+                    sources=list(getattr(text, 'sources', ())))
     except Exception as error:
         return _failure(error, started)
 
@@ -93,6 +122,11 @@ def _models_endpoint(endpoint, provider):
     protocol, completion = completion_endpoint(endpoint, provider)
     parts = endpoint_parts(completion)
     path = parts.path
+    if str(provider).startswith('protocol_'):
+        suffix = {'openai': '/chat/completions', 'responses': '/responses',
+                  'claude': '/messages', 'ollama': '/api/chat', 'ollama_generate': '/api/generate'}[protocol]
+        if not path.endswith(suffix):
+            raise ProviderAPIError('此网关使用自定义请求路径，无法推断模型目录地址；请手填模型并测试响应。', status='unsupported')
     if provider == 'ollama' or protocol.startswith('ollama'):
         if '/api/' in path:
             path = path.rsplit('/api/', 1)[0] + '/api/tags'
@@ -152,10 +186,25 @@ def fetch_models(snapshot):
     try:
         config = _snapshot(snapshot)
         provider = str(config.get('provider') or '').lower()
+        from .agent_catalog import AGENTS
+        if provider in AGENTS:
+            from .agent_client import model_names
+            names = model_names(provider, config.get('api_key', ''), config.get('category'), config['timeout'])
+            if not names:raise ProviderAPIError('没有符合当前类别的 Agent 模型。', status='empty_response')
+            return dict(ok=True, status='ok', models=names, elapsed_ms=_elapsed(started), status_code=200,
+                        source='remote',
+                        message='已更新 Agent LLM 候选模型；目录不代表图像工具权限，请测试所选模型。')
         if config.get('category') == 'translator' or provider in ('baidu_translate', 'google_translate', 'google_v2'):
             raise ProviderAPIError('此翻译接口不提供动态模型目录；请使用“测试响应”验证配置。', status='unsupported')
         if provider.startswith('runninghub'):
             raise ProviderAPIError('RunningHub 使用应用目录，不支持此模型列表接口。', status='unsupported')
+        if config.get('category') in ('text2img', 'image_edit'):
+            from .image_model_catalog import fetch_models as fetch_image_models
+            names = fetch_image_models(config)
+            if not names:
+                raise ProviderAPIError('未返回已确认支持当前图像能力的模型，请参考官方文档或保留手填模型。', status='empty_response')
+            return dict(ok=True, status='ok', models=names, elapsed_ms=_elapsed(started), status_code=200,
+                        source='remote', message=f'目录查询通过：{len(names)} 个图像模型；尚未验证实际出图。')
         protocol, url = _models_endpoint(config.get('endpoint'), provider)
         headers = request_headers(protocol, config.get('api_key', ''))
         names, cursors, records = [], set(), []

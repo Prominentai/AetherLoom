@@ -1,7 +1,6 @@
 """Independent node inspectors reusing AetherLoom's exact parameter editors."""
 import copy
 import os
-import shutil
 from pathlib import Path
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -11,20 +10,20 @@ from aetherloom_core.rh_model_picker import ModelField, model_resource_type
 from aetherloom_core.prompt_history import PromptHistory
 from aetherloom_core.ui.widgets import CompletionTextEdit
 from .model import parameter_key, field_type, node_title
+from .model import MEDIA_SUFFIXES, MODEL_KINDS
+from .media_inputs import accepts
 
 
-FILE_FILTERS = {
-    'image': '图像 (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff);;所有文件 (*)',
-    'video': '视频 (*.mp4 *.webm *.mov *.mkv *.avi);;所有文件 (*)',
-    'audio': '音频 (*.wav *.mp3 *.flac *.ogg *.m4a *.aac);;所有文件 (*)',
-}
+FILE_FILTERS = {kind: label + ' (' + ' '.join('*' + suffix for suffix in sorted(MEDIA_SUFFIXES[kind])) + ')'
+                for kind, label in (('image', '图像'), ('video', '视频'), ('audio', '音频'))}
 
 
 class FileList(QtWidgets.QListWidget):
     files_changed = QtCore.pyqtSignal(list)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, kind='image'):
         super().__init__(parent)
+        self.kind = kind
         self.setAcceptDrops(True)
         self.setDragDropMode(self.InternalMove)
         self.setSelectionMode(self.ExtendedSelection)
@@ -43,30 +42,48 @@ class FileList(QtWidgets.QListWidget):
         item = QtWidgets.QListWidgetItem(os.path.basename(str(path)) or str(path))
         item.setData(QtCore.Qt.UserRole, str(path))
         item.setToolTip(str(path))
-        if not os.path.isfile(path):
+        if os.path.isdir(path):
+            item.setText('文件夹 · ' + item.text())
+        elif not os.path.isfile(path):
             item.setText('⚠ ' + item.text())
             item.setForeground(QtGui.QColor('#e2a268'))
         self.addItem(item)
 
+    def import_paths(self, paths):
+        previous = {os.path.normcase(os.path.abspath(p)) for p in self.paths()}
+        added = 0
+        for value in paths:
+            raw = str(value).strip().strip('"')
+            if not raw:continue
+            path = os.path.abspath(os.path.expanduser(raw))
+            key = os.path.normcase(path)
+            if key not in previous and accepts(path, self.kind):
+                self.add_path(path);previous.add(key);added += 1
+        if added:self.files_changed.emit(self.paths())
+        return added
+
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        from aetherloom_core.image_import import accepts_mime
+        if accepts_mime(event.mimeData()):
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
+        from aetherloom_core.image_import import accepts_mime
+        if accepts_mime(event.mimeData()):
             event.acceptProposedAction()
         else:
             super().dragMoveEvent(event)
 
     def dropEvent(self, event):
+        if not event.mimeData().hasFormat('application/x-qabstractitemmodeldatalist'):
+            from aetherloom_core.image_import import import_mime
+            if import_mime(event.mimeData(),self,self.import_paths,self.kind):event.acceptProposedAction();return
         if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                if url.isLocalFile() and os.path.isfile(url.toLocalFile()):
-                    self.add_path(url.toLocalFile())
-            self.files_changed.emit(self.paths())
-            event.acceptProposedAction()
+            if self.import_paths([url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]):
+                event.acceptProposedAction()
+            else:event.ignore()
         else:
             super().dropEvent(event)
 
@@ -86,7 +103,7 @@ class Inspector(QtWidgets.QWidget):
     install_requested = QtCore.pyqtSignal(str)
     message = QtCore.pyqtSignal(str)
 
-    def __init__(self, node, doc_id, edges, histories, parent=None, missing_app=False, changed_definition=False):
+    def __init__(self, node, doc_id, edges, histories, parent=None, missing_app=False, changed_definition=False, model_owner=None):
         super().__init__(parent)
         self.node = node
         self.results_list = None
@@ -102,7 +119,8 @@ class Inspector(QtWidgets.QWidget):
         title.setObjectName('canvasSectionTitle')
         self.form.addWidget(title)
         root_form = self.form
-        if node['kind'] == 'app':
+        from .model import MODEL_KINDS
+        if node['kind'] not in MODEL_KINDS:
             root_form.setContentsMargins(10, 14, 10, 16)
             self.tabs = QtWidgets.QTabWidget()
             self.tabs.setObjectName('canvasNodeSettingsTabs')
@@ -111,7 +129,8 @@ class Inspector(QtWidgets.QWidget):
             self.tabs.tabBar().setExpanding(True)
             self.tabs.tabBar().setDrawBase(False)
             self.tabs.tabBar().setElideMode(QtCore.Qt.ElideNone)
-            for label in ('应用设置', '本地解码设置', '其他设置', '最近结果'):
+            labels = ('应用设置', '本地解码设置', '其他设置', '最近结果') if node['kind']=='app' else ('节点设置', '其他设置', '最近结果')
+            for label in labels:
                 scroll = QtWidgets.QScrollArea()
                 scroll.setObjectName('canvasNodeTabScroll')
                 scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -153,6 +172,13 @@ class Inspector(QtWidgets.QWidget):
             rebind.clicked.connect(lambda: self.rebind_requested.emit(node['id']))
             self.form.addWidget(rebind)
         self.decode_group = None
+        from .model import MODEL_KINDS
+        if node['kind'] in MODEL_KINDS:
+            from .model_editor import build
+            build(self, node, doc_id, edges, model_owner)
+            self._results(node)
+            self.form.addStretch(1)
+            return
         if node['kind'] == 'app':
             self._app_fields(node, doc_id, edges)
             self.form.addStretch(1)
@@ -161,6 +187,7 @@ class Inspector(QtWidgets.QWidget):
             self.form.addStretch(1)
             self.form = self.tab_forms[2]
             self._app_options(node)
+            self._other_options(node)
             self.form.addStretch(1)
             self.form = self.tab_forms[3]
             self._results(node)
@@ -176,6 +203,61 @@ class Inspector(QtWidgets.QWidget):
             hint.setWordWrap(True)
             hint.setObjectName('canvasMuted')
             self.form.addWidget(hint)
+        elif node['kind'] == 'preview':
+            enabled = QtWidgets.QCheckBox('保存结果')
+            enabled.setObjectName('canvasSaveEnabled')
+            enabled.setChecked(node.get('params', {}).get('save_enabled', False))
+            self.form.addWidget(enabled)
+            overwrite = QtWidgets.QCheckBox('重名覆盖')
+            overwrite.setObjectName('canvasSaveOverwrite')
+            overwrite.setChecked(node.get('params', {}).get('overwrite', False))
+            overwrite.setEnabled(enabled.isChecked())
+            overwrite.setToolTip('关闭时重名按 文件名(1).后缀、文件名(2).后缀 保存；开启后替换目标同名文件。')
+            overwrite.toggled.connect(lambda value:self.changed.emit('params.overwrite', value))
+            enabled.toggled.connect(overwrite.setEnabled)
+            self.form.addWidget(overwrite)
+            self.form.addWidget(QtWidgets.QLabel('保存目录'))
+            row = QtWidgets.QHBoxLayout()
+            directory = QtWidgets.QLineEdit(node.get('params', {}).get('save_directory', ''))
+            directory.setObjectName('canvasSaveDirectory')
+            directory.setPlaceholderText('留空使用输出目录下的画布文件夹')
+            directory.setClearButtonEnabled(True)
+            directory.setToolTip('仅此节点生效；请输入绝对路径。同名文件自动加序号，不覆盖原文件。')
+            browse = QtWidgets.QPushButton('选择')
+            row.addWidget(directory, 1);row.addWidget(browse);self.form.addLayout(row)
+            directory.setEnabled(enabled.isChecked());browse.setEnabled(enabled.isChecked())
+            enabled.toggled.connect(lambda value:(directory.setEnabled(value), browse.setEnabled(value), self.changed.emit('params.save_enabled', value)))
+            directory.editingFinished.connect(lambda:self.changed.emit('params.save_directory', directory.text().strip()))
+            def choose_directory():
+                selected = QtWidgets.QFileDialog.getExistingDirectory(self, '选择节点保存目录', directory.text())
+                if selected:
+                    directory.setText(selected)
+                    self.changed.emit('params.save_directory', selected)
+            browse.clicked.connect(choose_directory)
+            from .save_results import default_directory
+            canvas_doc = {'id': doc_id, 'name': getattr(getattr(model_owner, 'canvas_page', None), 'document', {}).get('name', '画布')}
+            default_path = default_directory(model_owner.output_dir, canvas_doc) if model_owner else '输出目录/canvases/画布名称_标识'
+            hint = QtWidgets.QLabel('默认不保存，仅预览。保存时沿用输入名称；修改名称请在上游使用文件重命名节点。重名覆盖默认关闭，重名添加 (1)、(2)…；开启覆盖后替换同名文件。\n默认目录：' + default_path)
+            hint.setWordWrap(True);hint.setObjectName('canvasMuted');self.form.addWidget(hint)
+        elif node['kind'] == 'filename':
+            mode = RhEnumComboBox();mode.setObjectName('canvasFilenameMode')
+            for label, value in [('只读取文件名', 'name'), ('只读取后缀', 'extension'), ('全部读取', 'full')]:mode.addItem(label, value)
+            params = node.get('params', {})
+            mode.setCurrentIndex(max(0, mode.findData(params.get('read_mode', 'full' if params.get('include_extension', False) else 'name'))))
+            mode.currentIndexChanged.connect(lambda:self.changed.emit('params.read_mode', mode.currentData()))
+            self.form.addWidget(QtWidgets.QLabel('读取内容'));self.form.addWidget(mode)
+            hint = QtWidgets.QLabel('例如 photo.png 分别输出 photo、png、photo.png。多文件逐项读取并保留来源关系，输出文本可连接文件重命名节点的文件名或后缀输入，不自动生成本地文件。')
+            hint.setWordWrap(True);hint.setObjectName('canvasMuted');self.form.addWidget(hint)
+        elif node['kind'] == 'rename':
+            for key, label in (('name', '文件名（不含后缀）'), ('extension', '后缀名')):
+                self.form.addWidget(QtWidgets.QLabel(label))
+                edit = QtWidgets.QLineEdit(node.get('params', {}).get(key, ''))
+                edit.setObjectName('canvasRename_' + key)
+                edit.setPlaceholderText('留空保持原值；连接后使用上游文本')
+                edit.editingFinished.connect(lambda k=key,e=edit:self.changed.emit('params.' + k, e.text().strip()))
+                self.form.addWidget(edit)
+            hint = QtWidgets.QLabel('在临时目录生成重命名副本，后续节点读取副本；原文件与 App 输出卡片保持不变。文件名或后缀留空均保持原值，连线输入留空也不修改。同名结果分开存放，正式保存时按保存节点的重名选项处理。后缀只改名称，不转换文件格式。')
+            hint.setWordWrap(True);hint.setObjectName('canvasMuted');self.form.addWidget(hint)
         elif node['kind'] == 'select':
             type_combo = RhEnumComboBox()
             for label, value in [('全部类型', 'any'), ('图像', 'image'), ('视频', 'video'), ('音频', 'audio'), ('文本', 'text')]:
@@ -194,14 +276,40 @@ class Inspector(QtWidgets.QWidget):
             hint.setWordWrap(True)
             hint.setObjectName('canvasMuted')
             self.form.addWidget(hint)
-        if node['kind'] != 'app':
-            reuse_hint = QtWidgets.QLabel('内置节点自动复用未变化的有效结果。')
-            reuse_hint.setObjectName('canvasBuiltinReuseHint')
-            reuse_hint.setWordWrap(True)
-            self.form.addWidget(reuse_hint)
-        if node.get('results') or node['kind'] in ('app', 'select', 'preview'):
-            self._results(node)
         self.form.addStretch(1)
+        self.form = self.tab_forms[1]
+        self._other_options(node)
+        reuse_hint = QtWidgets.QLabel('内置节点自动复用未变化的有效结果。')
+        reuse_hint.setObjectName('canvasBuiltinReuseHint')
+        reuse_hint.setWordWrap(True)
+        self.form.addWidget(reuse_hint)
+        self.form.addStretch(1)
+        self.form = self.tab_forms[2]
+        self._results(node)
+        self.form.addStretch(1)
+        self.form = root_form
+
+    def _other_options(self,node):
+        group=QtWidgets.QGroupBox('其他设置');group.setObjectName('canvasOtherSettings')
+        layout=QtWidgets.QVBoxLayout(group)
+        enabled=QtWidgets.QCheckBox('忽略节点（旁路）');enabled.setObjectName('canvasBypass')
+        enabled.setChecked(node.get('bypass',False))
+        enabled.toggled.connect(lambda value:self.changed.emit('bypass',value));layout.addWidget(enabled)
+        hint=QtWidgets.QLabel('忽略后不执行此节点，自动将兼容的连线输入传给下游。同类型多输入按端口顺序取第一个；无兼容输入时，下游停止，不读取旧结果。')
+        hint.setWordWrap(True);hint.setObjectName('canvasMuted');layout.addWidget(hint)
+        self.form.addWidget(group)
+
+    def focus_other_settings(self):
+        group=self.findChild(QtWidgets.QGroupBox,'canvasOtherSettings')
+        if group and self.tabs:
+            for index in range(self.tabs.count()):
+                if self.tabs.widget(index).isAncestorOf(group):self.tabs.setCurrentIndex(index);break
+        if group:
+            group.findChild(QtWidgets.QCheckBox,'canvasBypass').setFocus()
+            parent=group.parentWidget()
+            while parent:
+                if isinstance(parent,QtWidgets.QScrollArea):parent.ensureWidgetVisible(group);break
+                parent=parent.parentWidget()
 
     def _indices_changed(self, editor, path):
         try:
@@ -222,7 +330,10 @@ class Inspector(QtWidgets.QWidget):
         row.addWidget(forward)
         self.form.addLayout(row)
         editor = CompletionTextEdit(self)
-        editor.setPlainText(str(text))
+        if identity[-1]=='text':
+            from .inline_text import bind_document
+            bind_document(editor,text,identity,self.histories)
+        else:editor.setPlainText(str(text))
         editor.setMinimumHeight(125)
         editor.setMaximumHeight(240)
         editor.setAcceptRichText(False)
@@ -282,6 +393,20 @@ class Inspector(QtWidgets.QWidget):
                     browse.clicked.connect(lambda unused=False, e=editor, k=key, t=media_type: self._pick_parameter_file(e, k, t))
                     browse.setEnabled(key not in connected)
                     row.addWidget(browse)
+                    if media_type == 'image':
+                        from aetherloom_core.mask_editor import add_mask_button
+                        mask_button = add_mask_button(row, editor, self,
+                            node.get('params', {}).get('_masks', {}).get(key) or field.get('_mask'),
+                            lambda value,k=key:self.changed.emit('params._masks',
+                                dict(self.node.get('params', {}).get('_masks', {}), **{k:value})))
+                        mask_button.setEnabled(key not in connected)
+                    if key not in connected:
+                        from aetherloom_core.image_import import ImageDropFilter
+                        def accept_media(paths,e=editor,t=media_type):
+                            kinds=('image','video','audio') if t=='file' else (t,)
+                            if paths and os.path.isfile(paths[0]) and any(accepts(paths[0],k) for k in kinds):
+                                e.setText(paths[0]);e.editingFinished.emit()
+                        editor._image_drop=ImageDropFilter(editor,accept_media,media_type)
                 self.form.addLayout(row)
             editor.setEnabled(key not in connected)
             if key in connected:
@@ -343,16 +468,27 @@ class Inspector(QtWidgets.QWidget):
             self.changed.emit('params.' + key, path)
 
     def _files(self, node):
-        hint = QtWidgets.QLabel('拖入文件或点击添加；拖动条目可以调整输入顺序。')
+        hint = QtWidgets.QLabel('选择、输入路径或拖入文件／文件夹。仅接收本节点支持的格式；文件夹在运行时读取当前层匹配文件，按文件名排序，不递归子文件夹。拖动条目可调整顺序。')
         hint.setWordWrap(True)
         hint.setObjectName('canvasMuted')
         self.form.addWidget(hint)
-        files = FileList()
+        files = FileList(kind=node['kind'])
+        files.setObjectName('canvasInputFiles')
         files.set_paths(node.get('params', {}).get('files', []))
         files.files_changed.connect(lambda values: self.changed.emit('params.files', values))
         self.form.addWidget(files)
+        path_row = QtWidgets.QHBoxLayout()
+        path_edit = QtWidgets.QLineEdit();path_edit.setObjectName('canvasInputPath')
+        path_edit.setPlaceholderText('文件或文件夹路径')
+        import_button = QtWidgets.QPushButton('导入')
+        path_row.addWidget(path_edit, 1);path_row.addWidget(import_button);self.form.addLayout(path_row)
+        def import_path():
+            if files.import_paths([path_edit.text()]):path_edit.clear()
+            else:self.message.emit('路径不存在、格式不匹配或已在列表中。')
+        import_button.clicked.connect(import_path);path_edit.returnPressed.connect(import_path)
         row = QtWidgets.QHBoxLayout()
-        for text, callback in [('添加', lambda: self._add_files(files, node['kind'])),
+        for text, callback in [('文件', lambda: self._add_files(files, node['kind'])),
+                               ('文件夹', lambda: self._add_folder(files)),
                                ('重新定位', lambda: self._relocate(files, node['kind'])),
                                ('移除', lambda: self._remove_files(files))]:
             button = QtWidgets.QPushButton(text)
@@ -360,19 +496,59 @@ class Inspector(QtWidgets.QWidget):
             row.addWidget(button)
         self.form.addLayout(row)
 
+        if node['kind'] == 'image':
+            mask_button = QtWidgets.QPushButton('遮罩 / 绘画');mask_button.setObjectName('canvasMaskButton')
+            mask_button.setToolTip('编辑选中的图像；保存后仅替换该项输入为带遮罩的 PNG 副本')
+            mask_button.clicked.connect(lambda:self._edit_input_mask(files))
+            self.form.addWidget(mask_button)
+
+    def _edit_input_mask(self, files):
+        paths = files.paths()
+        if not paths:
+            self.message.emit('请先导入图像。');return
+        index = files.currentRow()
+        if index < 0:
+            if len(paths) != 1:
+                self.message.emit('请先选中要绘制遮罩的图像。');return
+            index = 0
+        path = paths[index]
+        if os.path.isdir(path):
+            selected, _ = QtWidgets.QFileDialog.getOpenFileName(self, '选择文件夹中要绘制遮罩的图像', path, FILE_FILTERS['image'])
+            if not selected:return
+            from .media_inputs import resolve_files
+            expanded = resolve_files([path], 'image')
+            match = next((i for i, value in enumerate(expanded) if os.path.normcase(os.path.abspath(value)) == os.path.normcase(os.path.abspath(selected))), None)
+            if match is None:
+                self.message.emit('请选择该文件夹当前层中的图像。');return
+            paths[index:index+1] = expanded
+            index += match;path = paths[index]
+        from aetherloom_core.mask_editor import edit_mask
+        masks = list(self.node.get('params', {}).get('masks', []))
+        from aetherloom_core.mask_assets import matches
+        previous = next((value for value in masks if matches(value,path)),None)
+        changed = edit_mask(path, self, previous)
+        if changed:
+            files.set_paths(paths);files.setCurrentRow(index)
+            files.files_changed.emit(paths)
+            self.changed.emit('params.masks',[value for value in masks if not matches(value,path)]+[changed])
+
     def _add_files(self, files, kind):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, '添加素材', '', FILE_FILTERS[kind])
-        for path in paths:
-            files.add_path(path)
-        if paths:
-            files.files_changed.emit(files.paths())
+        files.import_paths(paths)
+
+    def _add_folder(self, files):
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, '选择输入文件夹')
+        if path:files.import_paths([path])
 
     def _relocate(self, files, kind):
         index = files.currentRow()
         if index < 0:
             return
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, '重新定位文件', '', FILE_FILTERS[kind])
-        if path:
+        if os.path.isdir(files.paths()[index]) or not Path(files.paths()[index]).suffix:
+            path = QtWidgets.QFileDialog.getExistingDirectory(self, '重新定位文件夹')
+        else:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(self, '重新定位文件', '', FILE_FILTERS[kind])
+        if path and accepts(path, kind):
             paths = files.paths()
             paths[index] = path
             files.set_paths(paths)
@@ -399,6 +575,7 @@ class Inspector(QtWidgets.QWidget):
         open_button = QtWidgets.QPushButton('打开所选')
         open_button.clicked.connect(lambda: self._open_result(listing.currentItem().data(QtCore.Qt.UserRole)) if listing.currentItem() else None)
         save_button = QtWidgets.QPushButton('另存副本')
+        save_button.setVisible(node['kind'] in {'app', 'preview'} | set(MODEL_KINDS))
         save_button.clicked.connect(lambda: self._save_results(listing))
         row.addWidget(open_button)
         row.addWidget(save_button)
@@ -440,33 +617,17 @@ class Inspector(QtWidgets.QWidget):
         if not selected:
             self.message.emit('请先选择需要另存的结果。')
             return
-        destination = QtWidgets.QFileDialog.getExistingDirectory(self, '选择副本保存目录')
+        destination = QtWidgets.QFileDialog.getExistingDirectory(self, '选择副本保存目录', self.node.get('params', {}).get('save_directory', ''))
         if not destination:
             return
-        count = 0
         try:
-            for item in selected:
-                result = item.data(QtCore.Qt.UserRole)
-                path = result.get('path')
-                if path and os.path.isfile(path):
-                    target = Path(destination) / Path(path).name
-                    suffix = 1
-                    while target.exists():
-                        target = Path(destination) / f'{Path(path).stem}_{suffix}{Path(path).suffix}'
-                        suffix += 1
-                    shutil.copy2(path, target)
-                elif 'text' in result:
-                    target = Path(destination) / '文本结果.txt'
-                    suffix = 1
-                    while target.exists():
-                        target = Path(destination) / f'文本结果_{suffix}.txt'
-                        suffix += 1
-                    target.write_text(str(result['text']), encoding='utf-8')
-                else:
-                    continue
-                count += 1
+            from .save_results import save_results
+            overwrite = self.findChild(QtWidgets.QCheckBox, 'canvasSaveOverwrite')
+            saved = save_results([item.data(QtCore.Qt.UserRole) for item in selected], destination,
+                                 overwrite=overwrite.isChecked() if overwrite is not None else False)
+            count = len(saved)
             self.message.emit(f'已另存 {count} 个结果。')
-        except OSError as error:
+        except (OSError, ValueError) as error:
             self.message.emit(f'另存失败：{error}')
 
     def validate(self):
@@ -509,7 +670,7 @@ class EdgeInspector(QtWidgets.QWidget):
         layout.addWidget(indices)
         mode.currentIndexChanged.connect(lambda: (indices.setVisible(mode.currentData() == 'index'), self.changed.emit('mode', mode.currentData())))
         indices.editingFinished.connect(lambda: self._indices(indices))
-        explanation = QtWidgets.QLabel('多个输入按顺序配对，单项可复用；多个列表长度不一致时会阻止提交。')
+        explanation = QtWidgets.QLabel('批量处理请选择“全部匹配结果逐项运行”。多个分支有共同来源时按来源对应，可将一个原文件名用于它生成的多项结果；无关联时按顺序配对、单项复用。缺失或歧义会阻止执行。')
         explanation.setWordWrap(True)
         explanation.setObjectName('canvasMuted')
         layout.addWidget(explanation)

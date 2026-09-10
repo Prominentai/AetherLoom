@@ -294,6 +294,11 @@ def collect_node_values(nodes, widgets):
             value = editor.toPlainText()
         elif entry.get('le') is not None:
             value = entry['le'].text()
+            mask = getattr(entry['le'], '_aetherloom_mask', None)
+            if mask:
+                from .mask_assets import matches
+                if matches(mask,value):result[index]['_mask'] = copy.deepcopy(mask)
+                else:result[index].pop('_mask',None)
         elif entry.get('ds') is not None or entry.get('sb') is not None:
             editor = entry.get('ds') if entry.get('ds') is not None else entry['sb']
             if not editor.hasAcceptableInput():

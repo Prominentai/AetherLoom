@@ -13,11 +13,13 @@ model_library/
 *.pem
 *.key
 credentials*.json
+agent_accounts/
 secrets*.json
 
 # User workflows, inputs, generated results and caches
 RH_apps/
 input/
+input_assets/
 output/
 decoding/
 .thumb_cache/

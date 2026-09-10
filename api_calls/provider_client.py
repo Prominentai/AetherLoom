@@ -6,6 +6,15 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
+# Explicit custom protocols take precedence over URL/provider heuristics.
+CUSTOM_PROTOCOL_ROUTES = {
+    'protocol_openai': ('openai', '/chat/completions'),
+    'protocol_responses': ('responses', '/responses'),
+    'protocol_claude': ('claude', '/messages'),
+    'protocol_ollama': ('ollama', '/api/chat'),
+    'protocol_ollama_generate': ('ollama_generate', '/api/generate'),
+}
+
 
 class ProviderAPIError(RuntimeError):
     def __init__(self, message, *, status='request_error', status_code=None, provider_code=None):
@@ -34,6 +43,19 @@ def completion_endpoint(endpoint, provider=None):
     parts = endpoint_parts(endpoint)
     path = parts.path.rstrip('/')
     provider = str(provider or '').lower()
+    if provider.startswith('protocol_'):
+        if provider not in CUSTOM_PROTOCOL_ROUTES:
+            raise ProviderAPIError('不支持此自定义协议，请重新选择协议类型。', status='unsupported')
+        protocol, route = CUSTOM_PROTOCOL_ROUTES[provider]
+        # A full gateway path is used literally. Only an origin/version base
+        # is completed, so /proxy/inference never becomes /proxy/inference/chat/completions.
+        if not path:
+            path = route if protocol.startswith('ollama') else '/v1' + route
+        elif protocol.startswith('ollama') and path.endswith('/api'):
+            path += route[len('/api'):]
+        elif not protocol.startswith('ollama') and re.search(r'/v\d+(?:beta\d*)?$', path):
+            path += route
+        return protocol, _url(parts, path)
     if path.endswith('/chat/completions'):
         return 'openai', _url(parts, path)
     if path.endswith('/responses'):
@@ -224,7 +246,12 @@ def response_text(data, protocol):
 
 def complete_text(endpoint, api_key, model, system_prompt, user_text, *, provider=None,
                   temperature=None, timeout=30, max_tokens=None, image=None, reasoning_effort=None,
-                  thinking=None):
+                  thinking=None, web_search=None):
+    from aetherloom_core.agent_catalog import AGENTS
+    if provider in AGENTS:
+        from aetherloom_core.agent_client import complete
+        return complete(provider, api_key, model, system_prompt, user_text, image=image,
+                        timeout=timeout, max_tokens=max_tokens, web_search=web_search)
     protocol, url = completion_endpoint(endpoint, provider)
     if not isinstance(model, str) or not model.strip():
         raise ProviderAPIError('请先填写或选择模型。', status='invalid_config')

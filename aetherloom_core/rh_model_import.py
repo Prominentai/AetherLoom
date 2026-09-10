@@ -32,7 +32,7 @@ def read_model_link(value, authorization=None):
                 if not isinstance(record,dict) or str(record.get('id'))!=identity or record.get('resourceType') not in TYPES:
                     raise ValueError('无法读取该私有模型')
                 if not any(v.get('node_token') for v in model_versions(record)):raise ValueError('模型没有可用版本')
-                return site,record
+                return site,dict(record,_visibility='self')
             finally:session.headers.clear()
     try:
         with requests.post(site+'/api/portal/model/detail',json={'resourceId':identity},
@@ -51,7 +51,7 @@ def read_model_link(value, authorization=None):
             raise ValueError('无法读取模型，请确认模型公开且地址有效')
         if str(record.get('id'))!=identity or record.get('resourceType') not in TYPES or not any(v.get('node_token') for v in model_versions(record)):
             raise ValueError('该页面没有可导入的模型版本')
-        return site,record
+        return site,dict(record,_visibility='public')
     except requests.RequestException:
         raise ValueError('模型网页读取失败，请检查网络后重试') from None
 

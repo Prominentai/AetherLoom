@@ -15,6 +15,9 @@ from .appearance import tint, kind_color, draw_kind_icon
 
 KIND_NAMES = {'app': 'APP', 'image': '图像', 'video': '视频', 'audio': '音频',
               'text': '文本', 'select': '内容过滤', 'preview': '预览 / 保存'}
+KIND_NAMES.update(llm_model='LLM · API / Agent', vision_model='VISION · API / Agent',
+                  image_model='IMAGE · API / Agent', edit_model='EDIT · API / Agent')
+KIND_NAMES.update(filename='读取文件名', rename='文件重命名')
 STATUS_NAMES = {'IDLE': '就绪', 'READY': '就绪', 'WAITING': '等待上游',
                 'SKIPPED': '已跳过', 'INTERRUPTED': '会话已中断',
                 'PENDING': '等待上游',
@@ -65,7 +68,26 @@ class _ThumbnailWorker(QtCore.QRunnable):
     def run(self):
         image = None
         try:
+            if self.key[3]=='text':
+                with open(self.key[0],'r',encoding='utf-8-sig') as stream:image=stream.read(4096)
+                self.signals.complete.emit(self.key,image)
+                return
+            if self.key[3] == 'video':
+                import subprocess
+                import imageio_ffmpeg
+                completed = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), '-nostdin', '-v', 'error',
+                    '-threads', '1', '-i', os.path.abspath(self.key[0]), '-an', '-sn', '-dn', '-frames:v', '1',
+                    '-vf', 'scale=512:320:force_original_aspect_ratio=decrease', '-filter_threads', '1',
+                    '-threads', '1', '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1'],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=12,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                if completed.returncode == 0 and len(completed.stdout) <= 4 * 1024 * 1024:
+                    decoded = QtGui.QImage.fromData(completed.stdout)
+                    if not decoded.isNull():image = decoded
+                self.signals.complete.emit(self.key, image)
+                return
             reader = QtGui.QImageReader(self.key[0])
+            reader.setDecideFormatFromContent(True)
             size = reader.size()
             if size.isValid() and size.width() * size.height() <= MAX_DECODE_PIXELS:
                 reader.setAutoTransform(True)
@@ -101,7 +123,7 @@ class ThumbnailCache(QtCore.QObject):
         self.pending.discard(key)
         if self.closed:
             return
-        self.entries[key] = QtGui.QPixmap.fromImage(decoded) if decoded is not None else None
+        self.entries[key] = decoded if isinstance(decoded,str) else QtGui.QPixmap.fromImage(decoded) if decoded is not None else None
         while len(self.entries) > self.limit:
             self.entries.popitem(last=False)
         self.ready.emit()
@@ -111,12 +133,12 @@ class ThumbnailCache(QtCore.QObject):
         self.pool.clear()
         self.entries.clear()
 
-    def get(self, path):
+    def get(self, path, kind='image'):
         if self.closed:
             return None
         try:
             stat = os.stat(path)
-            key = (path, stat.st_size, stat.st_mtime_ns)
+            key = (path, stat.st_size, stat.st_mtime_ns, kind)
         except (OSError, TypeError):
             return None
         if key in self.entries:
@@ -151,7 +173,7 @@ class PortItem(QtWidgets.QGraphicsEllipseItem):
         if self.output:
             self.setToolTip('结果输出 · 拖到输入端口或空白处添加下游节点')
         else:
-            has_internal = self.node_item.node['kind'] == 'app'
+            has_internal = self.node_item.node['kind'] in {'app'} | set(model.MODEL_KINDS) or (self.node_item.node['kind'] == 'rename' and self.key != 'value')
             if connected:
                 detail = ('已连接：运行时覆盖内部值；' if has_internal else '已连接上游结果；') + '拖到其他端口可改接，拖到空白处可断开'
             else:
@@ -171,6 +193,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
         self._resize_hover = False
         self._hovered = False
         self._result_offset = 0
+        self.inline_proxy = None
         self.setFlags(self.ItemIsMovable | self.ItemIsSelectable | self.ItemSendsGeometryChanges)
         self.setAcceptHoverEvents(True)
         self.setCacheMode(self.NoCache)
@@ -213,7 +236,21 @@ class NodeItem(QtWidgets.QGraphicsObject):
         self.width, self.height = width, height
         self.output.setPos(width, 66)
         self.canvas_scene.update_edges(self.node['id'])
+        self.layout_inline()
         self.update()
+
+    def ensure_inline(self):
+        if self.node['kind']!='text' or not hasattr(self.canvas_scene.parent(),'histories'):return
+        if self.inline_proxy is None:
+            from .inline_text import InlineText
+            self.inline_proxy=QtWidgets.QGraphicsProxyWidget(self)
+            self.inline_proxy.setWidget(InlineText(self))
+            self.inline_proxy.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.layout_inline()
+
+    def layout_inline(self):
+        if self.inline_proxy is not None:
+            self.inline_proxy.setGeometry(self.content_rect().adjusted(1,1,-1,-1))
 
     def resize_rect(self):
         return QtCore.QRectF(self.width - 22, self.height - 22, 22, 22)
@@ -276,7 +313,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
         return QtCore.QRectF(self.run_rect().center().x() - 22, 2, 44, 44)
 
     def shows_progress(self):
-        return (self.node['kind'] == 'app' and node_is_active(self.node)
+        return (self.node['kind'] in {'app'} | set(model.MODEL_KINDS) and node_is_active(self.node)
                 and self.node.get('status') in RUNNING_STATES | WAITING_STATES)
 
     def itemChange(self, change, value):
@@ -284,7 +321,16 @@ class NodeItem(QtWidgets.QGraphicsObject):
             self.canvas_scene.update_edges(self.node['id'])
         return super().itemChange(change, value)
 
+    def input_preview(self):
+        if self.node['kind'] == 'text':return True
+        if self.node['kind'] not in model.MEDIA:return False
+        paths = self.node.get('params', {}).get('files') or []
+        return (not self.node.get('results') or self.node.get('stale') or self.node.get('_ui_stale')
+                or len(paths) == 1 and not os.path.isdir(paths[0]))
+
     def result_count(self):
+        if self.input_preview():
+            return 1 if self.node['kind'] == 'text' else len(self.node.get('params', {}).get('files') or [])
         results = self.node.get('results') or []
         if results:
             return len(results)
@@ -293,8 +339,16 @@ class NodeItem(QtWidgets.QGraphicsObject):
         return 0
 
     def result_at(self, index):
-        results = self.node.get('results') or []
+        if self.node['kind'] == 'text':return {'text': self.node.get('params', {}).get('text', ''), 'type': 'text'}
+        results = [] if self.input_preview() else self.node.get('results') or []
         value = results[index] if results else {'path': self.node['params']['files'][index], 'type': self.node['kind']}
+        if (not results and self.node['kind']=='image' and not self.node.get('stale') and not self.node.get('_ui_stale')):
+            generated=next((r for r in self.node.get('results',[]) if isinstance(r,dict)
+                and r.get('source_path')==value.get('path') and r.get('composite_path')),None)
+            if generated and os.path.isfile(generated['composite_path']):
+                value={'path':generated['composite_path'],'type':'image'}
+        if not results and os.path.isdir(value.get('path', '')):
+            return {'text': '文件夹 · ' + os.path.basename(value['path']) + '\n运行时读取匹配文件', 'type': 'text'}
         return value if isinstance(value, dict) else {'path': str(value)}
 
     def content_rect(self):
@@ -336,7 +390,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
         painter.setClipRect(content)
         painter.setPen(QtGui.QColor(p['muted']))
         painter.drawText(QtCore.QRectF(content.x(), content.y(), content.width() - 54, 20),
-                         QtCore.Qt.AlignVCenter, f'结果 {self.result_count()} · {page + 1}/{pages}')
+                         QtCore.Qt.AlignVCenter, ('输入预览' if self.input_preview() else '结果') + f' {self.result_count()} · {page + 1}/{pages}')
         for rect, label, enabled in zip(self.result_nav_rects(), ('‹', '›'), (page > 0, page + 1 < pages)):
             painter.setPen(QtCore.Qt.NoPen)
             painter.setBrush(QtGui.QColor(p['accent_soft'] if enabled else p['surface']))
@@ -358,15 +412,16 @@ class NodeItem(QtWidgets.QGraphicsObject):
             painter.drawText(rect.adjusted(6, 0, -6, 0), QtCore.Qt.AlignTop, title)
             body = rect.adjusted(6, 19, -6, -5)
             thumb = None
-            if (kind == 'image' and path and index in self.canvas_scene.thumbnail_slots.get(self.node['id'], ())):
-                thumb = self.canvas_scene.thumbnails.get(path)
+            if (kind in ('image', 'video') and path and index in self.canvas_scene.thumbnail_slots.get(self.node['id'], ())):
+                thumb = self.canvas_scene.thumbnails.get(path, kind)
             if thumb is not None and not thumb.isNull():
                 size = thumb.size().scaled(body.size().toSize(), QtCore.Qt.KeepAspectRatio)
                 target = QtCore.QRectF(body.center().x() - size.width() / 2,
                                        body.center().y() - size.height() / 2, size.width(), size.height())
                 painter.drawPixmap(target, thumb, QtCore.QRectF(thumb.rect()))
             else:
-                text = str(result['text'] if 'text' in result else result['value'] if 'value' in result
+                preview=self.canvas_scene.thumbnails.get(path,'text') if kind=='text' and path and self.node['id'] in self.canvas_scene.thumbnail_nodes else None
+                text = str(preview if preview is not None else result['text'] if 'text' in result else result['value'] if 'value' in result
                            else os.path.basename(path) or result.get('url') or '暂无本地预览')
                 painter.setPen(QtGui.QColor(p['text']))
                 painter.drawText(body, QtCore.Qt.AlignVCenter | QtCore.Qt.TextWordWrap, text[:240])
@@ -378,7 +433,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         selected = self.isSelected()
         state_color = node_state_color(self.node, p)
-        accent=kind_color(self.node['kind'],p)
+        accent='#9c83c9' if self.node.get('bypass') else kind_color(self.node['kind'],p)
         border = state_color or (p['accent'] if selected else p['muted'] if self._hovered else p['border'])
         width = (3.3 if selected else 2.3) if state_color else (2 if selected else 1)
         body=QtCore.QRectF(0,0,self.width,self.height)
@@ -411,7 +466,8 @@ class NodeItem(QtWidgets.QGraphicsObject):
         if lod<.35:
             return
         font.setPixelSize(9);font.setBold(False);painter.setFont(font);painter.setPen(QtGui.QColor(accent))
-        painter.drawText(QtCore.QRectF(50,28,self.width-127,13),QtCore.Qt.AlignVCenter,KIND_NAMES.get(self.node['kind'],'节点'))
+        subtitle=KIND_NAMES.get(self.node['kind'],'节点')+(' · 已忽略' if self.node.get('bypass') else '')
+        painter.drawText(QtCore.QRectF(50,28,self.width-127,13),QtCore.Qt.AlignVCenter,subtitle)
         show_progress = self.shows_progress()
         if show_progress:
             current = current_node_percent(self.node.get('status'), self.node.get('node_progress'))
@@ -437,13 +493,14 @@ class NodeItem(QtWidgets.QGraphicsObject):
             if index%2==0:
                 painter.fillRect(QtCore.QRectF(8,54+index*25,self.width-16,24),tint(p['input'],110))
             painter.setPen(QtGui.QColor(p['text'] if connected else p['muted']))
-            label = str(port['label']) + (' · 已连接' if connected else ' · 内部值' if self.node['kind'] == 'app' else ' · 待连接')
+            internal = self.node['kind'] in {'app'} | set(model.MODEL_KINDS) or self.node['kind'] == 'rename' and port['key'] != 'value'
+            label = str(port['label']) + (' · 已连接' if connected else ' · 内部值' if internal else ' · 待连接')
             label_width = int(self.width - 78)
             painter.drawText(QtCore.QRectF(14, 54 + index * 25, label_width, 24), QtCore.Qt.AlignVCenter,
                              QtGui.QFontMetrics(font).elidedText(label, QtCore.Qt.ElideRight, label_width - 5))
         painter.drawText(QtCore.QRectF(self.width - 60, 54, 44, 24), QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, '结果')
         content = self.content_rect()
-        if content.height() > 20:
+        if content.height() > 20 and (self.inline_proxy is None or not self.inline_proxy.isVisible()):
             if self.result_count():
                 self._paint_results(painter)
             else:
@@ -452,9 +509,11 @@ class NodeItem(QtWidgets.QGraphicsObject):
                 painter.setPen(QtGui.QColor(p['muted']))
                 params = self.node.get('params', {})
                 summary = str(params.get('text') or '')
+                if self.node['kind'] in model.MODEL_KINDS:
+                    summary = (self.node.get('model_config', {}).get('model') or '选择模型连接') + '\n' + str(params.get('prompt') or '填写或连接提示词')
                 if self.node['kind'] in ('image', 'video', 'audio'):
                     files = params.get('files', [])
-                    summary = f'{len(files)} 个文件' + (' · ' + os.path.basename(files[0]) if files else ' · 选择或拖入素材')
+                    summary = f'{len(files)} 个输入路径' + (' · ' + os.path.basename(files[0]) if files else ' · 选择或拖入素材')
                 elif self.node['kind'] == 'app':
                     summary = '任务完成后在此展示结果' if node_is_active(self.node) else '运行后在此查看结果'
                 elif not summary:
@@ -499,6 +558,12 @@ class NodeItem(QtWidgets.QGraphicsObject):
             painter.drawText(self.decode_rect(), QtCore.Qt.AlignCenter, '本地解码')
 
     def mousePressEvent(self, event):
+        self._selection_click=False
+        if event.button()==QtCore.Qt.LeftButton and event.modifiers() & (QtCore.Qt.ControlModifier|QtCore.Qt.ShiftModifier):
+            self._selection_click=True
+            self._start_positions=None
+            self.setSelected(not self.isSelected() if event.modifiers() & QtCore.Qt.ControlModifier else True)
+            event.accept();return
         if event.button() == QtCore.Qt.LeftButton and self.result_count():
             tiles, page, pages = self.result_layout()
             for step, rect in zip((-1, 1), self.result_nav_rects()):
@@ -539,6 +604,8 @@ class NodeItem(QtWidgets.QGraphicsObject):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if getattr(self,'_selection_click',False):
+            event.accept();return
         if self._resize_start is not None:
             origin, size = self._resize_start
             delta = event.scenePos() - origin
@@ -557,6 +624,9 @@ class NodeItem(QtWidgets.QGraphicsObject):
         super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if getattr(self,'_selection_click',False):
+            self._selection_click=False
+            event.accept();return
         if self._resize_start is not None and event.button() == QtCore.Qt.LeftButton:
             self.finish_resize()
             event.accept()
@@ -665,6 +735,11 @@ class CanvasScene(QtWidgets.QGraphicsScene):
     connect_requested = QtCore.pyqtSignal(str, str, str)
     run_requested = QtCore.pyqtSignal(str, bool)
     decode_requested = QtCore.pyqtSignal(str)
+    mask_requested = QtCore.pyqtSignal(str)
+    options_requested = QtCore.pyqtSignal(str)
+    option_changed = QtCore.pyqtSignal(str,str,object)
+    batch_option_changed = QtCore.pyqtSignal(object,str,object)
+    run_selection_requested = QtCore.pyqtSignal(object,bool)
     action_requested = QtCore.pyqtSignal(str)
     add_requested = QtCore.pyqtSignal(object, object)
     reconnect_requested = QtCore.pyqtSignal(str, str, str, str)
@@ -721,6 +796,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
             item = self.nodes.get(node['id'])
             if item:
                 item.node = node
+                if item.inline_proxy is not None:item.inline_proxy.widget().refresh()
                 if item._resize_start is None:
                     item.set_size(node.get('size'))
                 types = output_types(node)
@@ -811,6 +887,10 @@ class CanvasScene(QtWidgets.QGraphicsScene):
 
     def mousePressEvent(self, event):
         port = self._port_at(event.scenePos())
+        if not any(isinstance(i,QtWidgets.QGraphicsProxyWidget) for i in self.items(event.scenePos())):
+            self.clearFocus()
+        if event.button()==QtCore.Qt.RightButton and any(isinstance(i,NodeItem) for i in self.items(event.scenePos())):
+            event.accept();return
         edge, end = self._edge_endpoint_at(event.scenePos()) if event.button() == QtCore.Qt.LeftButton else (None, None)
         if edge is not None:
             port = (self.nodes[edge.edge['source']].output if end == 'source'
@@ -901,6 +981,9 @@ class CanvasScene(QtWidgets.QGraphicsScene):
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event):
+        if (len([i for i in self.selectedItems() if isinstance(i,NodeItem)])<2
+                and any(isinstance(i,QtWidgets.QGraphicsProxyWidget) for i in self.items(event.scenePos()))):
+            super().contextMenuEvent(event);return
         widget = event.widget()
         if widget is None and self.views():
             widget = self.views()[0]
@@ -926,10 +1009,23 @@ class CanvasScene(QtWidgets.QGraphicsScene):
             position = QtCore.QPointF(event.scenePos())
             menu.addAction('添加节点…', lambda: self.add_requested.emit(position, None))
             menu.addSeparator()
-        if item is not None:
-            menu.addAction('运行节点及所需上游', lambda: self.run_requested.emit(item.node['id'], False))
-            menu.addAction('强制重跑节点及上游', lambda: self.run_requested.emit(item.node['id'], True))
+        selected=sorted([i.node for i in self.selectedItems() if isinstance(i,NodeItem)],key=lambda n:n['id'])
+        if selected:
+            from .selection import options
+            if len(selected)>1:menu.addSection(f'已选中 {len(selected)} 个节点')
+            for option in options(selected):
+                label=option['label']+('（部分开启）' if option['mixed'] else '')
+                if len(option['ids'])!=len(selected):label+=f" · {len(option['ids'])} 个适用"
+                action=menu.addAction(label);action.setCheckable(True);action.setChecked(option['checked'])
+                action.toggled.connect(lambda value,o=option:self.batch_option_changed.emit(o['ids'],o['path'],value))
+            menu.addAction('打开批量设置' if len(selected)>1 else '打开其他设置',lambda:self.options_requested.emit(selected[0]['id']))
+            if len(selected)==1 and selected[0]['kind']=='image':
+                menu.addAction('遮罩 / 绘画…', lambda:self.mask_requested.emit(selected[0]['id']))
+            ids=[node['id'] for node in selected]
+            menu.addAction('运行选中节点及所需上游',lambda:self.run_selection_requested.emit(ids,False))
+            menu.addAction('强制重跑选中节点及上游',lambda:self.run_selection_requested.emit(ids,True))
             menu.addSeparator()
+        menu.addAction('全选节点',lambda:self.action_requested.emit('select_all'))
         menu.addAction('复制选中节点', lambda: self.action_requested.emit('copy'))
         menu.addAction('粘贴节点', lambda: self.action_requested.emit('paste'))
         menu.addAction('删除选中项', lambda: self.action_requested.emit('delete'))
@@ -977,12 +1073,14 @@ class CanvasView(QtWidgets.QGraphicsView):
         self.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.TextAntialiasing | QtGui.QPainter.SmoothPixmapTransform)
         self.setViewportUpdateMode(self.BoundingRectViewportUpdate)
         self.setDragMode(self.RubberBandDrag)
+        self.setRubberBandSelectionMode(QtCore.Qt.IntersectsItemShape)
+        self._rubber_selecting=False
         self._selection_style = _CanvasSelectionStyle(self)
         self.viewport().setStyle(self._selection_style)
         self._selection_rect = QtCore.QRect()
         self.rubberBandChanged.connect(self._refresh_selection_rect)
         self.setTransformationAnchor(self.AnchorUnderMouse)
-        self.setResizeAnchor(self.AnchorViewCenter)
+        self.setResizeAnchor(self.NoAnchor)
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
@@ -1078,11 +1176,11 @@ class CanvasView(QtWidgets.QGraphicsView):
         if size.width() <= 0 or size.height() <= 0:
             self.remember_view()
             return
-        # Only a screen-size change adjusts scale. Window/panel changes merely
-        # keep the same scene center visible, without shrinking nodes.
+        # Panel/window layout changes preserve the viewport origin. Recentering
+        # on selection changes moves the scene beneath a pending node drag.
         target = max(.12, min(3.5, zoom * min(screen.width() / size.width(), screen.height() / size.height())))
         if abs(self.transform().m11() - target) < .0001:
-            self._center_available(center)
+            self.remember_view()
             return
         self._adapting = True
         try:
@@ -1150,6 +1248,12 @@ class CanvasView(QtWidgets.QGraphicsView):
         event.accept()
 
     def paintEvent(self, event):
+        center=self.mapToScene(self.viewport().rect().center())
+        candidates=[item for item in self.items(self.viewport().rect()) if isinstance(item,NodeItem) and item.node['kind']=='text'] if self.transform().m11()>=.42 else []
+        visible_text=set(sorted(candidates,key=lambda item:(item.scenePos()-center).manhattanLength())[:64])
+        for item in visible_text:item.ensure_inline()
+        for item in self.scene().nodes.values():
+            if item.inline_proxy is not None:item.inline_proxy.setVisible(item in visible_text)
         # Large zoomed-out canvases use simple node bodies. In a large viewport
         # only the nearest 64 visible media nodes decode, preventing LRU churn.
         if self.transform().m11() < .42:
@@ -1165,7 +1269,7 @@ class CanvasView(QtWidgets.QGraphicsView):
             self.scene().thumbnail_nodes = {item.node['id'] for item in visible}
             self.scene().thumbnail_slots = {
                 item.node['id']: {index for index, _ in item.result_layout()[0]
-                                  if model.result_type(item.result_at(index)) == 'image'}
+                                  if model.result_type(item.result_at(index)) in ('image', 'video')}
                 for item in visible}
             for node_id, indices in self.scene().thumbnail_slots.items():
                 self.scene().thumbnail_slots[node_id] = set(sorted(indices)[:quota])
@@ -1192,6 +1296,9 @@ class CanvasView(QtWidgets.QGraphicsView):
             self.setCursor(QtCore.Qt.ClosedHandCursor)
             event.accept()
             return
+        self._rubber_selecting=(event.button()==QtCore.Qt.LeftButton and not any(isinstance(i,(NodeItem,PortItem,EdgeItem,QtWidgets.QGraphicsProxyWidget)) for i in self.items(event.pos())))
+        if self._rubber_selecting and event.modifiers() & QtCore.Qt.ShiftModifier:
+            event=QtGui.QMouseEvent(event.type(),event.localPos(),event.windowPos(),event.screenPos(),event.button(),event.buttons(),event.modifiers()|QtCore.Qt.ControlModifier)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -1213,8 +1320,15 @@ class CanvasView(QtWidgets.QGraphicsView):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+        if self._rubber_selecting:
+            self._rubber_selecting=False;self.scene().selectionChanged.emit()
 
     def keyPressEvent(self, event):
+        focus=self.scene().focusItem()
+        if isinstance(focus,QtWidgets.QGraphicsProxyWidget):
+            super().keyPressEvent(event)
+            event.accept()
+            return
         if self.scene()._resizing_node is not None:
             if event.key() == QtCore.Qt.Key_Escape:
                 self.scene().cancel_resize()
@@ -1239,7 +1353,7 @@ class CanvasView(QtWidgets.QGraphicsView):
             event.accept()
             return
         for sequence, action in ((QtGui.QKeySequence.Copy, 'copy'), (QtGui.QKeySequence.Paste, 'paste'),
-                                 (QtGui.QKeySequence.Undo, 'undo'), (QtGui.QKeySequence.Redo, 'redo')):
+                                 (QtGui.QKeySequence.Undo, 'undo'), (QtGui.QKeySequence.Redo, 'redo'),(QtGui.QKeySequence.SelectAll,'select_all')):
             if event.matches(sequence):
                 self.scene().action_requested.emit(action)
                 event.accept()
@@ -1259,6 +1373,7 @@ class CanvasView(QtWidgets.QGraphicsView):
 
     def focusOutEvent(self, event):
         self._space, self._pan = False, None
+        if self._rubber_selecting:self._rubber_selecting=False;self.scene().selectionChanged.emit()
         self.scene().cancel_resize()
         self.scene().cancel_link()
         self.unsetCursor()
@@ -1271,14 +1386,16 @@ class CanvasView(QtWidgets.QGraphicsView):
 
     def dragEnterEvent(self, event):
         from .controls import node_choice
-        if node_choice(event.mimeData()) or event.mimeData().hasUrls():
+        from aetherloom_core.image_import import accepts_mime
+        if node_choice(event.mimeData()) or accepts_mime(event.mimeData()):
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
         from .controls import node_choice
-        if node_choice(event.mimeData()) or event.mimeData().hasUrls():
+        from aetherloom_core.image_import import accepts_mime
+        if node_choice(event.mimeData()) or accepts_mime(event.mimeData()):
             event.acceptProposedAction()
         else:
             super().dragMoveEvent(event)
@@ -1288,9 +1405,13 @@ class CanvasView(QtWidgets.QGraphicsView):
         choice=node_choice(event.mimeData())
         if choice:
             self.node_dropped.emit(choice,self.mapToScene(event.pos()));event.acceptProposedAction();return
-        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
-        if paths:
-            self.files_dropped.emit(paths, self.mapToScene(event.pos()))
+        from aetherloom_core.image_import import import_mime
+        position=self.mapToScene(event.pos())
+        identity=getattr(self.scene(),'_document',{}).get('id')
+        def imported(paths):
+            if getattr(self.scene(),'_document',{}).get('id')==identity:
+                self.files_dropped.emit(paths,position)
+        if import_mime(event.mimeData(),self,imported,'any'):
             event.acceptProposedAction()
 
     def fit_nodes(self):

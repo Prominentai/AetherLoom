@@ -144,6 +144,9 @@ class ApiProbeController(QtCore.QObject):
         self._closed = False
         self._request = None
         self._action = None
+        self._elapsed_timer = QtCore.QTimer(self)
+        self._elapsed_timer.setInterval(1000)
+        self._elapsed_timer.timeout.connect(self._waiting)
         self.test_button = QtWidgets.QPushButton('测试响应')
         self.test_button.setObjectName('apiPrimaryButton')
         self.refresh_button = QtWidgets.QPushButton('刷新模型')
@@ -162,6 +165,21 @@ class ApiProbeController(QtCore.QObject):
         self.status_label.setTextFormat(QtCore.Qt.PlainText)
         self.status_label.setWordWrap(True)
         card.body_layout.addWidget(self.status_label)
+        self.response_label = QtWidgets.QLabel()
+        self.response_label.setObjectName('apiMuted')
+        self.response_label.setTextFormat(QtCore.Qt.PlainText)
+        self.response_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.response_label.setWordWrap(True)
+        self.response_label.hide()
+        card.body_layout.addWidget(self.response_label)
+        self.sources_label = QtWidgets.QLabel()
+        self._sources = []
+        self.sources_label.setObjectName('apiMuted')
+        self.sources_label.setTextFormat(QtCore.Qt.RichText)
+        self.sources_label.setWordWrap(True)
+        self.sources_label.setOpenExternalLinks(True)
+        self.sources_label.hide()
+        card.body_layout.addWidget(self.sources_label)
         self.test_button.clicked.connect(lambda: self.start('test'))
         self.refresh_button.clicked.connect(lambda: self.start('models'))
         self.completed.connect(self._finished, QtCore.Qt.QueuedConnection)
@@ -173,17 +191,51 @@ class ApiProbeController(QtCore.QObject):
                       else widget.valueChanged if isinstance(widget, QtWidgets.QSpinBox) else widget.textChanged)
             signal.connect(self._configuration_changed)
         self._update_summary()
+        if category in ('text2img', 'image_edit'):
+            # Image settings do not use the text/vision probe. Supported image
+            # adapters may explicitly enable their own response test controls.
+            self.test_button.hide()
+            self.refresh_button.hide()
+            self.status_label.hide()
+            self.card.state_badge.hide()
 
     def snapshot(self):
         fields = self.fields
-        return {'category': self.category, 'provider': fields['provider'].currentData() or 'custom',
+        result = {'category': self.category, 'provider': fields['provider'].currentData() or 'custom',
                 'endpoint': fields['endpoint'].text().strip(), 'api_key': fields['api_key'].text().strip(),
                 'model': fields['model'].currentText().strip() if fields.get('model') is not None else '',
                 'timeout': int(fields['timeout'].value()),
                 'appid': fields['baidu_appid'].text().strip() if fields.get('baidu_appid') is not None else '',
                 'secret': fields['baidu_secret'].text().strip() if fields.get('baidu_secret') is not None else ''}
+        if result['provider'] == 'llm_translate':
+            result = dict(self.window._api_probe_controllers['llm'].snapshot(), category='translator', translation_mode='llm')
+        elif result['provider'] == 'free_translate':
+            result['translation_mode'] = 'free'
+        else:
+            identity = result['provider']
+            from .api_manager import effective_protocol
+            if identity == 'custom':identity = 'custom_' + self.category
+            result['provider'] = effective_protocol(self.category, identity, self.window._get_api_provider_profile(self.category, identity))
+            from .agent_catalog import AGENTS, credential_ref
+            if result['provider'] in AGENTS:
+                result['api_key'] = credential_ref(identity)
+        if self.category in ('text2img', 'image_edit'):
+            from .image_prompts import request_options
+            result.update(request_options(getattr(self.window, 'settings', {}), self.category, result['provider']))
+        if self.category in ('llm', 'vision'):
+            from .agent_search import PROVIDERS, enabled
+            if result['provider'] in PROVIDERS:
+                result['web_search'] = enabled(result['provider'], self.window._get_api_provider_profile(self.category, identity))
+        if fields.get('translation_prompt') is not None:
+            result['translation_prompt'] = fields['translation_prompt'].toPlainText()
+        return result
 
     def _update_summary(self):
+        special = self.fields['provider'].currentData()
+        if special in ('free_translate','llm_translate'):
+            self.card.summary.setText('免费翻译 · 无需 API Key' if special=='free_translate' else
+                                      '大语言模型翻译 · 使用大语言模型区的当前配置')
+            return
         provider = self.fields['provider'].currentText()
         model = self.fields['model'].currentText().strip() if self.fields.get('model') is not None else ''
         no_model = ('标准翻译' if self.fields['provider'].currentData() in ('baidu_translate', 'google_translate')
@@ -197,13 +249,16 @@ class ApiProbeController(QtCore.QObject):
         self.status_label.style().polish(self.status_label)
         badge = self.card.state_badge
         badge.setText({'idle': '未测试', 'busy': '请求中', 'error': '请求失败',
-                       'success': '模型已更新' if self._action == 'models' else '连接正常'}.get(state, '未测试'))
+                       'success': '目录已获取' if self._action == 'models' else '响应已验证'}.get(state, '未测试'))
         badge.setProperty('state', state)
         badge.style().unpolish(badge)
         badge.style().polish(badge)
 
     def _configuration_changed(self, *_args):
         self._generation += 1
+        self._sources = []
+        self.sources_label.clear(); self.sources_label.hide()
+        self.response_label.clear(); self.response_label.hide()
         self._update_summary()
         self._set_status('配置已更改，当前请求结束后可重新测试' if self._busy else '尚未测试')
 
@@ -215,9 +270,15 @@ class ApiProbeController(QtCore.QObject):
         token = self._generation
         self._request, self._action = snapshot, action
         self._busy = True
+        self._started_at = time.monotonic()
+        self._elapsed_timer.start()
         self.test_button.setEnabled(False)
         self.refresh_button.setEnabled(False)
-        self._set_status('正在请求模型响应…' if action == 'test' else '正在刷新可用模型…', 'busy')
+        self._sources = []
+        self.sources_label.clear(); self.sources_label.hide()
+        self.response_label.clear(); self.response_label.hide()
+        self._set_status(('正在验证 Agent 联网搜索…' if snapshot.get('web_search') else '正在请求模型响应…')
+                         if action == 'test' else '正在刷新可用模型…', 'busy')
         backend = self.backend
         emit = self.completed.emit
 
@@ -252,13 +313,25 @@ class ApiProbeController(QtCore.QObject):
 
         threading.Thread(target=worker, name=f'api-{action}-{self.category}', daemon=True).start()
 
+    def _waiting(self):
+        if not self._busy or self._closed:
+            self._elapsed_timer.stop();return
+        elapsed = int(time.monotonic()-self._started_at)
+        button = self.test_button if self._action=='test' else self.refresh_button
+        button.setText(('测试中' if self._action=='test' else '刷新中')+f' · {elapsed}s')
+        if elapsed >= self._request.get('timeout',30):
+            self._set_status(f'已等待 {elapsed} 秒，正在等待网络层返回或超时；未自动重复提交。','busy')
+
     @QtCore.pyqtSlot(int, object)
     def _finished(self, token, result):
+        self._elapsed_timer.stop()
         self._busy = False
         if self._closed or getattr(self.window, '_closing', False):
             return
         self.test_button.setEnabled(True)
         self.refresh_button.setEnabled(True)
+        self.test_button.setText('测试响应')
+        self.refresh_button.setText('刷新模型')
         if token != self._generation or self.snapshot() != self._request:
             self._set_status('配置已更改，已忽略此前结果；请重新测试')
             return
@@ -273,15 +346,41 @@ class ApiProbeController(QtCore.QObject):
                 combo.addItems(list(dict.fromkeys(model for model in models if isinstance(model, str) and model.strip())))
                 combo.setEditText(selected)
                 blocked.unblock()
+                from .agent_catalog import AGENTS
+                if not selected and self._request.get('provider') in AGENTS and combo.count():
+                    combo.setCurrentIndex(0)
                 self._update_summary()
         elapsed = max(0.0, float(result.get('elapsed_ms', 0)))
         timing = f'{elapsed:.0f} ms' if elapsed < 1000 else f'{elapsed / 1000:.2f} s'
         code = result.get('status_code')
         suffix = f' · HTTP {code}' if code is not None else ''
         self._set_status(f"{result['message']} · {timing}{suffix}", 'success' if ok else 'error')
+        if ok and self._action == 'test':
+            excerpt = str(result.get('response_excerpt') or result.get('text') or '')[:600]
+            for name in ('api_key','appid','secret'):
+                secret = str((self._request or {}).get(name) or '')
+                if secret:excerpt=excerpt.replace(secret,'[已隐藏]')
+            self.response_label.setText(excerpt)
+            self.response_label.setVisible(bool(excerpt))
+            from .agent_search import safe_source
+            self._sources = []
+            for value in (result.get('sources') or [])[:50]:
+                source = safe_source(value)
+                if source:self._sources.append(source)
+            self._render_sources()
+
+    def _render_sources(self, mode=None):
+        import html
+        mode = mode or getattr(self.window, '_theme_mode', 'dark')
+        color = '#83b7ff' if mode == 'dark' else '#185bb8'
+        links = ['<a style="color:' + color + '" href="' + html.escape(s['url'], quote=True) + '">' +
+                 html.escape(s['title']) + '</a>' for s in self._sources]
+        self.sources_label.setText('来源：' + ' · '.join(links) if links else '')
+        self.sources_label.setVisible(bool(links))
 
     def close(self):
         self._closed = True
+        self._elapsed_timer.stop()
         self._generation += 1
         self._request = None
 
@@ -289,6 +388,9 @@ class ApiProbeController(QtCore.QObject):
 def close_probes(window):
     for controller in getattr(window, '_api_probe_controllers', {}).values():
         controller.close()
+    editor = getattr(window, '_api_provider_editor', None)
+    if editor is not None and hasattr(editor, 'agents'):
+        editor.agents.shutdown()
 
 
 def apply_theme(window, mode):
@@ -297,6 +399,8 @@ def apply_theme(window, mode):
         return
     from aetherloom_core.ui.preferences import stylesheet
     page.setStyleSheet(stylesheet('api_page_root', mode))
+    for controller in getattr(window, '_api_probe_controllers', {}).values():
+        controller._render_sources(mode)
     for fields in getattr(window, 'api_config_fields', {}).values():
         stack = fields.get('api_key_stack')
         if stack is not None and stack.currentWidget() is not None:

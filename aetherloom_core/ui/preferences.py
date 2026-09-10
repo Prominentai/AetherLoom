@@ -75,6 +75,44 @@ def _header(frame, title, description, eyebrow):
         layout.addWidget(label)
 
 
+def _image_prompt_card(window, category, title):
+    from aetherloom_core.image_prompts import DEFAULTS, options
+    key, default = DEFAULTS[category]
+    config = options(window.settings, category)
+    card = QtWidgets.QFrame()
+    card.setObjectName('settingsCard')
+    layout = QtWidgets.QVBoxLayout(card)
+    layout.setContentsMargins(16, 14, 16, 14)
+    heading = QtWidgets.QHBoxLayout()
+    label = QtWidgets.QLabel(title);label.setObjectName('settingsCardTitle')
+    heading.addWidget(label);heading.addStretch()
+    reset = QtWidgets.QPushButton('恢复默认');heading.addWidget(reset)
+    layout.addLayout(heading)
+    hint = QtWidgets.QLabel('仅用于 Codex／xAI 图像 Agent，不注入普通图像 API。留空使用默认提示词；兼容模式可合并到 Agent 用户消息。修改仅影响新请求。')
+    hint.setObjectName('settingsHint');hint.setWordWrap(True);layout.addWidget(hint)
+    editor = QtWidgets.QTextEdit()
+    editor.setAcceptRichText(False);editor.setFixedHeight(170)
+    editor.setAccessibleName(title);editor.setPlaceholderText(default)
+    editor.setPlainText(config['system_prompt']);layout.addWidget(editor)
+    merge = QtWidgets.QCheckBox('兼容模式：将系统提示词合并到用户提示词')
+    merge.setChecked(config['merge_system_prompt'])
+    merge.setToolTip('仅作用于图像 Agent；内容会作为用户提示词发送，不具备系统角色优先级。')
+    layout.addWidget(merge)
+    window.image_prompt_fields[category] = dict(editor=editor, merge=merge, reset=reset)
+    timer = QtCore.QTimer(card);timer.setSingleShot(True);timer.setInterval(400)
+    timer.timeout.connect(window._save_settings)
+    def changed(*_):
+        window.settings[key] = editor.toPlainText()
+        window.settings[key + '_merge_user_prompt'] = merge.isChecked()
+        probe = getattr(window, '_api_probe_controllers', {}).get(category)
+        if probe is not None and probe.snapshot().get('provider') in ('agent_codex', 'agent_grok'):
+            probe._configuration_changed()
+        timer.start()
+    editor.textChanged.connect(changed);merge.toggled.connect(changed)
+    reset.clicked.connect(lambda: editor.setPlainText(default))
+    return card
+
+
 class ResponsivePreferences(QtCore.QObject):
     def __init__(self, scroll, layout, rows=()):
         super().__init__(scroll)
@@ -131,6 +169,9 @@ def configure_settings(window, layout, column, hero):
     window._settings_tabs = tabs
     # Prompt cards start at index six; preserve the existing category mapping.
     column.insertWidget(6, _completion_card(window))
+    window.image_prompt_fields = {}
+    column.addWidget(_image_prompt_card(window, 'text2img', 'Agent 图像生成提示词'))
+    column.addWidget(_image_prompt_card(window, 'image_edit', 'Agent 图像编辑提示词'))
     cards = [column.itemAt(i).widget() for i in range(column.count()) if column.itemAt(i).widget()]
     window._settings_cards = cards
     folder_rows = []

@@ -11,7 +11,7 @@ from aetherloom_core.api_manager import get_models_for_provider
 
 _NON_CHAT = re.compile(
     r'(?:embed|rerank|moderation|transcri|whisper|\btts\b|speech|audio|realtime|'
-    r'dall-e|sora|flux|cogview|cogvideo|stable-diffusion|qwen[-_/]image|'
+    r'dall-e|sora|flux|cogview|cogvideo|seedream|seedance|seededit|stable-diffusion|qwen[-_/]image|'
     r'(?:^|[/_-])(?:imagen|veo|lyria)(?:[-_/\d]|$)|'
     r'gemini[^/]*[-_]image(?:[-_]|$)|grok[-_.\d]*[-_](?:image|video)(?:[-_]|$)|'
     r'gpt[-_/]image|(?:^|[/_-])wan(?:\d|[-_/])|image[-_/]gen|video[-_/]gen|'
@@ -107,6 +107,8 @@ def _known_incompatible(name, provider):
 
 
 def _family_supports(name, category, provider):
+    provider = {'protocol_openai': 'openai', 'protocol_responses': 'openai',
+                'protocol_claude': 'claude'}.get(provider, provider)
     leaf = name.lower().rsplit('/', 1)[-1]
     if provider == 'openai':
         return bool(re.match(r'gpt-(?:4o(?:-mini)?|4\.1(?:-mini)?|5(?:[.-]|$)|6-astra(?:-|$))', leaf))

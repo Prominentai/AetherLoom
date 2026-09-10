@@ -157,6 +157,8 @@ class SettingsMixin:
             # Persist only actual custom-key edits. Loading a model configuration
             # can briefly clear its field and must never overwrite stored keys.
             try:
+                if hasattr(self, '_api_provider_editor'):
+                    self._api_provider_editor.save_keys()
                 dirty_custom_keys = any(
                     fields['provider'].currentData() == 'custom' and
                     getattr(fields.get('api_key'), '_api_key_dirty', False)
@@ -240,6 +242,12 @@ class SettingsMixin:
             except Exception:
                 pass
 
+            from aetherloom_core.image_prompts import DEFAULTS, options
+            for category, (key, _) in DEFAULTS.items():
+                value = options(getattr(self, 'settings', {}), category)
+                data[key] = value['system_prompt']
+                data[key + '_merge_user_prompt'] = value['merge_system_prompt']
+
             with open(self.settings_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -251,6 +259,16 @@ class SettingsMixin:
         if not settings:
             return
         try:
+            from aetherloom_core.image_prompts import DEFAULTS, options
+            for category, (key, _) in DEFAULTS.items():
+                value = options(settings, category)
+                self.settings[key] = value['system_prompt']
+                self.settings[key + '_merge_user_prompt'] = value['merge_system_prompt']
+                fields = getattr(self, 'image_prompt_fields', {}).get(category)
+                if fields:
+                    with QtCore.QSignalBlocker(fields['editor']), QtCore.QSignalBlocker(fields['merge']):
+                        fields['editor'].setPlainText(value['system_prompt'])
+                        fields['merge'].setChecked(value['merge_system_prompt'])
             # input/output already applied earlier in __init__ but keep fields in sync
             self.input_dir = settings.get('input_dir', self.input_dir)
             self.output_dir = settings.get('output_dir', self.output_dir)
@@ -446,6 +464,19 @@ class SettingsMixin:
                     self.api_provider_profiles = {}
                 self._sanitize_api_provider_profiles()
                 self._ensure_api_provider_profile_store()
+                from aetherloom_core.agent_catalog import AGENTS, llm_name
+                for category, cfg in merged.items():
+                    identity = cfg.get('provider', '')
+                    profile = self._get_api_provider_profile(category, identity)
+                    template = profile.get('template') or identity
+                    if template in AGENTS:
+                        cfg['model'] = llm_name(template, cfg.get('model'))
+                        cfg['endpoint'] = AGENTS[template]['endpoint']
+                    elif category in ('text2img', 'image_edit'):
+                        # Remove fields injected by the previous global image
+                        # prompt implementation when restoring ordinary APIs.
+                        cfg.pop('system_prompt', None)
+                        cfg.pop('merge_system_prompt', None)
                 self.api_settings = merged
                 if hasattr(self, 'api_config_fields'):
                     for k, fields in self.api_config_fields.items():
@@ -607,11 +638,21 @@ class SettingsMixin:
                                     pass
                             existing_profile = self._get_api_provider_profile(k, provider_val)
                             if not existing_profile:
+                                if isinstance(merged.get(k, {}).get('web_search'), bool):
+                                    profile_payload['web_search'] = merged[k]['web_search']
                                 self._set_api_provider_profile(k, provider_val, profile_payload)
                         except Exception:
                             pass
             except Exception:
                 pass
+
+            if hasattr(self, '_api_provider_editor'):
+                for category, fields in self.api_config_fields.items():
+                    if fields.get('translation_prompt') is not None:
+                        from aetherloom_core.translation import DEFAULT_PROMPT
+                        with QtCore.QSignalBlocker(fields['translation_prompt']):
+                            fields['translation_prompt'].setPlainText((settings.get('api_settings', {}).get(category) or {}).get('translation_prompt') or DEFAULT_PROMPT)
+                self._api_provider_editor.refresh_all()
 
             # restore local sort combobox selections if present in settings
             try:

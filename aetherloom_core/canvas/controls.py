@@ -1,6 +1,7 @@
 """Node-library interactions shared with the canvas drop target."""
 import json
 from PyQt5 import QtCore, QtGui, QtWidgets, sip
+from .model import NODE_CATEGORIES
 
 NODE_MIME='application/x-aetherloom-node'
 
@@ -11,7 +12,7 @@ def node_choice(mime):
     if len(raw)>1024:return None
     try:
         value=json.loads(raw)
-        if (isinstance(value,dict) and value.get('group') in ('app','base') and
+        if (isinstance(value,dict) and value.get('group') in {*NODE_CATEGORIES, 'base'} and
                 isinstance(value.get('value'),str) and 0<len(value['value'])<=200):
             return {'group':value['group'],'value':value['value']}
     except (ValueError,UnicodeError):pass

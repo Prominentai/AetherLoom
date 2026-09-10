@@ -26,7 +26,7 @@ def favorite_data(site, record, version):
         thumbnail=cover_url(record, version),
         tags=[dict(id=int(t['id']), name=str(t.get('name') or '')[:100])
               for t in (record.get('tags') or [])[:48] if isinstance(t,dict) and str(t.get('id','')).isdigit()],
-        remote_id=str(record.get('id') or ''), custom=False, pinned=False)
+        remote_id=str(record.get('id') or ''), visibility=record.get('_visibility') or ('self' if record.get('systemResource') is False else 'public'), custom=False, pinned=False)
 
 
 class ModelFavorites(QtCore.QObject):
@@ -109,7 +109,7 @@ class ModelFavorites(QtCore.QObject):
         # Manual names are preserved exactly, including valid relative subpaths.
         clean = {name:str(data.get(name) or '')[:limit] for name,limit in
                  [('title',300),('version',200),('base_model',200),('trigger_words',4000),
-                  ('notes',8000),('description',8000),('thumbnail',2048),('remote_id',100)]}
+                  ('notes',8000),('description',8000),('thumbnail',2048),('remote_id',100),('visibility',6)]}
         clean.update(site=data['site'], resource_type=data['resource_type'], model_name=token)
         clean['bucket']=self.bucket
         clean['title'] = clean['title'].strip() or token
@@ -184,7 +184,9 @@ class ModelFavorites(QtCore.QObject):
     def page(self, site, resource_type, search='', base_models=(), tag=None, current=1, size=30):
         db = self._db()
         if db is None:return dict(records=[],current=current,total=0,hasNext=False)
-        clauses=['site=?','resource_type=?'];args=[site,resource_type]
+        clauses=['site=?'];args=[site]
+        if resource_type:
+            clauses.append('resource_type=?');args.append(resource_type)
         if search:
             term = str(search).replace('\\','\\\\').replace('%','\\%').replace('_','\\_')
             clauses.append("(title || ' ' || model_name || ' ' || base_model) LIKE ? ESCAPE '\\'")

@@ -311,6 +311,8 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                         'api_key': v.get('api_key', ''),
                         'model': v.get('model', ''),
                         'timeout': v.get('timeout', 30),
+                        'protocol': v.get('protocol', v.get('provider', '')),
+                        'translation_prompt': v.get('translation_prompt', ''),
                     })
                     merged_api[k] = merged
                 except Exception:
@@ -447,6 +449,8 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
 
 
     def _provider_items_for_category(self, key):
+        from aetherloom_core.api_provider_editor import register_profiles
+        register_profiles(getattr(self, 'api_provider_profiles', {}))
         items = []
         try:
             providers = []
@@ -500,13 +504,22 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
             return
         store = self._ensure_api_provider_profile_store()
         cat_profiles = store.setdefault(category_key, {})
-        cat_profiles[provider_key] = self._normalize_provider_profile_payload(provider_key, data)
+        previous = cat_profiles.get(provider_key, {})
+        metadata = {k: previous[k] for k in ('name','template','translation_prompt','api_protocol','web_search') if k in previous}
+        cat_profiles[provider_key] = self._normalize_provider_profile_payload(provider_key, dict(metadata, **data))
 
 
     def _normalize_provider_profile_payload(self, provider_key, data):
         if not isinstance(data, dict):
             return {}
         sanitized = dict(data)
+        from aetherloom_core.agent_catalog import AGENTS, llm_name
+        template = sanitized.get('template') or provider_key
+        if template in AGENTS:
+            sanitized['model'] = llm_name(template, sanitized.get('model'))
+            sanitized['endpoint'] = AGENTS[template]['endpoint']
+        if not api_manager.is_custom_connection(provider_key, sanitized):
+            sanitized.pop('api_protocol', None)
         # Never persist sensitive credentials into settings.json.
         # Remove API keys and any provider secrets (AppID/Secret) here.
         sanitized.pop('api_key', None)
@@ -566,6 +579,8 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                 payload['secret'] = fields['baidu_secret'].text().strip()
             except Exception:
                 payload['secret'] = payload.get('secret', '')
+        if fields.get('translation_prompt') is not None:
+            payload['translation_prompt'] = fields['translation_prompt'].toPlainText()
         self._set_api_provider_profile(category_key, provider_key, payload)
 
 
@@ -1958,6 +1973,8 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                 self._show_toast('连接设置未能保存，请检查 apikeys.json 是否可写。', 5000)
         clear_histories(self)
         self._closing = True
+        cache_cleaner = getattr(self, '_canvas_cache_cleaner', None)
+        if cache_cleaner is not None:cache_cleaner.close()
         home_page = getattr(self, 'home_page', None)
         if home_page is not None:
             home_page.close_updates()

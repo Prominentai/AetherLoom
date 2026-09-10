@@ -107,9 +107,23 @@ def _run_states(document):
 
 def _visit_paths(document, transform, include_results=True):
     """Visit only file-bearing fields; never rewrite arbitrary prompt strings."""
+    def masks(value):
+        if isinstance(value,list):
+            for item in value:masks(item)
+        elif isinstance(value,dict):
+            if value.get('version') == 1 and 'sha256' in value and ('png' in value or 'path' in value):
+                for key in ('source','path','import_path','paint_path','paint_import_path'):
+                    if value.get(key):value[key]=transform(value[key],required=True)
+            else:
+                for key,item in value.items():
+                    if key in ('source_path','mask_path','archive_path','original_path','paint_path','paint_temp_path','composite_path') and isinstance(item,str):value[key]=transform(item,required=True)
+                    else:masks(item)
+    masks(document)
     for nodes in _node_sets(document):
         for node in nodes:
             params = node.get('params') or {}
+            if node.get('kind') in canvas_model.MODEL_KINDS and params.get('image'):
+                params['image'] = transform(params['image'], required=True)
             if isinstance(params.get('files'), list):
                 params['files'] = [transform(path, required=True) for path in params['files']]
             for field in app_fields(node):
@@ -369,9 +383,21 @@ class CanvasStore:
             except FileNotFoundError:
                 pass
             self._drop_runtime_secrets([str(canvas_id)])
+            from .cache_cleanup import run_files
+            run_files(self.root.parent).discard(canvas_id)
             return removed
 
     delete_runtime = discard_runtime
+
+    def delete(self, canvas_id):
+        """Delete this workflow and retire all of its owned run directories."""
+        with self.lock:
+            self.path_for(canvas_id).unlink(missing_ok=True)
+            try:
+                self.discard_runtime(canvas_id)
+            finally:
+                from .cache_cleanup import run_files
+                run_files(self.root.parent).discard(canvas_id)
 
     def _discard_unusable_runtime(self, canvas_id):
         """A locked disposable snapshot must not prevent its workflow opening."""
@@ -404,6 +430,9 @@ class CanvasStore:
                 pass
             if secret_ids:
                 self._drop_runtime_secrets(secret_ids)
+            if orphaned:
+                from .cache_cleanup import run_files
+                for canvas_id in orphaned:run_files(self.root.parent).discard(canvas_id)
             return orphaned
 
     def _secrets(self):
@@ -521,6 +550,7 @@ class CanvasStore:
             raise ValueError('画布节点或连线格式错误')
         for node in data['nodes']:
             validate_node(node)
+        if not runtime:canvas_model.migrate_save_name_inputs(data)
         local_files = set(data.get('local_files') or [])
         def absolute(value, required=False):
             if not isinstance(value, str) or not value or '://' in value:
@@ -711,6 +741,18 @@ class CanvasStore:
 
     def export_package(self, document, path, include_results=False):
         public = _remove_secrets(copy.deepcopy(document))
+        if include_results:public = _available_runtime_results(public)
+        def portable_masks(value):
+            if isinstance(value,list):
+                for item in value:portable_masks(item)
+            elif isinstance(value,dict):
+                if value.get('version') == 1 and 'png' in value and 'sha256' in value:
+                    # Draft settings are portable even before their first execution.
+                    # The destination client materializes its own input/masks asset.
+                    value.pop('path',None)
+                else:
+                    for item in value.values():portable_masks(item)
+        portable_masks(public)
         # An export is a reusable project, not a cross-account task recovery file.
         public['run'] = {}
         public.pop('local_files', None)
@@ -726,6 +768,10 @@ class CanvasStore:
                 # task. Keep it consistent with cached content signatures.
                 result.pop('url', None)
         files, seen = {}, {}
+        from .media_inputs import resolve_files
+        for node in public['nodes']:
+            if node['kind'] in canvas_model.MEDIA:
+                node['params']['files'] = resolve_files(node.get('params', {}).get('files', []), node['kind'])
         def collect(value, required=False):
             if not value or '://' in str(value):
                 return value
@@ -792,6 +838,7 @@ class CanvasStore:
                 if info.file_size > MAX_DOCUMENT_BYTES:
                     raise ValueError('画布文件过大')
                 data = json.loads(archive.read(info).decode('utf-8-sig'))
+                canvas_model.migrate_save_name_inputs(data)
                 validate_document(data)
                 data = _remove_secrets(data)
                 data['id'] = canvas_id

@@ -47,6 +47,16 @@ def model_title(record):
     return str(token).rsplit('.', 1)[0] or '未命名模型'
 
 
+def website_url(site, record):
+    import re
+    local = record.get('_local_favorite') or {}
+    identity = str(local.get('remote_id') or record.get('id') or '')
+    if site not in ('https://www.runninghub.cn','https://www.runninghub.ai') or not re.fullmatch(r'\d{1,30}', identity):
+        return ''
+    visibility = local.get('visibility') or ('self' if local.get('bucket') == 'uploads' else 'public')
+    return site+'/model/'+('self' if visibility=='self' else 'public')+'/'+identity
+
+
 class Cover(QtWidgets.QWidget):
     clicked = QtCore.pyqtSignal()
 
@@ -81,7 +91,7 @@ class Cover(QtWidgets.QWidget):
         shade.setColorAt(.2, QtGui.QColor(8, 13, 20, 200))
         shade.setColorAt(1, QtGui.QColor(8, 13, 20, 235))
         painter.fillRect(QtCore.QRectF(0, max(0,self.height()-shade_height), self.width(), shade_height), shade)
-        for text, top in ((self.card.picker.resource_type, True), (str(self.card.version.get('baseModel') or ''), False)):
+        for text, top in ((self.card.record.get('resourceType',''), True), (str(self.card.version.get('baseModel') or ''), False)):
             if not text:
                 continue
             font = painter.font(); font.setPixelSize(11); painter.setFont(font)
@@ -130,7 +140,13 @@ class ModelCard(QtWidgets.QFrame):
         self.name.setObjectName('rhModelName');self.name.setTextFormat(QtCore.Qt.PlainText)
         self.name.setToolTip(self.name.text());self.name.setFixedHeight(23)
         self.name.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
-        info_box.addWidget(self.name)
+        name_row = QtWidgets.QHBoxLayout();name_row.addWidget(self.name, 1)
+        self.website = QtWidgets.QPushButton('↗');self.website.setObjectName('rhModelSecondary')
+        self.website.setFixedWidth(30);self.website.setToolTip('在默认浏览器中打开模型官网页面')
+        self.website_url = website_url(picker.settings.host, record)
+        self.website.setEnabled(bool(self.website_url));self.website.clicked.connect(self.open_website)
+        if not self.website_url:self.website.setToolTip('此自建记录没有关联官网模型地址')
+        name_row.addWidget(self.website);info_box.addLayout(name_row)
         self.filename = _ElidedLabel()
         self.filename.setObjectName('rhModelMuted');self.filename.setFixedHeight(18)
         self.filename.setTextFormat(QtCore.Qt.PlainText)
@@ -181,7 +197,7 @@ class ModelCard(QtWidgets.QFrame):
         self.local_cover = self.picker.favorites.cover_info(self.record.get('_local_favorite') or {})
         if self.local_cover:self.url = self.local_cover[0]
         self.cover.image = QtGui.QImage()
-        self.use.setEnabled(bool(token) and self.record.get('resourceType') == self.picker.resource_type)
+        self.use.setEnabled(bool(token) and (self.picker.library or self.record.get('resourceType') == self.picker.resource_type))
         self.use.setText('复制名称' if self.picker.library else '使用当前模型' if token and token == self.picker.current_value else '立即使用')
         self.refresh_favorite()
         self.cover.update()
@@ -190,7 +206,7 @@ class ModelCard(QtWidgets.QFrame):
     def refresh_favorite(self):
         token = self.version.get('node_token') or ''
         try:
-            value = self.picker.favorites.lookup(self.picker.settings.host,self.picker.resource_type,token) if token else None
+            value = self.picker.favorites.lookup(self.picker.settings.host,self.record.get('resourceType'),token) if token else None
             self.favorite.setText('★' if value else '☆')
             self.favorite.setToolTip('移除本地收藏' if value else '收藏此版本到本地')
             self.favorite.setEnabled(bool(token))
@@ -200,6 +216,9 @@ class ModelCard(QtWidgets.QFrame):
     def select(self):
         self.picker.selected_card = self
         self.picker.show_details(self)
+
+    def open_website(self):
+        if self.website_url:QtGui.QDesktopServices.openUrl(QtCore.QUrl(self.website_url))
 
     def set_visible_image(self, visible):
         if not visible:

@@ -36,6 +36,11 @@ class CanvasEngine(QtCore.QObject):
     def __init__(self, service, prepare_app, store, parent=None):
         super().__init__(parent)
         self.service, self.prepare_app, self.store = service, prepare_app, store
+        from .cache_cleanup import run_files
+        self.temporary = run_files(store.root.parent)
+        self.prepare_model = None
+        self.input_root = lambda: str(self.store.root.parent / 'input')
+        self.output_root = lambda: str(self.store.root.parent / 'output')
         self._condition = threading.Condition(threading.RLock())
         self._documents = {}
         self._persisted_documents = {}
@@ -123,7 +128,7 @@ class CanvasEngine(QtCore.QObject):
                                 node[key] = copy.deepcopy(before[key])
                     frozen = snapshot_nodes.get(node['id'])
                     if frozen and any(node.get(key) != frozen.get(key) for key in
-                                      ('params', 'app', 'decode_settings')):
+                                      ('params', 'app', 'decode_settings', 'model_config')):
                         node['stale'] = True
                 if updated.get('edges') != previous.get('edges'):
                     for node in updated['nodes']:
@@ -317,6 +322,23 @@ class CanvasEngine(QtCore.QObject):
         captured = {}
         prepare = prepare_app or self.prepare_app
         for node in document['nodes']:
+            if node.get('bypass'):continue
+            if node['id'] in scope and node.get('kind') in model.MEDIA:
+                captured[node['id']] = {'input_dir':self.input_root()}
+                continue
+            if node['id'] in scope and node.get('kind') in ('text', 'filename', 'rename'):
+                captured[node['id']] = {'local_node': True}
+                continue
+            if node['id'] in scope and node.get('kind') == 'preview':
+                captured[node['id']] = self._prepare_save(document, node)
+                continue
+            if node['id'] in scope and node.get('kind') in model.MODEL_KINDS:
+                try:
+                    captured[node['id']] = copy.deepcopy(self.prepare_model(copy.deepcopy(node)))
+                    captured[node['id']]['output_dir'] = self._node_output(document, node)
+                except Exception as error:
+                    captured[node['id']] = {'model_node': True, '_preparation_error': str(error)}
+                continue
             if node['id'] not in scope or node.get('kind') != 'app':
                 continue
             try:
@@ -324,6 +346,19 @@ class CanvasEngine(QtCore.QObject):
             except Exception as error:
                 captured[node['id']] = {'_preparation_error': str(error)}
         return captured
+
+    def _prepare_save(self, document, node):
+        from .save_results import default_directory
+        return {'local_node': True, 'save_directory': node.get('params', {}).get('save_directory', '').strip()
+                or default_directory(self.output_root(), document)}
+
+    def _node_output(self, document, node):
+        import re
+        from pathlib import Path
+        from .save_results import default_directory
+        category = 'api'
+        identity = re.sub(r'[^a-zA-Z0-9_-]', '_', node['id'])[:48]
+        return str(Path(default_directory(self.output_root(), document)) / category / (node['kind'] + '_' + identity))
 
     def start(self, document, target=None, force=False, resume=False, automatic=False, batch_count=None,
               execution_snapshot=None, prepared_snapshot=None, round_id=None, queue_origin=None):
@@ -394,7 +429,7 @@ class CanvasEngine(QtCore.QObject):
             current['run'] = run
             for current_node in current['nodes']:
                 if current_node['id'] in scope:
-                    current_node.update(status='PENDING', activated=False, progress=0, message='等待依赖', stale=False, cached=False)
+                    current_node.update(status='PENDING', activated=False, bypassed=False, progress=0, message='等待依赖', stale=False, cached=False)
                     current_node.pop('_restored_missing_results', None)
                     current_node.pop('_restored_positions_ambiguous', None)
             for frozen_node in graph['nodes']:
@@ -403,8 +438,35 @@ class CanvasEngine(QtCore.QObject):
         nodes = {node['id']: node for node in graph['nodes']}
         prepared = {}
         for node_id in order:
+            if node_id in scope and nodes[node_id]['kind'] in model.MEDIA:
+                prepared[node_id] = (copy.deepcopy(prepared_snapshot.get(node_id, {})) if prepared_snapshot is not None
+                                     else {'input_dir':self.input_root()})
+                run.setdefault('prepared', {})[node_id] = copy.deepcopy(prepared[node_id])
+        for node_id in order:
+            if node_id in scope and nodes[node_id]['kind'] in ('text', 'filename', 'rename'):
+                prepared[node_id] = (copy.deepcopy(prepared_snapshot.get(node_id, {})) if prepared_snapshot is not None else
+                                     {'local_node': True})
+        for node_id in order:
+            if node_id in scope and nodes[node_id]['kind'] == 'preview':
+                prepared[node_id] = (copy.deepcopy(prepared_snapshot.get(node_id, {})) if prepared_snapshot is not None
+                                     else self._prepare_save(graph, nodes[node_id]))
+        for node_id in order:
+            if node_id not in scope or nodes[node_id]['kind'] not in model.MODEL_KINDS:continue
+            if nodes[node_id].get('bypass'):continue
+            try:
+                captured = (copy.deepcopy(prepared_snapshot.get(node_id, {})) if prepared_snapshot is not None else
+                            copy.deepcopy(self.prepare_model(copy.deepcopy(nodes[node_id]))))
+                if not captured:raise ValueError('模型节点未准备完成')
+                if prepared_snapshot is None:captured['output_dir'] = self._node_output(graph, nodes[node_id])
+                prepared[node_id] = captured
+                from .storage import _remove_secrets
+                run.setdefault('prepared', {})[node_id] = _remove_secrets(captured)
+            except Exception as error:
+                prepared[node_id] = {'model_node': True, '_preparation_error': str(error)}
+        for node_id in order:
             if node_id not in scope or nodes[node_id]['kind'] != 'app':
                 continue
+            if nodes[node_id].get('bypass'):continue
             state = run['nodes'][node_id]
             if (resume and state.get('status') == 'SUCCESS'
                     and run.get('batch_index', 0) + 1 >= run.get('batch_count', 1)):
@@ -562,15 +624,38 @@ class CanvasEngine(QtCore.QObject):
         run['message'] = '正在运行第 {}/{} 批'.format(run['batch_index'] + 1, run['batch_count'])
         for node in document['nodes']:
             if node['id'] in run['nodes']:
-                node.update(status='PENDING', activated=False, progress=0, cached=False, message='等待依赖')
+                node.update(status='PENDING', activated=False, bypassed=False, progress=0, cached=False, message='等待依赖')
         self._publish_locked(document)
 
     def _schedule(self, canvas_id, round_id, graph, scope, prepared, force, stop):
         nodes = {node['id']: node for node in graph['nodes']}
         order = [node_id for node_id in model.validate_document(graph) if node_id in scope]
-        dependencies = {node_id: {edge['source'] for edge in model.incoming(graph, node_id)} for node_id in order}
+        dependencies = {node_id:set() for node_id in order}
+        for edge in model.execution_edges(graph):
+            if edge['target'] in dependencies:dependencies[edge['target']].add(edge['source'])
         futures = {}
+        lease = set()
         try:
+            self.temporary.begin(canvas_id,round_id)
+            lease = self.temporary.retain([self.temporary.directory(round_id)])
+            # Carry all reusable nodes into this run before retiring the old
+            # directory, including nodes outside a single-node execution scope.
+            from .run_outputs import capture
+            with self._condition:
+                previous=copy.deepcopy(self._document_locked(canvas_id)['run'].get('cache',{}))
+            for node_id,state in previous.items():
+                if node_id not in nodes or not model.results_valid(state.get('results',[]),state.get('result_signatures')):continue
+                saved=capture(self.temporary,round_id,nodes[node_id],state['results'])
+                state.update(results=saved,result_signatures=[model.result_signature(r) for r in saved])
+                for item in state.get('items',[]):
+                    if model.results_valid(item.get('results',[]),item.get('result_signatures')):
+                        item['results']=capture(self.temporary,round_id,nodes[node_id],item['results'])
+                        item['result_signatures']=[model.result_signature(r) for r in item['results']]
+                with self._condition:
+                    document=self._document_locked(canvas_id)
+                    document['run']['cache'][node_id]=state
+                    visible=next((n for n in document['nodes'] if n['id']==node_id),None)
+                    if visible:visible.update(results=copy.deepcopy(saved),result_signatures=copy.deepcopy(state['result_signatures']))
             # Content verification may read a large video; keep it off the GUI
             # thread and complete it before scheduling any dependent submission.
             with self._condition:
@@ -606,7 +691,8 @@ class CanvasEngine(QtCore.QObject):
                         except DetachedExecution:
                             return
                         except Exception as error:
-                            failure_status = 'SKIPPED' if isinstance(error, MissingHistoricalInput) else 'FAILED'
+                            failure_status = ('CANCELED' if getattr(error, 'status', '') == 'canceled' else
+                                              'SKIPPED' if isinstance(error, MissingHistoricalInput) else 'FAILED')
                             if self._fail_unsubmitted_items(canvas_id, node_id, str(error), status=failure_status):
                                 futures[node_id] = pool.submit(self._worker_call, self._wait_app, round_id, canvas_id, node_id, stop)
                                 continue
@@ -672,6 +758,8 @@ class CanvasEngine(QtCore.QObject):
                 except Exception:
                     pass
         finally:
+            self.temporary.finish(round_id)
+            self.temporary.release(lease)
             with self._condition:
                 active = self._active.get(canvas_id)
                 if active and active.get('round_id') == round_id:
@@ -720,13 +808,13 @@ class CanvasEngine(QtCore.QObject):
         with self._condition:
             if self._document_locked(canvas_id)['run']['nodes'][node_id].get('_halt_status'):
                 return
-        if kind == 'app':
+        if kind == 'app' and not node.get('bypass'):
             with self._condition:
                 existing = copy.deepcopy(self._document_locked(canvas_id)['run']['nodes'][node_id].get('items') or [])
             if existing and all(item.get('task_id') or item.get('status') in TERMINAL for item in existing):
                 self._wait_app(canvas_id, node_id, stop)
                 return
-        edges = model.incoming(graph, node_id)
+        edges = model.execution_incoming(graph, node_id)
         ports = {port['key']: port['type'] for port in model.input_ports(node)}
         inputs = {}
         with self._condition:
@@ -738,9 +826,19 @@ class CanvasEngine(QtCore.QObject):
             try:
                 inputs[edge['input']] = model.select_results(parent.get('results', []), edge, ports[edge['input']])
             except ValueError as error:
+                if node.get('bypass'):continue
                 if parent.get('_restored_missing_results'):
                     raise MissingHistoricalInput('所需历史结果已缺失，已跳过本分支') from error
                 raise
+        if node.get('bypass'):
+            results=model.bypass_results(node,inputs)
+            from .run_outputs import capture
+            results=capture(self.temporary,round_id,node,results)
+            self._set_state(canvas_id,node_id,status='SUCCESS',bypassed=True,cached=False,activated=False,
+                progress=0,results=results,items=[],fingerprint='',
+                result_signatures=[model.result_signature(value) for value in results],
+                message='已忽略 · 旁路传递上游结果' if results else '已忽略 · 无兼容连线输入')
+            return
         try:
             batches = model.pair_inputs(inputs)
         except ValueError as error:
@@ -748,6 +846,16 @@ class CanvasEngine(QtCore.QObject):
                 raise MissingHistoricalInput('历史结果缺失导致输入无法配对，已跳过本分支') from error
             raise
         try:
+            if kind in model.MEDIA:
+                from .media_inputs import resolve_files
+                node = copy.deepcopy(node)
+                node['params']['files'] = resolve_files(node.get('params', {}).get('files', []), kind, stop)
+            elif kind == 'preview':
+                node = copy.deepcopy(node)
+                node['params']['save_directory'] = (prepared or {}).get('save_directory', '') if node.get('params', {}).get('save_enabled', False) else ''
+            elif kind in model.MODEL_KINDS:
+                node = copy.deepcopy(node)
+                node['params']['_output_directory'] = (prepared or {}).get('output_dir', '')
             digest = model.fingerprint(node, inputs, edges)
         except (OSError, ValueError) as error:
             if any(states[edge['source']].get('_restored_missing_results') for edge in edges):
@@ -755,33 +863,67 @@ class CanvasEngine(QtCore.QObject):
             raise
         with self._condition:
             cached = copy.deepcopy(self._document_locked(canvas_id)['run'].get('cache', {}).get(node_id) or node)
-        if ((kind != 'app' or node.get('filter_repeats', False)) and not force
+        if ((kind not in {'app'} | set(model.MODEL_KINDS) or node.get('filter_repeats', False)) and not force
+                and not cached.get('bypassed') and not cached.get('_restored_missing_results')
                 and digest == cached.get('fingerprint')
                 and model.results_valid(cached.get('results', []), cached.get('result_signatures'))):
-            self._finish_node(canvas_id, node_id, cached['results'], digest, cached=True)
-            return
+            compatible=True
+            for edge in graph['edges']:
+                if edge['source'] != node_id:continue
+                target=next(n for n in graph['nodes'] if n['id']==edge['target'])
+                if target.get('bypass'):continue
+                accepted=next(port['type'] for port in model.input_ports(target) if port['key']==edge['input'])
+                try:model.select_results(cached['results'],edge,accepted)
+                except ValueError:compatible=False;break
+            if compatible:
+                self._finish_node(canvas_id, node_id, cached['results'], digest, cached=True)
+                return
         if kind != 'app':
             self._set_state(canvas_id, node_id, status='RUNNING', activated=True, message='正在执行')
-        if kind in model.MEDIA:
+        if kind in model.MODEL_KINDS:
+            from .model_nodes import execute, _check_stop
+            results = execute(node, prepared, batches, stop, temporary=self.temporary)
+            _check_stop(stop)
+        elif kind in ('filename', 'rename'):
+            from .file_nodes import execute
+            options = {'temporary_dir': str(self.temporary.directory(round_id,node_id))}
+            results = execute(node, options, batches, stop)
+            if kind == 'rename':
+                for index,result in enumerate(results):result['_file_identity'] = digest + ':' + str(index)
+        elif kind in model.MEDIA:
             results = []
             for index, path in enumerate(node.get('params', {}).get('files') or []):
                 if model.result_type({'path': path}) != kind:
                     raise ValueError('文件格式不属于此导入节点：' + str(path))
-                result = {'path': path, 'type': kind, 'index': index}
+                result = {'path': path, 'type': kind, 'index': index, 'lineage': model.result_lineage({}, node_id, index)}
+                if kind == 'image':
+                    from aetherloom_core.mask_assets import matches, materialize
+                    mask = next((value for value in node.get('params', {}).get('masks', []) if matches(value,path)),None)
+                    if mask:
+                        assets={}
+                        result['path'],result['mask_path'] = materialize(path,mask,(prepared or {}).get('input_dir') or str(self.store.root.parent/'input'),self.temporary.directory(round_id,node_id),assets=assets)
+                        result.update(assets)
+                        result['source_path'] = path
+                        result['_file_identity'] = digest + ':' + str(index)
                 model.result_signature(result)
                 results.append(model.normalize_result(result))
             if not results:
-                raise ValueError('请先选择本地媒体文件')
+                raise ValueError('输入路径中没有符合此节点格式要求的媒体文件')
         elif kind == 'text':
             values = node.get('params', {}).get('texts')
             if not isinstance(values, list):
                 values = [node.get('params', {}).get('text', '')]
-            results = [{'text': str(value), 'type': 'text', 'kind': 'text', 'index': index}
+            results = [{'text': str(value), 'type': 'text', 'kind': 'text', 'index': index,
+                        'lineage': model.result_lineage({}, node_id, index)}
                        for index, value in enumerate(values)]
         elif kind in ('select', 'preview'):
             results = inputs.get('value') or []
             if not results:
                 raise ValueError('请连接上游结果')
+            if kind == 'preview' and node.get('params', {}).get('save_enabled', False):
+                from .save_results import save_results
+                results = save_results(results, node['params']['save_directory'].strip(), stop,
+                                       overwrite=node.get('params', {}).get('overwrite', False))
             if kind == 'select':
                 params = node.get('params', {})
                 if params.get('indices') and any(states[edge['source']].get('_restored_positions_ambiguous') for edge in edges):
@@ -819,7 +961,8 @@ class CanvasEngine(QtCore.QObject):
                 raise ValueError('恢复输入数量与原执行不一致，请重新运行画布')
             if not existing:
                 state['items'] = [{'run_id': uuid.uuid4().hex, 'task_id': '', 'status': 'PENDING',
-                                   'batch_index': index, 'results': []}
+                                   'batch_index': index, 'results': [],
+                                   'lineage': model.result_lineage(batches[index], node_id, index)}
                                   for index in range(task_count)]
             state['fingerprint'] = digest
             self._publish_locked(self._document_locked(canvas_id))
@@ -844,6 +987,7 @@ class CanvasEngine(QtCore.QObject):
                 key = model.parameter_key(field)
                 if key in batches[batch_index]:
                     field['fieldValue'] = model.input_value(batches[batch_index][key], field)
+                    field.pop('_mask',None)
             snapshot['run_id'] = item['run_id']
             snapshot['origin'] = {'kind': 'canvas', 'canvas_id': canvas_id, 'canvas_name': canvas_name,
                                   'node_id': node_id, 'node_title': node.get('title', 'App'),
@@ -938,11 +1082,17 @@ class CanvasEngine(QtCore.QObject):
 
     def _finish_node(self, canvas_id, node_id, results, digest, cached=False):
         results = [model.normalize_result(result) for result in results]
+        with self._condition:
+            document=self._document_locked(canvas_id)
+            run_id=document['run']['id']
+            node=next(n for n in document['run']['snapshot']['nodes'] if n['id']==node_id)
+        from .run_outputs import capture
+        results=capture(self.temporary,run_id,node,results)
         if not cached:
             for result in results:
                 result.pop('_restored_positions', None)
         signatures = [model.result_signature(result) for result in results]
-        self._set_state(canvas_id, node_id, status='SUCCESS', progress=100, message='复用已有结果' if cached else '已完成',
+        self._set_state(canvas_id, node_id, status='SUCCESS', bypassed=False, progress=100, message='复用已有结果' if cached else '已完成',
                         results=results, result_signatures=signatures, fingerprint=digest, cached=cached)
 
     def _on_record(self, record):
@@ -954,6 +1104,21 @@ class CanvasEngine(QtCore.QObject):
         canvas_id = origin.get('canvas_id')
         if not canvas_id or not origin.get('node_id') or not (origin.get('round_id') or origin.get('execution_id')):
             return
+        if record.get('status')=='SUCCESS' and record.get('results'):
+            # The service calls this from its worker before clearing the task
+            # record. Copy outside the engine lock to keep Qt reads responsive.
+            from .run_outputs import capture
+            run_id=origin.get('round_id') or origin.get('execution_id')
+            with self._condition:
+                current=self._documents.get(canvas_id)
+                matching=current and current.get('run',{}).get('id')==run_id
+            if not matching:
+                import hashlib
+                with self.temporary.lock:
+                    matching=self.temporary.latest.get(canvas_id)==hashlib.sha256(str(run_id).encode()).hexdigest()[:24]
+            if matching and not self.temporary.closed:
+                record=copy.deepcopy(record)
+                record['results']=capture(self.temporary,run_id,{'id':origin['node_id'],'kind':'app'},record['results'])
         handled = None
         with self._condition:
             current = self._documents.get(canvas_id)
@@ -1070,6 +1235,7 @@ class CanvasEngine(QtCore.QObject):
                 result.update(generation=round_id + ':' + str(record.get('run_id', '')),
                               task_id=item['task_id'], index=index,
                               batch_index=item.get('batch_index', 0), repeat_index=item.get('repeat_index', 0))
+                result['lineage'] = dict(model.lineage(item), **{node_id: str(item.get('batch_index', 0)) + ':' + str(index)})
             results, unused, missing = model.available_results(results)
             signatures = []
             for result in results:

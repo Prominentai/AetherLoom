@@ -7,6 +7,10 @@ _DARK={'app':'#93a4ff','image':'#68c9ac','video':'#d895cc','audio':'#dfb87e',
 _LIGHT={'app':'#656ac8','image':'#26876d','video':'#a35895','audio':'#9d732f',
         'text':'#387cbc','select':'#8564b7','preview':'#267f98',
         'number':'#8564b7','scalar':'#9d732f','file':'#267f98','any':'#718398'}
+_DARK.update(llm_model='#9eafff', vision_model='#75cbd2', image_model='#d9a1ee', edit_model='#efb68d')
+_LIGHT.update(llm_model='#6868bd', vision_model='#297f89', image_model='#9956b0', edit_model='#a06a39')
+_DARK.update(filename='#a6c9a2', rename='#e4bf80')
+_LIGHT.update(filename='#547d4e', rename='#97712c')
 
 
 def tint(color, alpha):
@@ -19,6 +23,7 @@ def kind_color(kind, colors):
 
 
 def draw_kind_icon(painter, rect, kind, color):
+    kind = {'llm_model': 'text', 'vision_model': 'preview', 'image_model': 'image', 'edit_model': 'image', 'filename': 'text', 'rename': 'text'}.get(kind, kind)
     painter.save();painter.translate(rect.topLeft())
     painter.scale(rect.width()/24,rect.height()/24)
     painter.setPen(QtGui.QPen(QtGui.QColor(color),1.6,QtCore.Qt.SolidLine,QtCore.Qt.RoundCap,QtCore.Qt.RoundJoin))

@@ -4,6 +4,8 @@ from .rh_ui import palette
 
 def stylesheet(mode):
     p = palette(mode)
+    from pathlib import Path
+    check = (Path(__file__).resolve().parent.parent / 'icons' / 'ui-check.svg').as_posix()
     return f'''
         QDialog#rhModelPicker {{ background: {p['canvas']}; }}
         QDialog#rhModelPicker QWidget {{ color: {p['text']}; font-size: 12px; }}
@@ -35,6 +37,11 @@ def stylesheet(mode):
         QDialog#rhModelPicker QPlainTextEdit {{ background: {p['input']}; color: {p['text']};
             border: 1px solid {p['border']}; border-radius: 7px; padding: 8px; selection-background-color: {p['accent']}; }}
         QDialog#rhModelPicker QLineEdit:focus {{ border-color: {p['accent']}; }}
+        QDialog#rhModelPicker QListWidget#rhModelBaseList {{ padding: 4px; }}
+        QDialog#rhModelPicker QListWidget#rhModelBaseList::item {{ min-height: 32px; padding: 3px 7px; border: none; }}
+        QDialog#rhModelPicker QListWidget#rhModelBaseList::item:hover {{ background: {p['hover']}; border-radius: 5px; }}
+        QDialog#rhModelPicker QListWidget#rhModelBaseList::indicator {{ width: 17px; height: 17px; border: 1px solid {p['muted']}; border-radius: 4px; background: {p['input']}; }}
+        QDialog#rhModelPicker QListWidget#rhModelBaseList::indicator:checked {{ border-color: {p['accent']}; background: {p['accent']}; image: url("{check}"); }}
         QDialog#rhModelPicker QPlainTextEdit:focus, QDialog#rhModelPicker QComboBox:focus {{ border-color: {p['accent']}; }}
         QDialog#rhModelPicker QLineEdit:read-only {{ color: {p['muted']}; }}
         QDialog#rhModelPicker QComboBox QAbstractItemView {{ background: {p['surface']}; color: {p['text']};
