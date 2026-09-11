@@ -31,8 +31,8 @@ def status_color(p, status):
 
 
 class AppCard(QtWidgets.QPushButton):
-    def __init__(self, title, dashboard):
-        super().__init__(title)
+    def __init__(self, title, dashboard, parent=None):
+        super().__init__(title, parent)
         self.dashboard = dashboard
         self._full_title = title
         self._favorite = False
@@ -76,6 +76,9 @@ class AppCard(QtWidgets.QPushButton):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         rect = QtCore.QRectF(self.rect()).adjusted(2, 2, -2, -2)
+        if not getattr(self, '_wid', None):
+            self._paint_add(painter, rect, p)
+            return
         accent = status_color(p, self._task_status)
         active = self._task_count > 0
         border = accent if active else p['accent'] if self.hasFocus() else p['muted'] if self.underMouse() else p['border']
@@ -107,14 +110,15 @@ class AppCard(QtWidgets.QPushButton):
             painter.setPen(QtGui.QColor(p['accent']))
             font = QtGui.QFont('Microsoft YaHei', 28)
             painter.setFont(font)
-            painter.drawText(cover, QtCore.Qt.AlignCenter, '+' if is_add else 'A')
+            mark = {'rh_standard': 'S', 'rh_llm': 'LLM'}.get(getattr(self, '_rh_backend', 'rh_app'), 'A')
+            painter.drawText(cover, QtCore.Qt.AlignCenter, '+' if is_add else mark)
         painter.restore()
         font = QtGui.QFont('Microsoft YaHei')
         font.setPixelSize(13)
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QtGui.QColor(p['text']))
-        title = '添加应用' if is_add else str(self._full_title or self.text()).replace('\n', ' ')
+        title = getattr(self, '_add_title', '添加应用') if is_add else str(self._full_title or self.text()).replace('\n', ' ')
         painter.drawText(QtCore.QRectF(14, self.height() - 54, self.width() - 28, 22),
                          QtCore.Qt.AlignVCenter, painter.fontMetrics().elidedText(title, QtCore.Qt.ElideRight, self.width() - 28))
         font.setPixelSize(11)
@@ -127,7 +131,7 @@ class AppCard(QtWidgets.QPushButton):
         if self._progress and not self._progress.get('stale') and self._progress.get('percent') is not None:
             state += ' · 节点 %.0f%%' % self._progress['percent']
         painter.drawText(QtCore.QRectF(14, self.height() - 29, self.width() - 28, 18),
-                         QtCore.Qt.AlignVCenter, '导入工作流，开始创作' if is_add else
+                         QtCore.Qt.AlignVCenter, getattr(self, '_add_hint', '导入工作流，开始创作') if is_add else
                          painter.fontMetrics().elidedText(state, QtCore.Qt.ElideRight, self.width() - 28))
         if self._favorite:
             painter.setPen(QtGui.QColor('#f079a1'))
@@ -142,6 +146,44 @@ class AppCard(QtWidgets.QPushButton):
             painter.drawRoundedRect(rect, 12, 12)
             ring = QtCore.QRectF(self.width() - 35, 16, 17, 17)
             painter.drawArc(ring, int(-phase * 360 * 16), 100 * 16)
+
+    def _paint_add(self, painter, rect, p):
+        """A creation tile has its own hierarchy, without a fake media cover."""
+        highlighted = self.underMouse() or self.hasFocus() or self.isDown()
+        pen = QtGui.QPen(QtGui.QColor(p['accent'] if highlighted else p['border']), 1.5)
+        pen.setStyle(QtCore.Qt.SolidLine if highlighted else QtCore.Qt.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(QtGui.QColor(p['accent_soft'] if self.isDown() else p['surface'] if highlighted else p['canvas']))
+        painter.drawRoundedRect(rect, 14, 14)
+        padding = 18
+        side = min(48, max(32, self.height() * .19))
+        tile = QtCore.QRectF(padding, 20, side, side)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QColor(p['accent_soft']))
+        painter.drawRoundedRect(tile, 12, 12)
+        painter.setPen(QtGui.QPen(QtGui.QColor(p['accent']), 2, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
+        center = tile.center(); radius = side * .19
+        painter.drawLine(QtCore.QPointF(center.x()-radius, center.y()), QtCore.QPointF(center.x()+radius, center.y()))
+        painter.drawLine(QtCore.QPointF(center.x(), center.y()-radius), QtCore.QPointF(center.x(), center.y()+radius))
+        font = QtGui.QFont('Microsoft YaHei');font.setPixelSize(15);font.setBold(True)
+        painter.setFont(font);painter.setPen(QtGui.QColor(p['text']))
+        title_y = tile.bottom() + 16
+        width = self.width() - padding * 2
+        title = getattr(self, '_add_title', '添加应用')
+        painter.drawText(QtCore.QRectF(padding, title_y, width, 24), QtCore.Qt.AlignVCenter,
+                         painter.fontMetrics().elidedText(title, QtCore.Qt.ElideRight, width))
+        font.setPixelSize(11);font.setBold(False);painter.setFont(font)
+        painter.setPen(QtGui.QColor(p['muted']))
+        painter.drawText(QtCore.QRectF(padding, title_y + 30, width, max(24, self.height()-title_y-67)),
+                         QtCore.Qt.AlignTop | QtCore.Qt.TextWordWrap,
+                         getattr(self, '_add_hint', '导入工作流，开始创作'))
+        painter.setPen(QtGui.QColor(p['accent']))
+        painter.drawText(QtCore.QRectF(padding, self.height()-32, width, 18), QtCore.Qt.AlignVCenter, '开始添加')
+        x = self.width()-padding-2; y = self.height()-23
+        painter.setPen(QtGui.QPen(QtGui.QColor(p['accent']), 1.5, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
+        painter.drawLine(QtCore.QPointF(x-12, y), QtCore.QPointF(x, y))
+        painter.drawLine(QtCore.QPointF(x-4, y-4), QtCore.QPointF(x, y))
+        painter.drawLine(QtCore.QPointF(x-4, y+4), QtCore.QPointF(x, y))
 
 
 class TaskModel(QtCore.QAbstractListModel):
@@ -234,6 +276,7 @@ class TaskPanel(QtWidgets.QWidget):
         self.setObjectName('rhQueuePanel')
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
         header = QtWidgets.QHBoxLayout()
         title = QtWidgets.QLabel('任务队列')
         title.setObjectName('rhSectionTitle')
@@ -273,7 +316,7 @@ class TaskPanel(QtWidgets.QWidget):
         self.empty.setAlignment(QtCore.Qt.AlignCenter)
         self.empty.setObjectName('rhMuted')
         self.empty.setMinimumHeight(100)
-        layout.addWidget(self.empty)
+        layout.addWidget(self.empty, 1)
         self.search.textChanged.connect(self.filter_changed)
         self.category.currentIndexChanged.connect(self.filter_changed)
         dashboard.panels.add(self)
@@ -377,6 +420,8 @@ class Dashboard(QtCore.QObject):
         self.reflow_timer.start(0)
 
     def setup_header(self, layout):
+        from .ui import design
+        design.page_layout(layout.parentWidget(), layout)
         # Keep credential controls and their signals; make them available on demand.
         connection = QtWidgets.QWidget()
         body = QtWidgets.QVBoxLayout(connection)
@@ -387,19 +432,22 @@ class Dashboard(QtCore.QObject):
         old_heading = layout.takeAt(0)
         if old_heading is not None and old_heading.widget() is not None:
             old_heading.widget().hide()
-        hero = QtWidgets.QWidget()
-        header = QtWidgets.QHBoxLayout(hero)
-        header.setContentsMargins(0, 0, 0, 8)
+        header = QtWidgets.QHBoxLayout()
+        hero = design.header(header)
         titles = QtWidgets.QVBoxLayout()
         title = QtWidgets.QLabel('RH 应用')
         title.setObjectName('rhPageTitle')
+        design.title(title)
+        titles.setSpacing(4)
         self.subtitle = QtWidgets.QLabel('选择应用，开始创作')
         self.subtitle.setObjectName('rhMuted')
         titles.addWidget(title)
         titles.addWidget(self.subtitle)
         header.addLayout(titles, 1)
         toggle = QtWidgets.QPushButton('连接设置')
-        from .rh_connections import open_connection_settings
+        from .rh_connections import open_connection_settings, SiteSwitchButton
+        self.site_button = SiteSwitchButton(self.owner)
+        header.addWidget(self.site_button)
         toggle.clicked.connect(lambda: open_connection_settings(self.owner))
         self.connection_button = toggle
         header.addWidget(toggle)

@@ -11,6 +11,8 @@ def options(nodes):
         ('保存结果','params.save_enabled',{'preview'},False),
         ('重名覆盖','params.overwrite',{'preview'},False)]:
         eligible=[node for node in nodes if kinds is None or node['kind'] in kinds]
+        if path == 'decode_settings.enabled':
+            eligible = [node for node in eligible if model.supports_local_decode(node)]
         if not eligible:continue
         keys=path.split('.')
         values=[bool((node.get(keys[0],{}) if len(keys)>1 else node).get(keys[-1],default)) for node in eligible]

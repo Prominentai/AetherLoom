@@ -265,9 +265,15 @@ class RhOutputGroups(QtWidgets.QWidget):
             self._layout.addWidget(group, 1)
             group.page_requested.connect(self.page_requested)
             group.toggled.connect(self._toggle)
+        self._layout.addStretch(1)
+
+    def _balance_space(self):
+        populated = any(group.total and group.toggle.isChecked() for group in self.groups.values())
+        self._layout.setStretch(len(self.groups), 0 if populated else 1)
 
     def _toggle(self, key, expanded):
         self._layout.setStretch(list(self.groups).index(key), 1 if expanded and self.groups[key].total else 0)
+        self._balance_space()
         self.group_toggled.emit(key, expanded)
 
     def is_expanded(self, key):
@@ -276,6 +282,7 @@ class RhOutputGroups(QtWidgets.QWidget):
     def set_page(self, key, offset, total, size):
         self.groups[key].set_page(offset, total, size)
         self._layout.setStretch(list(self.groups).index(key), 1 if total and self.is_expanded(key) else 0)
+        self._balance_space()
 
     def set_cards(self, key, cards):
         self.groups[key].set_cards(cards)

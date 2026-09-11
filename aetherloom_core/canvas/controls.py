@@ -40,23 +40,85 @@ class CanvasStatus(QtWidgets.QLabel):
         self._elide()
 
 
-class NodeLibrary(QtWidgets.QListWidget):
+class NodeLibrary(QtWidgets.QTreeWidget):
+    """Category folders with lightweight rows, search and the existing drag MIME."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setDragEnabled(True)
-        self.setSelectionMode(self.SingleSelection)
+        self.setObjectName('canvasNodeLibrary')
+        self.setHeaderHidden(True);self.setIndentation(14)
+        self.setUniformRowHeights(True);self.setAnimated(False)
+        self.setDragEnabled(True);self.setSelectionMode(self.SingleSelection)
         self.setDefaultDropAction(QtCore.Qt.CopyAction)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.setResizeMode(self.Adjust)
+        self.setTextElideMode(QtCore.Qt.ElideRight)
+        self._leaves, self._folders = [], {}
+        self._expanded = set(NODE_CATEGORIES)
+        self._filtering = False
+        self.itemExpanded.connect(lambda item:self._remember(item, True))
+        self.itemCollapsed.connect(lambda item:self._remember(item, False))
+
+    def drawBranches(self, painter, rect, index):
+        if not self.model().hasChildren(index):return
+        painter.save();painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setPen(QtGui.QPen(self.palette().color(QtGui.QPalette.Text), 1.3))
+        x,y = rect.right()-7,rect.center().y()
+        offsets = [(-3,-2),(0,1),(3,-2)] if self.isExpanded(index) else [(-2,-3),(1,0),(-2,3)]
+        painter.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(x+dx,y+dy) for dx,dy in offsets]))
+        painter.restore()
+
+    def _remember(self, item, expanded):
+        key = item.data(0, QtCore.Qt.UserRole + 1)
+        if key and not self._filtering:
+            if expanded:self._expanded.add(key)
+            else:self._expanded.discard(key)
+
+    def clear(self):
+        super().clear();self._leaves = [];self._folders = {}
+
+    def add_choice(self, label, group, value, tooltip):
+        folder = self._folders.get(group)
+        if folder is None:
+            folder = QtWidgets.QTreeWidgetItem([NODE_CATEGORIES[group]])
+            folder.setData(0, QtCore.Qt.UserRole + 1, group)
+            folder.setFlags(QtCore.Qt.ItemIsEnabled)
+            font = self.font();font.setWeight(QtGui.QFont.DemiBold);folder.setFont(0,font)
+            folder.setSizeHint(0,QtCore.QSize(0,30))
+            self.addTopLevelItem(folder);self._folders[group] = folder
+            folder.setExpanded(group in self._expanded)
+        item = QtWidgets.QTreeWidgetItem(folder,[label])
+        item.setData(0, QtCore.Qt.UserRole,(group,value));item.setToolTip(0,tooltip)
+        item.setSizeHint(0,QtCore.QSize(0,30));self._leaves.append(item)
+
+    def filter(self, text):
+        text = text.strip().casefold();visible = []
+        self._filtering = True
+        try:
+            for group, folder in self._folders.items():
+                matches = 0
+                for index in range(folder.childCount()):
+                    item = folder.child(index)
+                    value = item.data(0,QtCore.Qt.UserRole)[1]
+                    match = text in (item.text(0)+' '+item.toolTip(0)+' '+str(value)).casefold()
+                    item.setHidden(not match)
+                    if match:visible.append(item);matches += 1
+                folder.setHidden(not matches)
+                folder.setText(0,NODE_CATEGORIES[group] + '  ' + str(matches))
+                folder.setExpanded(bool(text) if text else group in self._expanded)
+        finally:self._filtering = False
+        current = self.currentItem()
+        if current not in visible:self.setCurrentItem(visible[0] if visible else None)
+        return visible
 
     def startDrag(self, supported):
         item=self.currentItem()
         if item is None or item.isHidden():return
-        group,value=item.data(QtCore.Qt.UserRole)
+        choice=item.data(0,QtCore.Qt.UserRole)
+        if not choice:return
+        group,value=choice
         mime=QtCore.QMimeData();mime.setData(NODE_MIME,json.dumps({'group':group,'value':value}).encode('utf8'))
         drag=QtGui.QDrag(self);drag.setMimeData(mime)
         drag.setPixmap(self.viewport().grab(self.visualItemRect(item)))
-        drag.setHotSpot(QtCore.QPoint(24,18))
+        drag.setHotSpot(QtCore.QPoint(24,15))
         try:drag.exec_(QtCore.Qt.CopyAction)
         finally:
             if not sip.isdeleted(drag):drag.deleteLater()

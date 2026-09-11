@@ -29,12 +29,39 @@ PROTOCOL_EXAMPLES = {
 }
 
 
+def named_connection(identity):
+    return str(identity).startswith(('user_', 'custom_'))
+
+
+def migrate_legacy_custom(owner):
+    """Give saved legacy slots a name without moving keys or canvas references."""
+    for category, label in ((row[0], row[1]) for row in owner.api_categories):
+        identity = 'custom_' + category
+        config = owner.api_settings.get(category, {})
+        profiles = owner.api_provider_profiles.get(category, {})
+        cached = owner.api_custom_cache.get(category, {})
+        profile = profiles.get(identity) or profiles.get('custom') or {}
+        active = config.get('provider') in ('custom', identity)
+        if not (active or profile or cached or any(get_credentials(owner._apikeys, identity).values())):
+            continue
+        payload = dict(cached, **profile)
+        if active:
+            payload.update({key: config[key] for key in ('endpoint', 'model', 'timeout', 'translation_prompt') if key in config})
+            config['provider'] = identity
+        payload.setdefault('name', label + ' · 自定义')
+        payload.setdefault('template', 'custom')
+        payload.setdefault('api_protocol', 'auto')
+        owner._set_api_provider_profile(category, identity, payload)
+        # The dedicated credential file remains the authority; no key copy/move.
+    register_profiles(owner.api_provider_profiles)
+
+
 def register_profiles(profiles):
     for category, values in (profiles or {}).items():
         if not isinstance(values, dict):
             continue
         for identity, config in values.items():
-            if not identity.startswith('user_') or not isinstance(config, dict):
+            if not named_connection(identity) or not isinstance(config, dict):
                 continue
             template = config.get('template', 'custom')
             if template in AGENTS and not supports(template, category):
@@ -68,7 +95,8 @@ class ProviderEditor(QtCore.QObject):
                 fields['api_protocol'] = combo;self.protocol_rows[category] = (box,hint)
                 combo.currentIndexChanged.connect(lambda _, cat=category:self.protocol_changed(cat))
             row = QtWidgets.QHBoxLayout()
-            add = QtWidgets.QPushButton('＋ 添加供应商');add.setObjectName('apiSecondaryButton')
+            add = QtWidgets.QPushButton('＋ 添加自定义');add.setObjectName('apiSecondaryButton')
+            add.setToolTip('添加独立命名的连接，可选择预设模板；每个连接单独保存密钥。')
             add.clicked.connect(lambda _, cat=category:self.add_dialog(cat));row.addWidget(add)
             rename = QtWidgets.QPushButton('重命名');rename.setObjectName('apiSecondaryButton')
             rename.clicked.connect(lambda _, cat=category:self.rename(cat));row.addWidget(rename)
@@ -126,6 +154,7 @@ class ProviderEditor(QtCore.QObject):
         profile['api_protocol'] = selected
         self.owner._set_api_provider_profile(category, identity, profile)
         self.refresh(category)
+        self.owner._refresh_apikey_rows()
         self.owner._api_probe_controllers[category]._configuration_changed()
         self.settings_changed()
 
@@ -190,7 +219,7 @@ class ProviderEditor(QtCore.QObject):
             url=api_manager.get_model_list_url(protocol)
             docs.setEnabled(bool(url));docs.setProperty('model_docs_url',url)
         f['save_key_button'].setVisible(not special and not agent)
-        f['rename_button'].setVisible(bool(identity and identity.startswith('user_')))
+        f['rename_button'].setVisible(named_connection(identity))
         f['duplicate_button'].setVisible(not special)
         if f.get('browse_models_button') is not None:f['browse_models_button'].setVisible(not special and category!='translator')
         form=f.get('form')
@@ -243,6 +272,8 @@ class ProviderEditor(QtCore.QObject):
         if identity in ('free_translate','llm_translate') or self.protocol(category) in AGENTS:return
         data = ({'appid':f['baidu_appid'].text().strip(),'secret':f['baidu_secret'].text().strip()}
                 if self.protocol(category)=='baidu_translate' else {'api_key':f['api_key'].text().strip()})
+        previous = get_credentials(self.owner._apikeys, identity, category)
+        data = dict(previous, **data)
         self.pending[identity]=data;self.owner._apikeys[identity]=copy.deepcopy(data)
         # Mirror known-key rows so the older key manager cannot overwrite edits.
         self.sync_key_rows({identity:data});self.timer.start()
@@ -284,8 +315,9 @@ class ProviderEditor(QtCore.QObject):
         identity='user_'+uuid.uuid4().hex
         entry=api_manager.find_provider(category,template) or {}
         self.owner._set_api_provider_profile(category,identity,dict(name=name,template=template,
-            endpoint=entry.get('endpoint',''),model='',timeout=30,api_protocol=api_protocol))
+            endpoint=entry.get('endpoint',''),model='',timeout=90,api_protocol=api_protocol))
         register_profiles(self.owner.api_provider_profiles)
+        self.owner._refresh_apikey_rows()
         combo=self.owner.api_config_fields[category]['provider']
         combo.addItem(name,identity);combo.setCurrentIndex(combo.findData(identity))
         self.refresh(category);self.settings_changed()
@@ -328,16 +360,17 @@ class ProviderEditor(QtCore.QObject):
         return new_id
 
     def add_dialog(self, category):
-        dialog=QtWidgets.QDialog(self.owner);dialog.setWindowTitle('添加供应商')
-        dialog.setStyleSheet(self.owner.api_page.styleSheet().replace('#api_page_root',''))
+        dialog=QtWidgets.QDialog(self.owner);dialog.setWindowTitle('添加自定义')
+        dialog._theme_source = lambda: self.owner.api_page.styleSheet().replace('#api_page_root','')
+        dialog.setStyleSheet(dialog._theme_source())
         form=QtWidgets.QFormLayout(dialog);form.setContentsMargins(22,20,22,20);form.setSpacing(12)
         name=QtWidgets.QLineEdit();name.setPlaceholderText('例如：工作账户 / 本地网关')
         template=QtWidgets.QComboBox();template.addItem('自定义接口','custom')
         for entry in api_manager.get_providers(category):
-            if entry['key'] not in ('free_translate','llm_translate') and not entry['key'].startswith('user_'):
+            if entry['key'] not in ('free_translate','llm_translate') and not named_connection(entry['key']):
                 template.addItem(entry['name'],entry['key'])
         self.owner._install_combo_wheel_blocker(template)
-        form.addRow('供应商名称',name);form.addRow('接口模板',template)
+        form.addRow('自定义名称',name);form.addRow('接口模板',template)
         protocol = QtWidgets.QComboBox()
         if category in PROTOCOL_OPTIONS:
             for label,value in PROTOCOL_OPTIONS[category]:protocol.addItem(label,value)
@@ -349,7 +382,7 @@ class ProviderEditor(QtCore.QObject):
                 value = ('protocol_openai' if category in ('llm','vision') else 'google_translate') if template.currentData()=='custom' else 'auto'
                 protocol.setCurrentIndex(protocol.findData(value))
             template.currentIndexChanged.connect(update_protocol);update_protocol()
-        hint=QtWidgets.QLabel('名称由你指定；添加后可独立配置地址、密钥和模型。');hint.setWordWrap(True);form.addRow(hint)
+        hint=QtWidgets.QLabel('每个连接独立保存地址、协议、模型和密钥；密钥与 API 密钥管理同步，不继承模板供应商的密钥。');hint.setWordWrap(True);form.addRow(hint)
         buttons=QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save|QtWidgets.QDialogButtonBox.Cancel)
         buttons.button(buttons.Save).setText('添加');buttons.button(buttons.Cancel).setText('取消')
         def save():
@@ -360,11 +393,11 @@ class ProviderEditor(QtCore.QObject):
 
     def rename(self, category):
         identity=self.identity(category)
-        if not identity.startswith('user_'):
-            self.owner._api_model_cards[category].summary.setText('预置供应商可通过“添加供应商”创建独立命名的配置。');return
+        if not named_connection(identity):
+            self.owner._api_model_cards[category].summary.setText('预置供应商可通过“添加自定义”创建独立命名的配置。');return
         profile=self.owner._get_api_provider_profile(category,identity)
         name,ok=QtWidgets.QInputDialog.getText(self.owner,'重命名供应商','名称',text=profile.get('name',''))
         if ok and name.strip():
             profile['name']=name.strip();self.owner._set_api_provider_profile(category,identity,profile)
             combo=self.owner.api_config_fields[category]['provider'];combo.setItemText(combo.currentIndex(),name.strip())
-            register_profiles(self.owner.api_provider_profiles);self.settings_changed()
+            register_profiles(self.owner.api_provider_profiles);self.owner._refresh_apikey_rows();self.settings_changed()

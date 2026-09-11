@@ -53,7 +53,7 @@ def app_stylesheet(mode='dark'):
     check = (icon_dir / 'ui-check.svg').as_posix()
     return f'''
         QWidget#rhAppPage {{ background: {p['canvas']}; color: {p['text']}; }}
-        QWidget#rhAppPage QWidget {{ background: transparent; color: {p['text']}; }}
+        QWidget#rhAppPage QWidget {{ font-size: 13px; background: transparent; color: {p['text']}; }}
         QWidget#rhAppPage QLabel {{ background: transparent; border: none; padding: 0; }}
         QWidget#rhAppPage QLabel#rhPageTitle {{ font-size: 24px; font-weight: 700; }}
         QWidget#rhAppPage QLabel#rhSubtitle,
@@ -77,7 +77,7 @@ def app_stylesheet(mode='dark'):
         QWidget#rhAppPage QPlainTextEdit, QWidget#rhAppPage QAbstractSpinBox,
         QWidget#rhAppPage QComboBox {{ background: {p['input']};
             color: {p['text']}; border: 1px solid {p['border']};
-            border-radius: 7px; padding: 7px 9px; selection-background-color: {p['accent']};
+            border-radius: 7px; padding: 5px 8px; selection-background-color: {p['accent']};
             selection-color: #ffffff; }}
         QWidget#rhAppPage QLineEdit:focus, QWidget#rhAppPage QTextEdit:focus,
         QWidget#rhAppPage QPlainTextEdit:focus, QWidget#rhAppPage QAbstractSpinBox:focus,

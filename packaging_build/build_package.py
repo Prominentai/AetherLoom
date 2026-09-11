@@ -39,6 +39,9 @@ RUNTIME_FILES = (
     'requirements.txt', 'THIRD_PARTY_NOTICES.txt',
 )
 CORE_MODULE_FILES = (
+    'rh_model_apps.py', 'rh_model_runtime.py', 'rh_model_app_ui.py', 'rh_llm_execution.py',
+    'rh_multi_inputs.py', 'rh_multi_input_ui.py',
+    'rh_standard_catalog.json', 'RH_MODEL_CATALOG_LICENSE.txt',
     '__init__.py', 'api_credentials.py', 'api_manager.py', 'api_manager_ui.py',
     'api_model_capabilities.py', 'api_model_probe.py', 'decode_browser.py',
     'local_browser_ui.py', 'local_media.py', 'local_preview.py', 'media_limits.py',
@@ -48,7 +51,7 @@ CORE_MODULE_FILES = (
     'paths.py', 'resources.py', 'platform_utils.py',
     'ui/__init__.py', 'ui/widgets.py', 'ui/compare.py', 'ui/main_window.py',
     'ui/layout.py', 'ui/presentation.py', 'ui/menus.py', 'ui/local_browser.py', 'ui/settings.py', 'ui/preferences.py', 'ui/home.py', 'ui/decode.py',
-    'rh_progress.py', 'rh_dashboard.py', 'ui/responsive.py', 'tasks/__init__.py', 'tasks/media.py', 'tasks/decoding.py',
+    'rh_progress.py', 'rh_dashboard.py', 'ui/design.py', 'ui/popups.py', 'ui/responsive.py', 'ui/navigation.py', 'ui/themed_icons.py', 'tasks/__init__.py', 'tasks/media.py', 'tasks/decoding.py',
     'services/__init__.py', 'services/decoding.py',
     'rh_execution.py', 'rh_execution_ui.py', 'rh_output_groups.py', 'rh_connections.py', 'rh_connection_panel.py', 'rh_app_install.py',
     'task_documents.py', 'rh_task_details.py', 'rh_model_picker.py',
@@ -61,11 +64,13 @@ CORE_MODULE_FILES = (
     'image_model_catalog.py', 'mask_editor.py', 'mask_assets.py', 'mask_canvas.py', 'mask_panel.py', 'image_import.py', 'media_import.py',
     'canvas/__init__.py', 'canvas/model.py', 'canvas/storage.py', 'canvas/engine.py',
     'canvas/model_nodes.py', 'canvas/model_editor.py',
+    'canvas/collections.py', 'canvas/collection_editor.py',
+    'canvas/preview_data.py', 'canvas/result_browser.py',
     'canvas/save_results.py',
     'canvas/media_inputs.py',
     'canvas/file_nodes.py',
     'canvas/cache_cleanup.py',
-    'canvas/run_outputs.py', 'canvas/inline_text.py',
+    'canvas/run_outputs.py', 'canvas/inline_text.py', 'canvas/inline_controls.py', 'canvas/node_form.py',
     'canvas/selection.py',
     'canvas/graphics.py', 'canvas/appearance.py', 'canvas/controls.py', 'canvas/editors.py', 'canvas/page.py', 'canvas/workflow_queue.py', 'canvas/workflow_queue_panel.py',
 )

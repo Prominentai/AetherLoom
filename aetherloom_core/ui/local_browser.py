@@ -149,7 +149,7 @@ class LocalBrowserMixin:
             api_url = api_conf.get('endpoint') or api_conf.get('api_url') or api_conf.get('url') or ''
             model = api_conf.get('model') or api_conf.get('models') or ''
             provider = api_conf.get('provider')
-            timeout = int(api_conf.get('timeout') or 60)
+            timeout = int(api_conf.get('timeout') or 90)
 
             # Resolve this provider only; never send another vendor's fallback key.
             from aetherloom_core.api_credentials import get_credentials

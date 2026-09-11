@@ -41,7 +41,7 @@ def _snapshot(value):
     if not isinstance(value, dict):
         raise ProviderAPIError('API 测试配置无效。', status='invalid_config')
     result = dict(value)
-    result['timeout'] = float(result.get('timeout', 30))
+    result['timeout'] = float(result.get('timeout', 90))
     return result
 
 

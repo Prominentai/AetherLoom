@@ -88,7 +88,7 @@ class CollapsibleApiCard(QtWidgets.QFrame):
         super().__init__(parent)
         self.setObjectName('apiModelCard')
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(18, 12, 18, 16)
+        layout.setContentsMargins(16, 10, 16, 12)
         layout.setSpacing(8)
         self.toggle = QtWidgets.QToolButton()
         self.toggle.setObjectName('apiCardToggle')
@@ -96,7 +96,7 @@ class CollapsibleApiCard(QtWidgets.QFrame):
         self.toggle.setCheckable(True)
         self.toggle.setArrowType(QtCore.Qt.RightArrow)
         self.toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-        self.toggle.setMinimumHeight(38)
+        self.toggle.setMinimumHeight(34)
         self.toggle.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.toggle.setCursor(QtCore.Qt.PointingHandCursor)
         header = QtWidgets.QHBoxLayout()
@@ -319,7 +319,7 @@ class ApiProbeController(QtCore.QObject):
         elapsed = int(time.monotonic()-self._started_at)
         button = self.test_button if self._action=='test' else self.refresh_button
         button.setText(('测试中' if self._action=='test' else '刷新中')+f' · {elapsed}s')
-        if elapsed >= self._request.get('timeout',30):
+        if elapsed >= self._request.get('timeout',90):
             self._set_status(f'已等待 {elapsed} 秒，正在等待网络层返回或超时；未自动重复提交。','busy')
 
     @QtCore.pyqtSlot(int, object)

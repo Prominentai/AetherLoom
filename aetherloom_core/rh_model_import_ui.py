@@ -37,8 +37,8 @@ class ModelImportDialog(ModelDialog):
         self.url.textChanged.connect(self._link_changed);link_box.addWidget(self.url)
         self.read_link=QtWidgets.QPushButton('读取模型');self.read_link.setObjectName('rhModelSecondary');self.read_link.clicked.connect(self._read_link)
         self.url.returnPressed.connect(self._read_link);link_box.addWidget(self.read_link)
-        self.model_label=QtWidgets.QLabel();self.model_label.setTextFormat(QtCore.Qt.PlainText);self.model_label.setWordWrap(True);link_box.addWidget(self.model_label)
-        self.versions=RhEnumComboBox();link_box.addWidget(self.versions)
+        self.model_label=QtWidgets.QLabel();self.model_label.setTextFormat(QtCore.Qt.PlainText);self.model_label.setWordWrap(True);link_box.addWidget(self.model_label);self.model_label.hide()
+        self.versions=RhEnumComboBox();link_box.addWidget(self.versions);self.versions.hide()
         self.save_one=QtWidgets.QPushButton('导入此版本');self.save_one.setObjectName('rhModelPrimary');self.save_one.setEnabled(False)
         self.save_one.clicked.connect(self._save_one);link_box.addStretch()
         self.tabs.addTab(link_page,'网页链接')
@@ -77,6 +77,7 @@ class ModelImportDialog(ModelDialog):
 
     def _link_changed(self):
         self.generation+=1;self.single=None;self.save_one.setEnabled(False);self.versions.clear();self.model_label.clear()
+        self.versions.hide();self.model_label.hide()
 
     def _read_link(self):
         if not self.read_link.isEnabled() or self.reading:return
@@ -112,6 +113,7 @@ class ModelImportDialog(ModelDialog):
         for version in model_versions(record)[:50]:
             if version.get('node_token'):self.versions.addItem(str(version.get('version') or '默认版本'),version)
         self.save_one.setEnabled(self.versions.count()>0);self.status.setText('请选择版本后导入；已有收藏会保留原设置。')
+        self.model_label.show();self.versions.setVisible(self.versions.count()>0)
 
     def _save_value(self, value):
         value['bucket']=self.bucket

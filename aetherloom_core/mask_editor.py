@@ -193,7 +193,6 @@ class MaskEditor(QtWidgets.QDialog):
     def __init__(self, path, parent=None, directory=None, mask=None):
         super().__init__(parent)
         self.setObjectName('maskEditor');self.setWindowTitle('图像输入 · 遮罩与绘画')
-        from .paths import current_dir
         self.directory=directory
         self.source_path=path
         self.initial_mask=dict(mask or {})
@@ -206,7 +205,18 @@ class MaskEditor(QtWidgets.QDialog):
         dark=getattr(parent,'_theme_mode','dark')!='light'
         if parent is not None:
             root=parent.window();dark=getattr(root,'_theme_mode','dark')!='light'
-        bg,base,text,border,hover=('#171d27','#11151d','#e5edf6','#38475a','#2b3c51') if dark else ('#f4f6fa','#e4e9f0','#202f42','#c4cfdd','#e0ebf6')
+        self._popup_theme = self.apply_theme
+        self.apply_theme('dark' if dark else 'light')
+        available=self.screen().availableGeometry()
+        self.resize(min(1080,int(available.width()*.9)),min(800,int(available.height()*.9)))
+        QtCore.QTimer.singleShot(0,self.canvas.fit)
+
+    def apply_theme(self, mode):
+        from .paths import current_dir
+        from .rh_ui import palette as theme_palette
+        dark = mode != 'light'
+        colors = theme_palette(mode)
+        bg,base,text,border,hover = (colors[key] for key in ('canvas','input','text','border','hover'))
         mode='dark' if dark else 'light'
         up=(Path(current_dir)/'icons'/f'ui-chevron-up-{mode}.svg').as_posix()
         down=(Path(current_dir)/'icons'/f'ui-chevron-down-{mode}.svg').as_posix()
@@ -224,9 +234,7 @@ class MaskEditor(QtWidgets.QDialog):
             f'QDialog#maskEditor QTabBar::tab {{background:{base};color:{text};padding:9px 20px;border:1px solid {border};border-radius:5px;}} '
             f'QDialog#maskEditor QTabBar::tab:selected {{background:{hover};border-bottom:2px solid #48bce4;}} '
             f'QDialog#maskEditor QLineEdit {{background:{base};color:{text};border:1px solid {border};border-radius:4px;padding:3px;}}')
-        available=self.screen().availableGeometry()
-        self.resize(min(1080,int(available.width()*.9)),min(800,int(available.height()*.9)))
-        QtCore.QTimer.singleShot(0,self.canvas.fit)
+        self.canvas.update()
 
     def refresh(self):
         self.undo_button.setEnabled(bool(self.canvas.undo_stack));self.redo_button.setEnabled(bool(self.canvas.redo_stack))

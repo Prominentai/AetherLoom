@@ -41,6 +41,8 @@ def task_view(record, document=None):
     ) if key in snapshot}
     if isinstance(document.get('decode_settings'), dict):
         request['decode_settings'] = document['decode_settings']
+    from .rh_model_apps import supports_local_decode
+    if not supports_local_decode(snapshot):request.pop('decode_settings', None)
     post = document.get('post') or {}
     phase = str(post.get('phase') or 'pending')
     phases = {'pending': '尚未生成实际请求', 'submitting': '已开始提交，等待响应',
@@ -73,6 +75,8 @@ class TaskDetailsDialog(QtWidgets.QDialog):
         self.setMinimumSize(390, 360)
         self.resize(720, 650)
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
         self.heading = QtWidgets.QLabel()
         self.heading.setWordWrap(True)
         layout.addWidget(self.heading)
@@ -81,9 +85,17 @@ class TaskDetailsDialog(QtWidgets.QDialog):
         layout.addWidget(hint)
         self.recovery = QtWidgets.QGroupBox('补齐本次任务的解码信息')
         self.recovery_form = QtWidgets.QFormLayout(self.recovery)
+        self.recovery_form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
         self._recovery_kind = None
         self.recovery.hide()
-        layout.addWidget(self.recovery)
+        self.recovery_scroll = QtWidgets.QScrollArea()
+        self.recovery_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.recovery_scroll.setWidgetResizable(True)
+        self.recovery_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.recovery_scroll.setMaximumHeight(280)
+        self.recovery_scroll.setWidget(self.recovery)
+        self.recovery_scroll.hide()
+        layout.addWidget(self.recovery_scroll)
         self.tabs = QtWidgets.QTabWidget()
         self.editors = {}
         for key, title in (('request', '发起参数'), ('post', '实际 POST'), ('association', '关联与结果')):
@@ -113,8 +125,11 @@ class TaskDetailsDialog(QtWidgets.QDialog):
     def _refresh_recovery(self, record):
         decode = (record.get('snapshot') or {}).get('decode_settings') or {}
         waiting = record.get('status') == 'WAITING_FOR_SECRET' and not record.get('cancel_requested')
+        from .rh_model_apps import supports_local_decode
+        waiting = waiting and supports_local_decode(record.get('snapshot') or {})
         kind = ('configuration' if decode.get('settings_missing') else 'password') if waiting else None
         self.recovery.setVisible(bool(kind))
+        self.recovery_scroll.setVisible(bool(kind))
         if kind == self._recovery_kind:
             return
         self._recovery_kind = kind

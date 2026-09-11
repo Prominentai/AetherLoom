@@ -22,17 +22,19 @@ class DecodePage(QtWidgets.QWidget):
         self.canceling = False
         self.setObjectName('decodePage')
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 16)
-        outer.setSpacing(14)
+        from . import design
+        design.page_layout(self, outer)
         heading = QtWidgets.QHBoxLayout()
         title_column = QtWidgets.QVBoxLayout()
         title_column.addWidget(self.label('本地解码', 'decodeTitle'))
+        design.title(title_column.itemAt(0).widget())
+        title_column.setSpacing(4)
         title_column.addWidget(self.label('导入素材，选择解码方式，对比并保存结果。', 'decodeMuted'))
         heading.addLayout(title_column, 1)
         self.import_button = self.button('导入素材', self.import_files)
         self.import_button.setObjectName('decodePrimary')
         heading.addWidget(self.import_button)
-        outer.addLayout(heading)
+        outer.addWidget(design.header(heading))
 
         self.splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.splitter.setChildrenCollapsible(False)
@@ -227,7 +229,7 @@ class DecodePage(QtWidgets.QWidget):
             signal.connect(self.queue_selection_update)
         self.update_selection()
         make_responsive(self, rows=((heading, 650), (actions, 800), (status_row, 650)),
-                        splitters=((self.splitter, 1050), (self.previews, 800)))
+                        splitters=((self.splitter, 820), (self.previews, 800)))
         self._responsive_scroll.widget().setObjectName('decodeContent')
         self.apply_theme()
 
@@ -264,7 +266,7 @@ class DecodePage(QtWidgets.QWidget):
         label.setObjectName('previewLabel')
         label.setText(text)
         label.setWordWrap(True)
-        label.setMinimumSize(240, 230)
+        label.setMinimumSize(180, 200)
         label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Expanding)
         return label
 
@@ -352,10 +354,12 @@ class DecodePage(QtWidgets.QWidget):
         dark = getattr(self.owner, '_theme_mode', 'dark') == 'dark'
         surface, border, muted, preview = ('#151e2b', '#2c3b50', '#9caec4', '#0e1520') if dark else ('#ffffff', '#d6e0eb', '#65768c', '#f4f7fb')
         foreground = '#e4edf8' if dark else '#23364e'
-        background = '#0b101a' if dark else '#f4f7fc'
+        from aetherloom_core.rh_ui import palette
+        background = palette('dark' if dark else 'light')['canvas']
         selected = '#193951' if dark else '#dcebf9'
         check = (Path(current_dir) / 'icons' / 'ui-check.svg').as_posix()
         self.setStyleSheet(f'''
+            QWidget#decodePage QWidget {{ font-size: 13px; }}
             QWidget#decodeContent {{ background: {background}; }}
             QWidget#decodeSidebar, QWidget#decodeWorkspace, QLabel, QCheckBox {{ background: transparent; }}
             QFrame#decodeCard {{ background: {surface}; border: 1px solid {border}; border-radius: 12px; }}

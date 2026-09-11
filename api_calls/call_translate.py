@@ -152,7 +152,7 @@ def translate_text(
     text: str,
     target_lang: str,
     source_lang: Optional[str] = None,
-    timeout: int = 30,
+    timeout: int = 90,
     provider: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> str:

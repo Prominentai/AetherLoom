@@ -94,13 +94,15 @@ class SidebarScroll(QtWidgets.QScrollArea):
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setWidgetResizable(True)
         self.setWidget(sidebar)
+        self.verticalScrollBar().rangeChanged.connect(self._sync_width)
         sidebar.installEventFilter(self)
         self.setMinimumHeight(0)
         self._sync_width()
 
-    def _sync_width(self):
-        # Reserve the vertical scrollbar so showing it cannot clip button labels.
-        self.setFixedWidth(self.widget().width() + self.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent))
+    def _sync_width(self, *_):
+        # Only reserve a scrollbar when needed; short windows keep all actions.
+        extra = self.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent) if self.verticalScrollBar().maximum() else 0
+        self.setFixedWidth(self.widget().width() + extra)
 
     def eventFilter(self, obj, event):
         if event.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Show):

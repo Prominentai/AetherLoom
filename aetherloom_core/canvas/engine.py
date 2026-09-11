@@ -380,6 +380,7 @@ class CanvasEngine(QtCore.QObject):
             if run.get('user_stopped') or automatic and run.get('status') in TERMINAL:
                 return run['id']
             graph = copy.deepcopy(run['snapshot'])
+            model.sync_dynamic_inputs(graph)
             order = model.validate_document(graph)
             scope = set(run.get('scope') or order)
             round_id = run['id']
@@ -403,6 +404,7 @@ class CanvasEngine(QtCore.QObject):
             count = model.normalize_batch_count(1 if target else
                 source.get('batch_count', 1) if batch_count is None else batch_count)
             graph = {key: copy.deepcopy(source.get(key)) for key in ('version', 'id', 'name', 'nodes', 'edges', 'view')}
+            model.sync_dynamic_inputs(graph)
             graph['batch_count'] = source.get('batch_count', 1)
             round_id = str(round_id or uuid.uuid4().hex)
             run = {'id': round_id, 'status': 'RUNNING', 'created_at': time.time(),
@@ -840,7 +842,9 @@ class CanvasEngine(QtCore.QObject):
                 message='已忽略 · 旁路传递上游结果' if results else '已忽略 · 无兼容连线输入')
             return
         try:
-            batches = model.pair_inputs(inputs)
+            # Merge sockets concatenate independently sized streams; they are
+            # not the parallel parameters of one App/API request.
+            batches = [{}] if kind in model.collections.KINDS else model.pair_inputs(inputs)
         except ValueError as error:
             if any(states[edge['source']].get('_restored_missing_results') for edge in edges):
                 raise MissingHistoricalInput('历史结果缺失导致输入无法配对，已跳过本分支') from error
@@ -909,6 +913,9 @@ class CanvasEngine(QtCore.QObject):
                 results.append(model.normalize_result(result))
             if not results:
                 raise ValueError('输入路径中没有符合此节点格式要求的媒体文件')
+        elif kind in ('int', 'float'):
+            results = [{'value': model.primitive_value(node), 'type': kind, 'kind': kind, 'index': 0,
+                        'name': kind + '.txt', 'lineage': model.result_lineage({}, node_id, 0)}]
         elif kind == 'text':
             values = node.get('params', {}).get('texts')
             if not isinstance(values, list):
@@ -916,6 +923,25 @@ class CanvasEngine(QtCore.QObject):
             results = [{'text': str(value), 'type': 'text', 'kind': 'text', 'index': index,
                         'lineage': model.result_lineage({}, node_id, index)}
                        for index, value in enumerate(values)]
+        elif model.collections.current(node):
+            if kind in ('list_select', 'batch_select') and any(states[e['source']].get('_restored_missing_results') or states[e['source']].get('_restored_positions_ambiguous') for e in edges):
+                raise MissingHistoricalInput('历史输入不完整，无法可靠取项，请重新运行上游')
+            results = model.collections.execute(node, inputs)
+        elif kind == 'list_select':
+            if any(states[e['source']].get('_restored_missing_results') or states[e['source']].get('_restored_positions_ambiguous') for e in edges):
+                raise MissingHistoricalInput('历史输入分组不完整，无法可靠按组取项，请重新运行上游')
+            results = model.select_list_items(node, inputs)
+        elif kind in model.MERGE_KINDS:
+            values = [value for port in model.input_ports(node)
+                      for value in inputs.get(port['key'], [])]
+            if not values:
+                raise ValueError('请连接需要合成的列表或 Batch')
+            results = ([model.pack_batch(values, node_id)] if kind == 'merge_batch'
+                       else model.unpack_batches(values, node_id))
+        elif kind == 'list2batch':
+            results = [model.pack_batch(inputs.get('value') or [], node_id)]
+        elif kind == 'batch2list':
+            results = model.unpack_batches(inputs.get('value') or [], node_id)
         elif kind in ('select', 'preview'):
             results = inputs.get('value') or []
             if not results:
@@ -930,7 +956,7 @@ class CanvasEngine(QtCore.QObject):
                     raise MissingHistoricalInput('历史批次结果序号无法确定，已跳过本分支')
                 try:
                     results = model.select_results(results, {'mode': 'index' if params.get('indices') else 'all',
-                                                            'indices': params.get('indices', [])}, params.get('type', 'any'))
+                                                            'indices': params.get('indices', [])}, params.get('type', 'any'), strict=True)
                 except ValueError as error:
                     if any(states[edge['source']].get('_restored_missing_results') for edge in edges):
                         raise MissingHistoricalInput('所选历史结果已不可用，已跳过本分支') from error

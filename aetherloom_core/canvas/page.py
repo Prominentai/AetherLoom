@@ -63,6 +63,7 @@ class NodeSearchPopup(QtWidgets.QFrame):
     def __init__(self, choices, anchor=None, parent=None):
         super().__init__(parent, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
         self.setObjectName('canvasNodeSearch')
+        self.setFont(QtGui.QFont('Microsoft YaHei UI', 9))
         self.choices = choices
         self.setMinimumWidth(280)
         layout = QtWidgets.QVBoxLayout(self)
@@ -75,12 +76,12 @@ class NodeSearchPopup(QtWidgets.QFrame):
         self.category.addItem('全部分类', '')
         for key, label in model.NODE_CATEGORIES.items():self.category.addItem(label, key)
         self.category.currentIndexChanged.connect(lambda:self._filter(self.search.text()))
-        layout.addWidget(self.category)
         self.search = QtWidgets.QLineEdit()
         self.search.setPlaceholderText('搜索节点名称、App 或输入类型…')
         self.search.installEventFilter(self)
         self.search.textChanged.connect(self._filter)
-        layout.addWidget(self.search)
+        row = QtWidgets.QHBoxLayout();row.addWidget(self.search,1);row.addWidget(self.category)
+        self.category.setMaximumWidth(120);layout.addLayout(row)
         self.listing = QtWidgets.QListWidget()
         self.listing.setUniformItemSizes(True)
         self.listing.setSpacing(2)
@@ -203,7 +204,7 @@ class CanvasPage(QtWidgets.QWidget):
         self._node_search = None
         self._queue_panel_bound = None
         self._responsive_mode = None
-        self._wide_library_visible = True
+        self._wide_library_visible = False
         self._package_busy = False
         self._install_job = None
         self._install_busy = False
@@ -245,12 +246,17 @@ class CanvasPage(QtWidgets.QWidget):
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 10)
-        layout.setSpacing(10)
+        from aetherloom_core.ui import design
+        design.page_layout(self, layout)
         heading = QtWidgets.QHBoxLayout()
         title = QtWidgets.QLabel('画布')
         title.setObjectName('canvasPageTitle')
-        heading.addWidget(title)
+        design.title(title)
+        titles = QtWidgets.QVBoxLayout();titles.setSpacing(4)
+        titles.addWidget(title)
+        subtitle = self.page_subtitle = QtWidgets.QLabel('连接节点，编排工作流');subtitle.setObjectName('canvasMuted')
+        titles.addWidget(subtitle)
+        heading.addLayout(titles)
         self.name_edit = QtWidgets.QLineEdit(self.document['name'])
         self.name_edit.setMaximumWidth(360)
         self.name_edit.setMinimumWidth(90)
@@ -260,14 +266,14 @@ class CanvasPage(QtWidgets.QWidget):
         self.save_state = QtWidgets.QLabel('本地画布')
         self.save_state.setObjectName('canvasMuted')
         heading.addWidget(self.save_state)
-        layout.addLayout(heading)
+        layout.addWidget(design.header(heading))
         toolbar = QtWidgets.QToolBar();self.toolbar=toolbar
         toolbar.setMovable(False)
         toolbar.setIconSize(QtCore.QSize(16, 16))
         toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         self.palette_action = QtWidgets.QAction('显示节点库',self)
         self.palette_action.setCheckable(True)
-        self.palette_action.setChecked(True)
+        self.palette_action.setChecked(False)
         self.palette_action.toggled.connect(lambda checked: self.library.setVisible(checked))
         package_menu = QtWidgets.QMenu('画布',toolbar);self.document_menu=package_menu
         for label, callback in [('新建画布', self.new_canvas), ('打开画布…', self.open_canvas), ('保存', self.save), ('另存为…', self.save_as)]:
@@ -297,6 +303,11 @@ class CanvasPage(QtWidgets.QWidget):
         edit_menu.addAction('粘贴节点\tCtrl+V',self.paste_nodes)
         edit_menu.addAction('删除所选\tDelete',self.delete_selected)
         edit_menu.addAction('全选节点\tCtrl+A',self.select_all_nodes)
+        edit_menu.addSeparator()
+        self.settings_action = edit_menu.addAction('打开所选设置', self._open_settings)
+        self.settings_action.setShortcut(QtGui.QKeySequence('Alt+Return'))
+        self.settings_action.setShortcutContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        self.addAction(self.settings_action)
         add_menu(edit_menu)
         view_menu=QtWidgets.QMenu('视图',toolbar);self.view_menu=view_menu
         view_menu.addAction(self.palette_action);view_menu.addSeparator()
@@ -343,10 +354,6 @@ class CanvasPage(QtWidgets.QWidget):
         library_close=QtWidgets.QToolButton();library_close.setText('×');library_close.setToolTip('收起节点库，可从“视图”重新打开')
         library_close.clicked.connect(lambda:self.palette_action.setChecked(False));library_heading.addWidget(library_close)
         library_layout.addLayout(library_heading)
-        self.library_tabs=RhEnumComboBox();self.library_tabs.setObjectName('canvasLibraryCategory')
-        self.library_tabs.addItem('全部分类', '')
-        for key, label in model.NODE_CATEGORIES.items():self.library_tabs.addItem(label, key)
-        library_layout.addWidget(self.library_tabs)
         self.search = QtWidgets.QLineEdit()
         self.search.setPlaceholderText('搜索节点名称或分类')
         self.search.setClearButtonEnabled(True)
@@ -355,21 +362,21 @@ class CanvasPage(QtWidgets.QWidget):
         from .controls import NodeLibrary
         self.library_list = NodeLibrary()
         self.library_list.setWordWrap(False);self.library_list.setTextElideMode(QtCore.Qt.ElideRight)
-        self.library_list.setSpacing(3)
         self.library_list.itemActivated.connect(self._library_add)
         self.search.returnPressed.connect(lambda:self._library_add(self.library_list.currentItem()))
         library_layout.addWidget(self.library_list, 1)
         self.library_count=QtWidgets.QLabel();self.library_count.setObjectName('canvasMuted');self.library_count.setWordWrap(True);library_layout.addWidget(self.library_count)
-        self.library_hint=QtWidgets.QLabel('拖入画布定位添加\n也可双击节点或按回车');self.library_hint.setObjectName('canvasMuted');self.library_hint.setWordWrap(True);library_layout.addWidget(self.library_hint)
-        add = QtWidgets.QPushButton('添加到画布');self.library_add_button=add
+        self.library_hint=QtWidgets.QLabel('拖入画布 / 双击添加 / Enter');self.library_hint.setObjectName('canvasMuted');self.library_hint.setWordWrap(True);library_layout.addWidget(self.library_hint)
+        add = QtWidgets.QToolButton();add.setText('+');add.setToolTip('添加所选节点');self.library_add_button=add
         add.clicked.connect(lambda: self._library_add(self.library_list.currentItem()))
-        library_layout.addWidget(add)
-        refresh = QtWidgets.QPushButton('刷新已添加 App')
+        add.setFixedSize(26,26);library_heading.insertWidget(1,add)
+        refresh = QtWidgets.QToolButton();refresh.setText('刷新');refresh.setToolTip('刷新已添加 App')
         refresh.clicked.connect(self.refresh_apps)
-        library_layout.addWidget(refresh)
-        self.library_tabs.currentIndexChanged.connect(self._filter_library)
-        self.library_list.currentItemChanged.connect(lambda current,previous:add.setEnabled(current is not None and not current.isHidden()))
+        refresh.setFixedHeight(26);library_close.setFixedSize(26,26)
+        library_heading.insertWidget(2,refresh)
+        self.library_list.currentItemChanged.connect(lambda current,previous:add.setEnabled(current is not None and bool(current.data(0,QtCore.Qt.UserRole)) and not current.isHidden()))
         self.splitter.addWidget(self.library)
+        self.library.setVisible(self.palette_action.isChecked())
         self.center = QtWidgets.QFrame()
         self.center.installEventFilter(self)
         self.center.setObjectName('canvasSurface')
@@ -391,6 +398,7 @@ class CanvasPage(QtWidgets.QWidget):
         self.scene.decode_requested.connect(self._focus_decode)
         self.scene.mask_requested.connect(self._edit_mask)
         self.scene.options_requested.connect(self._other_settings)
+        self.scene.settings_requested.connect(self._open_settings)
         self.scene.option_changed.connect(self._node_changed)
         self.scene.batch_option_changed.connect(self._batch_node_changed)
         self.scene.run_selection_requested.connect(lambda ids,force:self.run_canvas(target=ids[0] if len(ids)==1 else ids,force=force))
@@ -444,11 +452,11 @@ class CanvasPage(QtWidgets.QWidget):
         self.inspector_scroll = QtWidgets.QScrollArea()
         self.inspector_scroll.setObjectName('canvasInspector')
         self.inspector_scroll.setWidgetResizable(True)
-        self.inspector_scroll.setMinimumWidth(245)
+        self.inspector_scroll.setMinimumWidth(270)
         self.inspector_scroll.setMaximumWidth(430)
         self.inspector_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.splitter.addWidget(self.inspector_scroll)
-        self.splitter.setSizes([215, 850, 290])
+        self.splitter.setSizes([200, 850, 320])
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
@@ -505,6 +513,8 @@ class CanvasPage(QtWidgets.QWidget):
                     'webapp_id': str(app_id), 'name': str(data.get('title') or data.get('webappName') or data.get('name') or app_id),
                     'nodes': copy.deepcopy(fields), 'base_url': str(data.get('base_url') or ''),
                 }
+                from aetherloom_core.rh_model_apps import metadata
+                apps[str(app_id)].update(metadata(data))
                 if 'url' in data:
                     apps[str(app_id)]['url'] = str(data.get('url') or '')
                 if data.get('url_error'):
@@ -514,22 +524,18 @@ class CanvasPage(QtWidgets.QWidget):
         self.apps = apps
         self.library_list.clear()
         for kind in model.LIBRARY_KINDS:
-            item = QtWidgets.QListWidgetItem('＋  ' + model.TITLES[kind])
             group = model.node_category(kind)
-            item.setData(QtCore.Qt.UserRole, (group, kind))
-            item.setToolTip(model.NODE_CATEGORIES[group] + ' · ' + model.TITLES[kind])
-            item.setSizeHint(QtCore.QSize(150, 36))
-            self.library_list.addItem(item)
+            self.library_list.add_choice(model.TITLES[kind], group, kind,
+                                         model.NODE_CATEGORIES[group] + ' · ' + model.TITLES[kind])
         for app_id, app in sorted(apps.items(), key=lambda pair: pair[1]['name'].lower()):
-            item = QtWidgets.QListWidgetItem('APP  ' + app['name'])
-            item.setData(QtCore.Qt.UserRole, ('app', app_id))
-            item.setToolTip(model.NODE_CATEGORIES['app'] + ' · ' + app['name'] + '\n' + app_id)
-            item.setSizeHint(QtCore.QSize(170, 42))
-            self.library_list.addItem(item)
+            from aetherloom_core.rh_model_apps import GROUPS, backend
+            group = GROUPS[backend(app)]
+            self.library_list.add_choice(app['name'], group, app_id,
+                                         model.NODE_CATEGORIES[group] + ' · ' + app['name'] + '\n' + app_id)
         self._filter_library()
         self._refresh_missing_apps()
-        if self._selection_identity:
-            self._selection_changed(force=True)
+        if self._selection_identity and self._inspector is not None:
+            self._selection_changed(force=self._inspector is not None)
 
     def _connection_settings(self):
         from aetherloom_core.rh_connections import open_connection_settings
@@ -574,6 +580,9 @@ class CanvasPage(QtWidgets.QWidget):
                 continue
             if wid not in self.apps:
                 missing_nodes += 1
+                if app.get('backend') in ('rh_standard', 'rh_llm'):
+                    reference.update(backend=app['backend'], model_definition=copy.deepcopy(app.get('model_definition')),
+                                     nodes=copy.deepcopy(app.get('nodes') or []))
                 requests.setdefault(reference['webapp_id'], reference)
         return list(requests.values()), issues, missing_nodes
 
@@ -599,6 +608,18 @@ class CanvasPage(QtWidgets.QWidget):
             return
         self.refresh_apps()
         references, issues, unused = self._app_requirements({node_id} if node_id else None)
+        models = [ref for ref in references if ref.get('backend') in ('rh_standard', 'rh_llm')]
+        if models:
+            from aetherloom_core.rh_model_apps import install as install_model
+            try:
+                for ref in models:
+                    install_model(Path(current_dir) / 'RH_apps', dict(schema_version=1, webappId=ref['webapp_id'],
+                        title=ref['name'], backend=ref['backend'], base_url=ref['base_url'],
+                        model_definition=ref['model_definition'], nodeInfoList=ref['nodes']))
+                self.owner._rh_reload_apps();self.refresh_apps()
+                references = [ref for ref in references if ref not in models]
+            except (ValueError, OSError) as error:
+                self._message('模型应用添加失败：' + str(error));return
         if not references:
             self._message(issues[0] if issues else '所需 App 已添加到本机。')
             return
@@ -642,18 +663,10 @@ class CanvasPage(QtWidgets.QWidget):
             self._refresh_missing_apps()
 
     def _filter_library(self):
-        text = self.search.text().strip().lower()
-        category=self.library_tabs.currentData();visible=[]
-        for index in range(self.library_list.count()):
-            item = self.library_list.item(index)
-            group,_=item.data(QtCore.Qt.UserRole)
-            item.setHidden(text not in (item.text()+item.toolTip()).lower() or bool(category and group!=category))
-            if not item.isHidden():visible.append(item)
-        current=self.library_list.currentItem()
-        if current is None or current.isHidden():self.library_list.setCurrentItem(visible[0] if visible else None)
+        visible = self.library_list.filter(self.search.text())
         self.library_add_button.setEnabled(bool(visible))
         self.library_count.setText(f'{len(visible)} 个可用节点' if visible else '没有匹配的节点')
-        self.library_hint.setText('拖入画布定位添加\n也可双击节点或按回车' if visible else '试试其他关键词；App 需先在 RH 应用页添加。')
+        self.library_hint.setText('拖入画布 / 双击添加 / Enter' if visible else '试试其他关键词；App 需先添加。')
 
     def _quick_add_node(self):
         position=self.view.mapToScene(self.view.available_rect().center().toPoint())
@@ -666,12 +679,14 @@ class CanvasPage(QtWidgets.QWidget):
     def _library_add(self, item):
         if item is None or item.isHidden():
             return
-        group, value = item.data(QtCore.Qt.UserRole)
+        choice = item.data(0, QtCore.Qt.UserRole)
+        if not choice:return
+        group, value = choice
         center = self.view.mapToScene(self.view.available_rect().center().toPoint())
         self._insert_choice({'group': group, 'value': value}, center - QtCore.QPointF(134, 90))
 
     def _make_node(self, group, value):
-        if group == 'app':
+        if group in ('app', 'standard', 'rh_llm'):
             app = copy.deepcopy(self.apps[value])
             cached_page = (getattr(self.owner, '_rh_app_pages', {}) or {}).get(value)
             parsed = getattr(cached_page, '_rh_parsed', None) if cached_page is not None else None
@@ -688,6 +703,8 @@ class CanvasPage(QtWidgets.QWidget):
                     current_fields = [current_fields]
                 if isinstance(current_fields, list):
                     app['nodes'] = copy.deepcopy(current_fields)
+                from aetherloom_core.rh_model_apps import metadata
+                app.update(metadata(data))
                 app['name'] = str(data.get('title') or data.get('webappName') or data.get('name') or app['name'])
                 for key in ('base_url', 'url', 'url_error'):
                     if key in data:
@@ -729,6 +746,8 @@ class CanvasPage(QtWidgets.QWidget):
                     widget = getattr(cached_page, name, None)
                     if widget is not None:
                         decode[key] = getattr(widget, getter)()
+            from aetherloom_core.rh_model_apps import supports_local_decode
+            if not supports_local_decode(app):decode = {}
             node = model.new_node('app', app['name'], app=app, decode_settings=decode,
                                   params={model.parameter_key(field): copy.deepcopy(field.get('fieldValue', '')) for field in app['nodes']})
             model.normalize_app_urls({'nodes': [node]})
@@ -746,7 +765,8 @@ class CanvasPage(QtWidgets.QWidget):
         choices = []
         prototypes = [(model.node_category(kind), kind, model.TITLES[kind], model.new_node(kind))
                       for kind in model.LIBRARY_KINDS]
-        prototypes += [('app', key, app['name'], model.new_node('app', app=app)) for key, app in self.apps.items()]
+        from aetherloom_core.rh_model_apps import GROUPS, backend
+        prototypes += [(GROUPS[backend(app)], key, app['name'], model.new_node('app', app=app)) for key, app in self.apps.items()]
         anchor_node = next((node for node in self.document['nodes'] if anchor and node['id'] == anchor['node_id']), None)
         if anchor and anchor_node is None:
             return choices
@@ -756,19 +776,22 @@ class CanvasPage(QtWidgets.QWidget):
             if accepted is None:
                 return choices
         type_names = {'text': '文本', 'image': '图像', 'audio': '音频', 'video': '视频',
-                      'number': '数值', 'scalar': '枚举', 'file': '文件', 'any': '任意结果'}
+                      'int': 'INT', 'float': 'FLOAT', 'boolean': '布尔', 'enum': '枚举', 'number': '数值', 'scalar': '枚举', 'file': '任意', 'any': '任意', 'archive': '压缩文件',
+                      'batch': 'Batch', 'image_input': '图像', 'video_input': '视频', 'audio_input': '音频', 'text_input': '文本'}
         for group, value, title, prototype in prototypes:
             prefix = model.NODE_CATEGORIES[group] + ' · '
             choice = {'group': group, 'value': value, 'label': prefix + title,
                       'search': prefix + title + ' ' + str(value)}
             if anchor and anchor['output']:
                 for port in model.input_ports(prototype):
-                    if any(model.types_compatible(kind, port['type']) for kind in model.output_types(anchor_node)):
+                    if any(model.types_compatible(kind, port['type']) for kind in model.connection_output_types(anchor_node, anchor.get('input', 'output'))):
                         label = prefix + title + ' → ' + port['label'] + ' · ' + type_names.get(port['type'], port['type'])
                         choices.append(dict(choice, label=label, port=port['key'], search=label + ' ' + str(value)))
             elif anchor:
-                if any(model.types_compatible(kind, accepted) for kind in model.output_types(prototype)):
-                    choices.append(choice)
+                for port in model.output_ports(prototype):
+                    if model.types_compatible(port['type'], accepted):
+                        label = choice['label'] + (' · ' + port['label'] if prototype['kind'] in ('app', 'list_select') else '')
+                        choices.append(dict(choice, label=label, output=port['key']))
             else:
                 choices.append(choice)
         return choices
@@ -796,10 +819,10 @@ class CanvasPage(QtWidgets.QWidget):
                 if anchor.get('remove_edge'):
                     candidate['edges'] = [edge for edge in candidate['edges'] if edge['id'] != anchor['remove_edge']]
                 if anchor['output']:
-                    model.connect(candidate, anchor['node_id'], node['id'], choice['port'])
+                    model.connect(candidate, anchor['node_id'], node['id'], choice['port'], output=anchor.get('input', 'output'))
                 else:
                     candidate['edges'] = [edge for edge in candidate['edges'] if not (edge['target'] == anchor['node_id'] and edge['input'] == anchor['input'])]
-                    model.connect(candidate, node['id'], anchor['node_id'], anchor['input'])
+                    model.connect(candidate, node['id'], anchor['node_id'], anchor['input'], output=choice.get('output', 'output'))
             model.validate_document(candidate)
         except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
             self._message(f'无法添加节点：{error}')
@@ -816,7 +839,8 @@ class CanvasPage(QtWidgets.QWidget):
         installed = self.apps.get(app_id)
         if installed is None:
             raise ValueError(f"请先添加 App：{node.get('title', app_id)}")
-        if _schema(installed['nodes']) != _schema(node.get('app', {}).get('nodes', [])):
+        if (installed.get('model_definition') != node.get('app', {}).get('model_definition')
+                or _schema(installed['nodes']) != _schema(node.get('app', {}).get('nodes', []))):
             raise ValueError(f"{node.get('title', 'App')} 的定义已变化，请在节点设置中重新绑定参数")
         if self._prepare is None:
             raise ValueError('共享执行服务尚未就绪')
@@ -946,7 +970,8 @@ class CanvasPage(QtWidgets.QWidget):
                 node.pop(key, None)
         return result
 
-    def _edited(self, rebuild=False, select=None):
+    def _edited(self, rebuild=False, select=None, connections=False):
+        model.sync_dynamic_inputs(self.document)
         self._dirty = True
         deleted = self._is_deleted(self.document['id'])
         self.save_state.setText('工作流已删除 · 手动保存可重新建立' if deleted else '正在保存…')
@@ -955,14 +980,22 @@ class CanvasPage(QtWidgets.QWidget):
         update = getattr(self.engine, 'update_document', None)
         if update and not deleted:
             self.document = update(self.document)
-        if rebuild:
+        if connections:
+            self._updating = True
+            try:
+                self.scene.sync_connections(self.document)
+                if select in self.scene.nodes:
+                    self.scene.clearSelection();self.scene.nodes[select].setSelected(True)
+            finally:self._updating = False
+            self._selection_changed(force=self._inspector is not None)
+        elif rebuild:
             self._updating = True
             self.scene.set_document(self.document)
             if select in self.scene.nodes:
                 self.scene.nodes[select].setSelected(True)
             self._updating = False
             self._selection_identity = None
-            self._selection_changed(force=True)
+            self._selection_changed(force=self._inspector is not None)
         else:
             self.scene.refresh_nodes(self.document)
         self._sync_actions()
@@ -989,17 +1022,17 @@ class CanvasPage(QtWidgets.QWidget):
                 node['size'] = list(sizes[node['id']])
         self._edited()
 
-    def _connect_nodes(self, source, target, port):
-        self._reconnect_nodes('', source, target, port)
+    def _connect_nodes(self, source, target, port, output='output'):
+        self._reconnect_nodes('', source, target, port, output)
 
-    def _reconnect_nodes(self, old_id, source, target, port):
+    def _reconnect_nodes(self, old_id, source, target, port, output='output'):
         candidate = copy.deepcopy(self.document)
         removed = [edge for edge in candidate['edges'] if edge['id'] == old_id or (edge['target'] == target and edge['input'] == port)]
-        if len(removed) == 1 and removed[0]['source'] == source and removed[0]['target'] == target and removed[0]['input'] == port:
+        if len(removed) == 1 and removed[0]['source'] == source and removed[0]['target'] == target and removed[0]['input'] == port and removed[0].get('output', 'output') == output:
             return
         candidate['edges'] = [edge for edge in candidate['edges'] if edge not in removed]
         try:
-            model.connect(candidate, source, target, port)
+            model.connect(candidate, source, target, port, output=output)
         except ValueError as error:
             self._message(str(error))
             return
@@ -1008,7 +1041,7 @@ class CanvasPage(QtWidgets.QWidget):
         for edge in removed:
             self._mark_stale(edge['target'])
         self._mark_stale(target)
-        self._edited(rebuild=True, select=target)
+        self._edited(connections=True, select=target)
 
     def _disconnect_edge(self, edge_id):
         edge = next((edge for edge in self.document['edges'] if edge['id'] == edge_id), None)
@@ -1017,7 +1050,7 @@ class CanvasPage(QtWidgets.QWidget):
         self._checkpoint()
         self.document['edges'].remove(edge)
         self._mark_stale(edge['target'])
-        self._edited(rebuild=True, select=edge['target'])
+        self._edited(connections=True, select=edge['target'])
         target = next((node for node in self.document['nodes'] if node['id'] == edge['target']), {})
         internal = target.get('kind') in {'app'} | set(model.MODEL_KINDS) or target.get('kind') == 'rename' and edge.get('input') in ('name', 'extension')
         self._message('连接已断开，输入恢复使用节点内部值。' if internal else '连接已断开，请连接上游结果后运行。')
@@ -1065,7 +1098,7 @@ class CanvasPage(QtWidgets.QWidget):
             container.pop('url_error', None)
         if path != 'title':
             self._mark_stale(node_id)
-        self._edited()
+        self._edited(rebuild=path == 'params' and node['kind'] in model.collections.KINDS, select=node_id)
 
     def _edge_changed(self, edge_id, key, value):
         edge = next((edge for edge in self.document['edges'] if edge['id'] == edge_id), None)
@@ -1076,12 +1109,44 @@ class CanvasPage(QtWidgets.QWidget):
             self._edited()
             self.scene.edges[edge_id].update_path()
 
+    def _open_settings(self, item_id=None):
+        item = self.scene.nodes.get(item_id) or self.scene.edges.get(item_id)
+        if item is not None and not item.isSelected():
+            with QtCore.QSignalBlocker(self.scene):
+                self.scene.clearSelection()
+                item.setSelected(True)
+        if not self.scene.selectedItems():
+            self._message('请先选择节点或连线，再打开设置。')
+            return
+        self._selection_changed(force=True)
+
+    def _model_settings(self, node_id):
+        item = self.scene.nodes.get(node_id)
+        if item is None or item.node['kind'] not in model.MODEL_KINDS:return
+        # The explicit per-node entry must also work while several nodes are selected.
+        with QtCore.QSignalBlocker(self.scene):
+            self.scene.clearSelection();item.setSelected(True)
+        self._open_settings(node_id)
+        inspector = self._inspector
+        if isinstance(inspector, Inspector) and getattr(inspector, 'model_fields', None):
+            inspector.tabs.setCurrentIndex(1)
+            key = 'model' if item.node.get('model_config', {}).get('provider') else 'provider'
+            inspector.model_fields[key].setFocus(QtCore.Qt.OtherFocusReason)
+
+    def _close_settings(self):
+        if isinstance(self._inspector, Inspector) and not self._inspector.validate():
+            return
+        with QtCore.QSignalBlocker(self.scene):self.scene.clearSelection()
+        self._selection_identity = None
+        self._empty_inspector()
+        self.view.setFocus()
+
     def _other_settings(self,node_id):
         item=self.scene.nodes.get(node_id)
         if item:
             if not item.isSelected():
                 with QtCore.QSignalBlocker(self.scene):self.scene.clearSelection();item.setSelected(True)
-            self._selection_changed(force=True)
+            self._open_settings(node_id)
             if self._inspector:self._inspector.focus_other_settings()
 
     def _batch_node_changed(self,node_ids,path,value):
@@ -1097,7 +1162,7 @@ class CanvasPage(QtWidgets.QWidget):
         self._checkpoint()
         for node,container in changes:container[keys[-1]]=bool(value)
         self._mark_stale_many([node['id'] for node,unused in changes]);self._edited()
-        self._selection_changed(force=True)
+        self._selection_changed(force=self._inspector is not None)
         self._message(f'已更新 {len(changes)} 个节点，可一次撤销。')
 
     def _queue_selection_changed(self):
@@ -1115,18 +1180,23 @@ class CanvasPage(QtWidgets.QWidget):
         node = next((item for item in selected if isinstance(item, NodeItem)), None)
         edge = next((item for item in selected if isinstance(item, EdgeItem)), None)
         identity = ('batch',tuple(item.node['id'] for item in nodes)) if len(nodes)>1 else ('node', node.node['id']) if node else ('edge', edge.edge['id']) if edge else None
+        if not force and nodes:
+            if identity != self._selection_identity:
+                self._empty_inspector()
+                self._selection_identity = identity
+            return
         if identity == self._selection_identity and not force:
             return
         self._selection_identity = identity
         self._last_edit_path = None
         if len(nodes)>1:
             from .selection import BatchInspector
-            inspector=BatchInspector([item.node for item in nodes]);inspector.changed.connect(self._batch_node_changed)
+            inspector=BatchInspector([item.node for item in nodes], parent=self.inspector_scroll.viewport());inspector.changed.connect(self._batch_node_changed)
         elif node:
             definition = self.apps.get(str(node.node.get('app', {}).get('webapp_id', '')))
             is_app = node.node['kind'] == 'app'
             inspector = Inspector(node.node, self.document['id'], self.document['edges'], self.histories,
-                                  model_owner=self.owner,
+                                  parent=self.inspector_scroll.viewport(), model_owner=self.owner,
                                   missing_app=is_app and definition is None,
                                   changed_definition=is_app and definition is not None and _schema(definition['nodes']) != _schema(node.node.get('app', {}).get('nodes', [])))
             inspector.changed.connect(lambda path, value, node_id=node.node['id']: self._node_changed(node_id, path, value))
@@ -1138,20 +1208,43 @@ class CanvasPage(QtWidgets.QWidget):
             if is_app:
                 open_app = QtWidgets.QPushButton('查看 App 输出卡片')
                 open_app.clicked.connect(lambda unused=False, app_id=str(node.node.get('app', {}).get('webapp_id', '')): self._open_app(app_id))
-                inspector.tab_forms[3].insertWidget(0, open_app)
+                inspector.tab_forms[-1].insertWidget(0, open_app)
             previous = self._inspector
             if (isinstance(previous, Inspector) and previous.tabs is not None
                     and inspector.tabs is not None and previous.node['id'] == node.node['id']):
                 inspector.tabs.setCurrentIndex(previous.tabs.currentIndex())
         elif edge:
-            inspector = EdgeInspector(edge.edge)
+            inspector = EdgeInspector(edge.edge, parent=self.inspector_scroll.viewport())
             inspector.changed.connect(lambda key, value, edge_id=edge.edge['id']: self._edge_changed(edge_id, key, value))
         else:
             self._empty_inspector()
             return
         inspector.message.connect(self._message)
-        old = self.inspector_scroll.takeWidget()
+        # Wrapped help and long provider/path values must not determine the
+        # width of a docked or floating settings panel.
+        for label in inspector.findChildren(QtWidgets.QLabel):
+            if label.wordWrap():
+                policy = label.sizePolicy();policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Ignored)
+                label.setSizePolicy(policy);label.setMinimumWidth(0)
+        for control in inspector.findChildren(QtWidgets.QComboBox):
+            control.setMinimumWidth(0);control.setMinimumContentsLength(8)
+            control.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        close_button = QtWidgets.QToolButton(inspector)
+        close_button.setText('×')
+        close_button.setObjectName('canvasCloseInspector')
+        close_button.setFixedSize(28, 28)
+        close_button.setToolTip('收起完整设置；双击节点标题或右键“节点设置”再次打开')
+        close_button.setCursor(QtCore.Qt.PointingHandCursor)
+        close_button.clicked.connect(self._close_settings)
+        header = QtWidgets.QHBoxLayout()
+        title_item = inspector.layout().takeAt(0)
+        header.addWidget(title_item.widget(), 1)
+        header.addWidget(close_button, 0, QtCore.Qt.AlignTop)
+        inspector.layout().insertLayout(0, header)
+        old = self.inspector_scroll.widget()
         if old:
+            old.hide()
+            self.inspector_scroll.takeWidget()
             old.deleteLater()
         self._inspector = inspector
         self.inspector_scroll.setWidget(inspector)
@@ -1159,8 +1252,10 @@ class CanvasPage(QtWidgets.QWidget):
         self._place_inspector()
 
     def _empty_inspector(self):
-        old = self.inspector_scroll.takeWidget()
+        old = self.inspector_scroll.widget()
         if old:
+            old.hide()
+            self.inspector_scroll.takeWidget()
             old.deleteLater()
         self._inspector = None
         self.inspector_scroll.hide()
@@ -1173,18 +1268,22 @@ class CanvasPage(QtWidgets.QWidget):
         if not item.isSelected():
             self.scene.clearSelection()
             item.setSelected(True)
-        self._selection_changed(force=True)
-        if isinstance(self._inspector, Inspector) and self._inspector.decode_group:
-            self._inspector.tabs.setCurrentIndex(1)
-            self._inspector.tabs.widget(1).ensureWidgetVisible(self._inspector.decode_group)
-            self._inspector.decode_group.setFocus()
+        item.ensure_inline()
+        if item.inline_proxy is not None:
+            item.inline_proxy.show()
+            editor = item.inline_proxy.widget()
+            group = editor.inspector.decode_group
+            if group is not None:
+                if hasattr(editor.inspector, 'decode_section'):editor.inspector.decode_section.set_expanded(True)
+                editor.ensureWidgetVisible(group)
+                group.setFocus()
 
     def _edit_mask(self, node_id):
         item = self.scene.nodes.get(node_id)
         if item is None or item.node['kind'] != 'image':return
         self.scene.clearSelection();item.setSelected(True)
-        self._selection_changed(force=True)
-        inspector = self._inspector
+        item.ensure_inline()
+        inspector = item.inline_proxy.widget().inspector if item.inline_proxy is not None else None
         if isinstance(inspector, Inspector):
             files = inspector.findChild(QtWidgets.QListWidget, 'canvasInputFiles')
             if files is not None:inspector._edit_input_mask(files)
@@ -1195,15 +1294,13 @@ class CanvasPage(QtWidgets.QWidget):
             return
         self.scene.clearSelection()
         item.setSelected(True)
-        self._selection_changed(force=True)
+        self._open_settings(node_id)
         inspector = self._inspector
         if isinstance(inspector, Inspector) and inspector.results_list is not None:
             if inspector.tabs is not None:
                 inspector.tabs.setCurrentIndex(inspector.tabs.count() - 1)
             listing = inspector.results_list
-            if 0 <= index < listing.count():
-                listing.setCurrentRow(index)
-                listing.scrollToItem(listing.item(index))
+            inspector.result_browser.focus_index(index, 'input' if item.input_preview() else 'results')
             if inspector.tabs is None:
                 self.inspector_scroll.ensureWidgetVisible(listing)
 
@@ -1255,7 +1352,7 @@ class CanvasPage(QtWidgets.QWidget):
         with QtCore.QSignalBlocker(self.scene):
             self.scene.clearSelection()
             for item in self.scene.nodes.values():item.setSelected(True)
-        self._selection_changed(force=True)
+        self._selection_changed()
 
     def delete_canvas(self):
         canvas_id=self.document['id'];name=self.document.get('name','未命名画布')
@@ -1332,13 +1429,17 @@ class CanvasPage(QtWidgets.QWidget):
             for key in RUNTIME_FIELDS:
                 if key in state:
                     node[key] = copy.deepcopy(state[key])
+        ignored = set(RUNTIME_FIELDS) | {'input_keys'}
+        def settings(node):return {key: value for key, value in node.items() if key not in ignored}
+        connections_only = (set(live_nodes) == {node['id'] for node in restored['nodes']}
+                            and all(settings(node) == settings(live_nodes[node['id']]) for node in restored['nodes']))
         self.document = restored
         self.name_edit.setText(restored['name'])
-        self._edited(rebuild=True)
+        self._edited(rebuild=not connections_only, connections=connections_only)
         with QtCore.QSignalBlocker(self.scene):
             for node_id in selected:
                 if node_id in self.scene.nodes:self.scene.nodes[node_id].setSelected(True)
-        self._selection_changed(force=True)
+        self._selection_changed()
 
     def undo(self):
         if self._undo:
@@ -1387,6 +1488,7 @@ class CanvasPage(QtWidgets.QWidget):
             self._edited()
 
     def save(self, *unused, automatic=False):
+        if not automatic and not self._validate_inline():return False
         self._autosave.stop()
         canvas_id = self.document['id']
         if self._is_deleted(canvas_id):
@@ -1513,7 +1615,18 @@ class CanvasPage(QtWidgets.QWidget):
                 else:
                     entries.append(TextSnapshot(str(value), 'run'))
 
+    def _validate_inline(self):
+        for item in self.scene.nodes.values():
+            if item.inline_proxy is not None:
+                editor = item.inline_proxy.widget()
+                if hasattr(editor, 'validate') and not editor.validate():
+                    self.view.ensureVisible(item)
+                    self._message('请先修正节点中未完成或无效的数值。')
+                    return False
+        return True
+
     def run_canvas(self, target=None, force=False):
+        if not self._validate_inline():return
         if isinstance(self._inspector, Inspector) and not self._inspector.validate():
             self._message('请先修正节点中未完成或无效的数值。')
             return
@@ -1620,12 +1733,13 @@ class CanvasPage(QtWidgets.QWidget):
         self.status_label.setText(str(text))
 
     def _place_inspector(self):
+        self.page_subtitle.setVisible(self.height() >= 560)
         self._run_layout.setDirection(QtWidgets.QBoxLayout.TopToBottom if self.center.width() < 370
                                       else QtWidgets.QBoxLayout.LeftToRight)
         self.run_panel.adjustSize()
         self.run_panel.move(max(8, self.center.width() - self.run_panel.width() - 12),
                             max(8, self.center.height() - self.run_panel.height() - 12))
-        mode = 'compact' if self.width() < 800 else 'overlay' if self.width() < 1020 else 'wide'
+        mode = 'compact' if self.width() < 760 else 'overlay' if self.width() < 1080 else 'wide'
         previous = self._responsive_mode
         if mode != previous:
             self._responsive_mode = mode
@@ -1683,7 +1797,8 @@ class CanvasPage(QtWidgets.QWidget):
 
     def refresh_theme(self):
         mode = getattr(self.owner, '_theme_mode', 'dark')
-        p = palette(mode)
+        from .appearance import canvas_palette
+        p = canvas_palette(palette(mode))
         arrow_root = Path(current_dir) / 'icons'
         up_arrow = (arrow_root / f'ui-chevron-up-{mode}.svg').as_posix()
         down_arrow = (arrow_root / f'ui-chevron-down-{mode}.svg').as_posix()
@@ -1700,10 +1815,14 @@ class CanvasPage(QtWidgets.QWidget):
         self.setPalette(theme_palette)
         self.setStyleSheet(f'''
             QWidget#aetherloomCanvasPage {{ background: {p['canvas']}; color: {p['text']}; }}
-            QWidget#aetherloomCanvasPage QWidget {{ color: {p['text']}; font-size: 12px; }}
+            QWidget#aetherloomCanvasPage QWidget {{ color: {p['text']}; font-family: 'Microsoft YaHei UI'; font-size: 13px; }}
             QWidget#aetherloomCanvasPage QLabel {{ background: transparent; border: none; }}
             QWidget#aetherloomCanvasPage QLabel#canvasPageTitle {{ font-size: 23px; font-weight: 700; padding-right: 12px; }}
             QWidget#aetherloomCanvasPage QLabel#canvasSectionTitle {{ font-size: 14px; font-weight: 600; }}
+            QWidget#aetherloomCanvasPage QScrollArea#canvasInspector QWidget {{ font-size: 12px; }}
+            QWidget#aetherloomCanvasPage QScrollArea#canvasInspector QLabel#canvasSectionTitle {{ font-size: 14px; }}
+            QWidget#aetherloomCanvasPage QLabel#canvasCollectionRoute {{ color: {p['accent']}; font-weight: 600; padding: 8px; background: {p['accent_soft']}; border-radius: 6px; }}
+            QWidget#aetherloomCanvasPage QLabel#canvasCollectionExample {{ color: {p['muted']}; padding: 9px; background: {p['input']}; border-radius: 6px; }}
             QWidget#canvasBatchInspector QCheckBox {{ background: transparent; padding: 8px 4px; spacing: 8px; border: none; border-radius: 6px; }}
             QWidget#canvasBatchInspector QCheckBox:hover {{ background: {p['hover']}; }}
             QWidget#canvasBatchInspector QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {p['muted']}; border-radius: 4px; background: {p['input']}; image: none; }}
@@ -1713,9 +1832,9 @@ class CanvasPage(QtWidgets.QWidget):
             QWidget#aetherloomCanvasPage QLabel#canvasBuiltinReuseHint {{ color: {p['muted']}; font-size: 11px; }}
             QWidget#aetherloomCanvasPage QLabel#canvasWarning {{ color: {p['warning']}; }}
             QFrame#canvasMissingApps {{ background: {p['surface']}; border: 1px solid {p['warning']}; border-radius: 8px; }}
-            QFrame#canvasPanel, QScrollArea#canvasInspector {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 14px; }}
+            QFrame#canvasPanel, QScrollArea#canvasInspector {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 10px; }}
             QScrollArea#canvasInspector > QWidget > QWidget {{ background: {p['surface']}; }}
-            QFrame#canvasSurface {{ border: 1px solid {p['border']}; border-radius: 14px; }}
+            QFrame#canvasSurface {{ border: 1px solid {p['border']}; border-radius: 10px; }}
             QWidget#aetherloomCanvasPage QListWidget {{ background: transparent; border: none; outline: none; }}
             QWidget#aetherloomCanvasPage QListWidget::item {{ border-radius: 8px; padding: 8px 6px; }}
             QWidget#aetherloomCanvasPage QListWidget::item:hover {{ background: {p['hover']}; }}
@@ -1738,10 +1857,10 @@ class CanvasPage(QtWidgets.QWidget):
             QWidget#aetherloomCanvasPage QPushButton, QWidget#aetherloomCanvasPage QToolButton {{ background: {p['input']}; border: 1px solid {p['border']}; border-radius: 6px; padding: 7px 9px; }}
             QWidget#aetherloomCanvasPage QPushButton:hover, QWidget#aetherloomCanvasPage QToolButton:hover {{ background: {p['hover']}; border-color: {p['muted']}; }}
             QWidget#aetherloomCanvasPage QToolButton:checked {{ background: {p['accent_soft']}; color: {p['accent']}; }}
-            QWidget#aetherloomCanvasPage QFrame#canvasRunPanel {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 14px; }}
-            QWidget#aetherloomCanvasPage QToolButton#canvasRunButton {{ background: {p['accent']}; color: #ffffff; border-color: {p['accent']}; padding: 10px 19px; font-weight: 600; }}
+            QWidget#aetherloomCanvasPage QFrame#canvasRunPanel {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 10px; }}
+            QWidget#aetherloomCanvasPage QToolButton#canvasRunButton {{ background: {p['accent']}; color: #ffffff; border-color: {p['accent']}; padding: 7px 14px; font-weight: 600; }}
             QWidget#aetherloomCanvasPage QToolButton#canvasRunButton:disabled {{ background: {p['hover']}; color: {p['muted']}; border-color: {p['border']}; }}
-            QWidget#aetherloomCanvasPage QToolButton#canvasStopButton {{ padding: 10px 14px; }}
+            QWidget#aetherloomCanvasPage QToolButton#canvasStopButton {{ padding: 7px 10px; }}
             QWidget#aetherloomCanvasPage QToolButton#canvasStopButton:enabled {{ color: {p['danger']}; border-color: {p['danger']}; }}
             QWidget#aetherloomCanvasPage QPushButton:disabled, QWidget#aetherloomCanvasPage QToolButton:disabled {{ color: {p['muted']}; }}
             QWidget#aetherloomCanvasPage QToolBar {{ border: 1px solid {p['border']}; border-radius: 10px; background: {p['surface']}; spacing: 5px; padding: 5px; }}
@@ -1753,19 +1872,47 @@ class CanvasPage(QtWidgets.QWidget):
             QWidget#aetherloomCanvasPage QToolButton#qt_toolbar_ext_button {{ min-width: 24px; min-height: 28px; padding: 2px; }}
             QWidget#aetherloomCanvasPage QGroupBox {{ border: 1px solid {p['border']}; border-radius: 7px; margin-top: 10px; padding-top: 12px; }}
             QWidget#aetherloomCanvasPage QGroupBox::title {{ subcontrol-origin: margin; left: 9px; padding: 0 4px; }}
-            QTabWidget#canvasNodeSettingsTabs::pane {{ border: none; border-top: 1px solid {p['border']}; }}
+            QTabWidget#canvasNodeSettingsTabs::pane {{ border: none; }}
             QScrollArea#canvasNodeTabScroll, QWidget#canvasNodeTabContent {{ background: {p['surface']}; border: none; }}
             QTabWidget#canvasNodeSettingsTabs QTabBar {{ font-size: 11px; }}
             QTabWidget#canvasNodeSettingsTabs QTabBar::tab {{ background: transparent; color: {p['muted']};
-                border: none; border-bottom: 2px solid transparent; padding: 8px 2px; margin: 0; font-size: 11px; }}
+                border: 1px solid transparent; border-radius: 6px; padding: 7px 5px; margin: 2px; font-size: 12px; }}
             QTabWidget#canvasNodeSettingsTabs QTabBar::tab:selected {{ color: {p['accent']};
-                background: {p['accent_soft']}; border-bottom-color: {p['accent']}; }}
+                background: {p['accent_soft']}; border-color: {p['border']}; }}
             QTabWidget#canvasNodeSettingsTabs QTabBar::tab:hover {{ background: {p['hover']}; }}
+            QWidget#aetherloomCanvasPage QLabel#canvasInspectorTitle {{ font-size: 15px; font-weight: 600; }}
+            QWidget#aetherloomCanvasPage QWidget#canvasInspectorHeader {{ background: transparent; border: none; }}
+            QTabWidget#canvasNodeSettingsTabs, QTabWidget#canvasNodeSettingsTabs QTabBar {{ background: transparent; border: none; }}
+            QWidget#aetherloomCanvasPage QToolButton#canvasTextHistoryButton {{ padding: 0; background: transparent; border: none; font-size: 16px; color: {p['muted']}; }}
+            QWidget#aetherloomCanvasPage QToolButton#canvasTextHistoryButton:hover {{ color: {p['text']}; background: {p['hover']}; }}
+            QWidget#aetherloomCanvasPage QLabel#canvasInspectorSubtitle {{ font-size: 11px; color: {p['muted']}; }}
+            QWidget#aetherloomCanvasPage QToolButton#canvasCloseInspector {{ border: none; background: transparent; padding: 0; font-size: 18px; color: {p['muted']}; }}
+            QWidget#aetherloomCanvasPage QToolButton#canvasCloseInspector:hover {{ background: {p['hover']}; color: {p['text']}; }}
+            QWidget#aetherloomCanvasPage QLineEdit#canvasNodeName {{ background: transparent; border: none; border-bottom: 1px solid transparent; border-radius: 0; padding: 2px 0; color: {p['text']}; font-size: 15px; font-weight: 600; }}
+            QWidget#aetherloomCanvasPage QLineEdit#canvasNodeName:focus {{ color: {p['text']}; border-color: {p['accent']}; }}
+            QScrollArea#canvasInspector QCheckBox {{ spacing: 8px; padding: 5px 0; }}
+            QScrollArea#canvasInspector QLabel#canvasMuted {{ background: {p['input']}; border-radius: 6px; padding: 8px; font-size: 11px; }}
+            QScrollArea#canvasInspector QComboBox {{ padding-right: 24px; }}
+            QScrollArea#canvasInspector QComboBox::drop-down {{ width: 24px; border: none; background: transparent; }}
+            QScrollArea#canvasInspector QComboBox::down-arrow {{ image: url("{down_arrow}"); width: 12px; height: 12px; }}
+            QScrollArea#canvasInspector QAbstractSpinBox {{ padding-right: 24px; }}
+            QScrollArea#canvasInspector QAbstractSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right; width: 23px; border: none; background: transparent; }}
+            QScrollArea#canvasInspector QAbstractSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right; width: 23px; border: none; background: transparent; }}
+            QScrollArea#canvasInspector QAbstractSpinBox::up-arrow {{ image: url("{up_arrow}"); width: 10px; height: 10px; }}
+            QScrollArea#canvasInspector QAbstractSpinBox::down-arrow {{ image: url("{down_arrow}"); width: 10px; height: 10px; }}
+            QTreeWidget#canvasNodeLibrary {{ background: transparent; border: none; outline: none; font-size: 12px; }}
+            QTreeWidget#canvasNodeLibrary::item {{ height: 30px; border: none; border-radius: 4px; padding: 0 4px; }}
+            QTreeWidget#canvasNodeLibrary::item:hover {{ background: {p['hover']}; }}
+            QTreeWidget#canvasNodeLibrary::item:selected {{ background: {p['accent_soft']}; color: {p['accent']}; }}
+            QTreeWidget#canvasNodeLibrary::branch {{ background: transparent; }}
             QWidget#aetherloomCanvasPage QSplitter::handle {{ background: transparent; width: 8px; }}
             QWidget#aetherloomCanvasPage QScrollBar:vertical {{ width: 8px; background: transparent; }}
             QWidget#aetherloomCanvasPage QScrollBar::handle:vertical {{ background: {p['border']}; border-radius: 4px; min-height: 26px; }}
         ''')
         self._refresh_placeholder_palette()
+
+        for item in self.scene.nodes.values():
+            if item.inline_proxy is not None:item.inline_proxy.widget().refresh()
 
         queue_panel = getattr(self.owner, '_canvas_workflow_queue_panel', None)
         if queue_panel is not None:

@@ -14,6 +14,10 @@ def capture(files, run_id, node, results):
     output=[]
     for raw in results:
         result=model.normalize_result(copy.deepcopy(raw))
+        if model.result_type(result) == 'batch':
+            result['items'] = capture(files, run_id, node, model.batch_items(result))
+            output.append(result)
+            continue
         source=result.get('path')
         # Image/video/audio inputs always continue to reference their input
         # assets (and the separate durable mask), never a copied library entry.

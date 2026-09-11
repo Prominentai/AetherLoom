@@ -10,7 +10,7 @@ def call_llm(
     system_prompt: str,
     user_text: str,
     temperature: float = 0.6,
-    timeout: int = 30,
+    timeout: int = 90,
     provider=None,
     max_tokens=None,
     web_search=None,

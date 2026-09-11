@@ -12,6 +12,8 @@ def execute(node, prepared, batches, stop):
         if 'value' not in batch:raise ValueError('请连接需要读取或重命名的文件 / 结果')
         if stop.is_set():raise SaveCanceled('文件处理已取消')
         source = batch['value']
+        if model.result_type(source) == 'batch':
+            raise ValueError('此节点处理普通文件列表，请先连接“Batch 转列表”或放在打包之前')
         physical = bool(source.get('path'))
         path = Path(source['path']) if physical else Path(source.get('name') or '文本结果.txt')
         if physical and not path.is_file():raise FileNotFoundError('文件不存在：' + str(path))

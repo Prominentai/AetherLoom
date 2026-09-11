@@ -167,79 +167,33 @@ class PresentationMixin:
                 return
             scale = max(0.5, min(scale, 1.8))
             self._ui_scale_factor = scale
-            base_font = getattr(self, '_base_font_point', 11.5)
             try:
                 font = QtGui.QFont(self.font())
             except Exception:
                 font = self.font()
             if font is not None:
                 try:
-                    font.setPointSizeF(max(8.5, base_font * scale))
+                    font.setPixelSize(13)
                     self.setFont(font)
                 except Exception:
                     pass
-            # Preserve the sidebar's proportions without shrinking styled labels.
+            # Stable logical-pixel navigation; only media sizing uses screen scale.
             try:
-                win_w = int(self.width() or 0)
-            except Exception:
-                win_w = 0
-            if not win_w or win_w < 200:
-                try:
-                    screen = QtWidgets.QApplication.primaryScreen()
-                    win_w = int(screen.availableGeometry().width()) if screen is not None else 1200
-                except Exception:
-                    win_w = 1200
-            base_frac = float(getattr(self, '_sidebar_base_frac', 0.12))
-            try:
-                collapsed = bool(getattr(self, '_sidebar_collapsed', False) or
-                                 getattr(self, '_sidebar_auto_collapsed', False))
-                override = getattr(self, '_sidebar_auto_override', None)
-                if override is not None:
-                    collapsed = override
-                self._sidebar_effective_collapsed = collapsed
-                button_style = Qt.ToolButtonIconOnly if collapsed else Qt.ToolButtonTextUnderIcon
-                base_height = getattr(self, '_sidebar_button_height_base', 56)
-                base_icon = getattr(self, '_sidebar_icon_px_base', 28)
-                button_height = max(44, int(base_height * scale))
-                icon_px = max(20, int(base_icon * scale))
-                if collapsed:
-                    button_height = max(44, icon_px + 20)
-                needed_button_width = 0
                 for btn in getattr(self, '_sidebar_buttons', []):
-                    if btn is None:
-                        continue
-                    btn.setToolButtonStyle(button_style)
-                    btn.setIconSize(QtCore.QSize(icon_px, icon_px))
-                    btn.ensurePolished()
-                    # Qt's hint includes the actual theme font, icon, text gap and
-                    # stylesheet padding. Scaling the font again underestimates it.
-                    hint = btn.sizeHint()
-                    btn.setFixedHeight(max(button_height, hint.height()))
-                    needed_button_width = max(needed_button_width, hint.width())
-                margins = self.sidebar_frame.layout().contentsMargins()
-                required_width = needed_button_width + margins.left() + margins.right()
-                required_width += self.sidebar_frame.frameWidth() * 2
-                if collapsed:
-                    collapsed_frac = float(getattr(self, '_sidebar_collapsed_min_frac', 0.04))
-                    sidebar_width = max(required_width, int(win_w * collapsed_frac),
-                                        int(getattr(self, '_sidebar_collapsed_min_px', 80)))
-                else:
-                    min_frac = float(getattr(self, '_sidebar_min_frac', 0.06))
-                    preferred_width = max(140, int(win_w * min_frac), int(win_w * base_frac * scale))
-                    max_frac = float(getattr(self, '_sidebar_max_fraction', 0.12))
-                    cap = min(int(getattr(self, '_sidebar_max_px', 420)), max(160, int(win_w * max_frac)))
-                    sidebar_width = max(required_width, min(preferred_width, cap))
-                self.sidebar_frame.setFixedWidth(sidebar_width)
-                if getattr(self, 'sidebar_toggle_btn', None):
-                    self.sidebar_toggle_btn.setText('\u203A' if collapsed else '\u2039')
+                    label = btn.property('navLabel') or btn.text().strip()
+                    btn.setProperty('navLabel', label)
+                    btn.setAccessibleName(label)
+                    btn.setText(label)
+                    btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+                    btn.setIconSize(QtCore.QSize(22, 22))
+                    btn.setFixedHeight(44)
+                self.sidebar_frame.setFixedWidth(64)
                 try:
                     # scale theme toggle button/icon alongside sidebar
                     toggle_btn = getattr(self, 'theme_toggle_btn', None)
                     if toggle_btn is not None:
-                        base_toggle = getattr(self, '_theme_toggle_size_base', 52)
-                        base_toggle_icon = getattr(self, '_theme_toggle_icon_px_base', 32)
-                        sz = max(42, int(base_toggle * scale))
-                        icon_sz = max(24, int(base_toggle_icon * scale))
+                        sz = 34
+                        icon_sz = 20
                         toggle_btn.setFixedSize(QtCore.QSize(sz, sz))
                         toggle_btn.setIconSize(QtCore.QSize(icon_sz, icon_sz))
                 except Exception:
@@ -263,16 +217,16 @@ class PresentationMixin:
             except Exception:
                 pass
             try:
-                min_w = max(240, int(self._preview_min_base.width() * scale))
-                min_h = max(180, int(self._preview_min_base.height() * scale))
+                min_w = 180
+                min_h = 200
                 for _lbl in (getattr(self, 'orig_view_grc', None), getattr(self, 'orig_view_sst', None)):
                     if _lbl is not None:
                         _lbl.setMinimumSize(min_w, min_h)
             except Exception:
                 pass
             try:
-                out_w = max(360, int(self._output_min_base.width() * scale))
-                out_h = max(260, int(self._output_min_base.height() * scale))
+                out_w = 180
+                out_h = 200
                 if hasattr(self, 'output_view') and self.output_view is not None:
                     self.output_view.setMinimumSize(out_w, out_h)
             except Exception:
@@ -292,7 +246,7 @@ class PresentationMixin:
             try:
                 if hasattr(self, 'theme_toggle_btn') and self.theme_toggle_btn is not None:
                     btn_h = max(28, int(34 * scale))
-                    self.theme_toggle_btn.setFixedHeight(btn_h)
+                    self.theme_toggle_btn.setFixedSize(34, 34)
                     f = QtGui.QFont(self.theme_toggle_btn.font())
                     f.setPointSizeF(max(8.0, 10.0 * scale))
                     self.theme_toggle_btn.setFont(f)
@@ -320,52 +274,6 @@ class PresentationMixin:
                 self._apply_control_group_font(scale)
             except Exception:
                 pass
-        except Exception:
-            pass
-
-
-    def _set_sidebar_collapsed(self, collapsed: bool):
-        """Collapse or expand the sidebar. When collapsed the sidebar shows icons only."""
-        try:
-            self._sidebar_collapsed = bool(collapsed)
-            self._sidebar_auto_override = (bool(collapsed) if
-                                           getattr(self, '_sidebar_auto_collapsed', False) else None)
-            # force immediate UI update
-            try:
-                self._apply_ui_scale(getattr(self, '_ui_scale_factor', 1.0))
-            except Exception:
-                # fallback adjustments if _apply_ui_scale fails
-                try:
-                    if self._sidebar_collapsed:
-                        icon_px = max(20, int(getattr(self, '_sidebar_icon_px_base', 28) * getattr(self, '_ui_scale_factor', 1.0)))
-                        min_w = max(int(getattr(self, '_sidebar_collapsed_min_px', 80)), int(icon_px + 20))
-                        try:
-                            self.sidebar_frame.setFixedWidth(min_w)
-                        except Exception:
-                            pass
-                        for btn in getattr(self, '_sidebar_buttons', []) or []:
-                            try:
-                                btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
-                            except Exception:
-                                pass
-                        try:
-                            if getattr(self, 'sidebar_toggle_btn', None):
-                                self.sidebar_toggle_btn.setText('\u203A')
-                        except Exception:
-                            pass
-                    else:
-                        for btn in getattr(self, '_sidebar_buttons', []) or []:
-                            try:
-                                btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-                            except Exception:
-                                pass
-                        try:
-                            if getattr(self, 'sidebar_toggle_btn', None):
-                                self.sidebar_toggle_btn.setText('\u2039')
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
         except Exception:
             pass
 
@@ -472,6 +380,9 @@ class PresentationMixin:
         if (getattr(self, '_closing', False) or self.isMaximized() or
                 self.isMinimized() or self.isFullScreen()):
             return
+        if QtWidgets.QApplication.mouseButtons() != QtCore.Qt.NoButton:
+            self._schedule_screen_refresh()
+            return
         geom = QtCore.QRect(self.geometry())
         handle = self.windowHandle()
         margins = handle.frameMargins() if handle is not None else QtCore.QMargins()
@@ -503,74 +414,99 @@ class PresentationMixin:
 
     def _ensure_screen_signal(self):
         try:
-            if getattr(self, '_screen_signal_bound', False):
-                return
             handle = self.windowHandle()
             if handle is None:
                 return
-            handle.screenChanged.connect(self._handle_screen_change)
-            self._screen_signal_bound = True
+            previous = getattr(self, '_screen_window', None)
+            if previous is not handle:
+                if previous is not None:
+                    try:
+                        previous.screenChanged.disconnect(self._handle_screen_change)
+                    except (TypeError, RuntimeError):
+                        pass
+                self._screen_window = handle
+                handle.screenChanged.connect(self._handle_screen_change)
+            if not getattr(self, '_screen_topology_bound', False):
+                app = QtWidgets.QApplication.instance()
+                app.screenAdded.connect(self._schedule_screen_refresh)
+                app.screenRemoved.connect(self._schedule_screen_refresh)
+                app.primaryScreenChanged.connect(self._schedule_screen_refresh)
+                self._screen_topology_bound = True
             self._bind_screen_geometry_signal(handle.screen())
         except Exception:
             pass
 
 
     def _handle_screen_change(self, screen):
-        if screen is None:
+        self._bind_screen_geometry_signal(screen)
+        self._schedule_screen_refresh()
+
+
+    def _bind_screen_geometry_signal(self, screen):
+        previous = getattr(self, '_bound_screen', None)
+        if previous is screen:
             return
+        for name in ('geometryChanged', 'availableGeometryChanged', 'logicalDotsPerInchChanged'):
+            if previous is not None:
+                try:
+                    getattr(previous, name).disconnect(self._handle_screen_geometry_changed)
+                except (TypeError, RuntimeError):
+                    pass
+            if screen is not None:
+                try:
+                    getattr(screen, name).connect(self._handle_screen_geometry_changed)
+                except (TypeError, RuntimeError):
+                    pass
+        self._bound_screen = screen
+
+
+    def _handle_screen_geometry_changed(self, *args):
+        self._schedule_screen_refresh()
+
+    def _schedule_screen_refresh(self, *args):
+        # Screen/DPI/native geometry events arrive in bursts. Wait for Qt's
+        # transition and titlebar dragging before correcting the window bounds.
+        self._geometry_fit_target = None
+        if getattr(self, '_closing', False):
+            return
+        timer = getattr(self, '_screen_refresh_timer', None)
+        if timer is None:
+            timer = self._screen_refresh_timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(150)
+            timer.timeout.connect(self._refresh_screen_layout)
+        timer.start()
+
+    def _refresh_screen_layout(self):
+        if getattr(self, '_closing', False):
+            return
+        if QtWidgets.QApplication.mouseButtons() != QtCore.Qt.NoButton:
+            self._schedule_screen_refresh()
+            return
+        screens = QtWidgets.QApplication.screens()
+        if not screens:
+            return
+        handle = self.windowHandle()
+        screen = handle.screen() if handle is not None else None
+        # Removed QScreen wrappers can outlive the native monitor briefly.
+        if screen not in screens:
+            screen = QtWidgets.QApplication.screenAt(self.frameGeometry().center())
+        if screen not in screens:
+            screen = QtWidgets.QApplication.primaryScreen() or screens[0]
         self._bind_screen_geometry_signal(screen)
         avail = screen.availableGeometry()
         self._active_screen_size = (avail.width(), avail.height())
         self._active_screen_name = screen.name()
         self._apply_ui_scale(self._calc_scale_from_avail(avail))
-        # Qt already adjusts logical geometry on a DPI transition. Scaling it a
-        # second time made repeated monitor moves grow/shrink the window.
+        # Qt owns DPI conversion; never scale the window's logical size again.
         self._ensure_visible_geometry(screen=screen)
 
-
-    def _bind_screen_geometry_signal(self, screen):
-        try:
-            if screen is None:
-                return
-            if getattr(self, '_bound_screen', None) is screen:
-                return
-            if getattr(self, '_bound_screen', None) is not None:
-                try:
-                    self._bound_screen.geometryChanged.disconnect(self._handle_screen_geometry_changed)
-                except Exception:
-                    pass
-                try:
-                    self._bound_screen.availableGeometryChanged.disconnect(self._handle_screen_geometry_changed)
-                except Exception:
-                    pass
-            self._bound_screen = screen
-            try:
-                screen.geometryChanged.connect(self._handle_screen_geometry_changed)
-            except Exception:
-                pass
-            try:
-                screen.availableGeometryChanged.connect(self._handle_screen_geometry_changed)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-
-    def _handle_screen_geometry_changed(self, *args):
-        try:
-            screen = getattr(self, '_bound_screen', None)
-            if screen is None:
-                handle = self.windowHandle()
-                screen = handle.screen() if handle is not None else None
-            if screen is None:
-                return
-            avail = screen.availableGeometry()
-            self._active_screen_size = (avail.width(), avail.height())
-            self._active_screen_name = screen.name()
-            self._apply_ui_scale(self._calc_scale_from_avail(avail))
-            self._ensure_visible_geometry(screen=screen)
-        except Exception:
-            pass
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.WindowStateChange:
+            # A minimized/maximized window may have changed monitors while its
+            # normal restore rectangle still points to the disconnected screen.
+            self._schedule_screen_refresh()
 
 
     def showEvent(self, event):
@@ -691,8 +627,9 @@ class PresentationMixin:
             else:
                 dark_css += detail_css
         from aetherloom_core.ui.menus import stylesheet as menu_stylesheet
-        return {'light': light_css + menu_stylesheet('light'),
-                'dark': dark_css + menu_stylesheet('dark')}
+        from aetherloom_core.ui.design import shell_stylesheet
+        return {'light': light_css + shell_stylesheet('light') + menu_stylesheet('light'),
+                'dark': dark_css + shell_stylesheet('dark') + menu_stylesheet('dark')}
 
 
     def _apply_theme(self, mode=None):
@@ -700,6 +637,8 @@ class PresentationMixin:
         if mode not in getattr(self, '_themes', {}):
             mode = 'dark'
         self._theme_mode = mode
+        from aetherloom_core.ui.themed_icons import refresh_navigation
+        refresh_navigation(self, current_dir, mode)
         if hasattr(self, '_decode_page'):
             self._decode_page.apply_theme()
         if hasattr(self, '_rh_dashboard'):
@@ -725,6 +664,10 @@ class PresentationMixin:
         if not hasattr(self, '_menu_theme'):
             self._menu_theme = MenuTheme(self)
         self._menu_theme.refresh()
+        from aetherloom_core.ui.popups import PopupTheme
+        if not hasattr(self, '_popup_theme'):
+            self._popup_theme = PopupTheme(self)
+        self._popup_theme.refresh()
         if hasattr(self, 'local_page'):
             from aetherloom_core.local_browser_ui import stylesheet as local_browser_stylesheet
             self.local_page.setStyleSheet(local_browser_stylesheet(mode))
@@ -816,11 +759,7 @@ class PresentationMixin:
                     break
             if icon_obj:
                 self.theme_toggle_btn.setIcon(icon_obj)
-                # larger icon for visibility
-                base_icon = getattr(self, '_theme_toggle_icon_px_base', 32)
-                scale = getattr(self, '_ui_scale_factor', 1.0)
-                icon_px = max(24, int(base_icon * scale))
-                self.theme_toggle_btn.setIconSize(QtCore.QSize(icon_px, icon_px))
+                self.theme_toggle_btn.setIconSize(QtCore.QSize(22, 22))
         except Exception:
             pass
 

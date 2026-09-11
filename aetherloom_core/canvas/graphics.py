@@ -8,9 +8,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from aetherloom_core.rh_ui import palette
 from aetherloom_core.media_limits import MAX_DECODE_PIXELS
 from aetherloom_core.rh_progress import draw_circular_progress, progress_percent, current_node_percent, progress_text
-from .model import input_ports, output_types
+from .model import input_ports
 from . import model
-from .appearance import tint, kind_color, draw_kind_icon
+from . import preview_data
+from .appearance import tint, kind_color, draw_kind_icon, bypass_colors
 
 
 KIND_NAMES = {'app': 'APP', 'image': '图像', 'video': '视频', 'audio': '音频',
@@ -18,6 +19,11 @@ KIND_NAMES = {'app': 'APP', 'image': '图像', 'video': '视频', 'audio': '音�
 KIND_NAMES.update(llm_model='LLM · API / Agent', vision_model='VISION · API / Agent',
                   image_model='IMAGE · API / Agent', edit_model='EDIT · API / Agent')
 KIND_NAMES.update(filename='读取文件名', rename='文件重命名')
+KIND_NAMES['list2batch'] = 'LIST → BATCH'
+KIND_NAMES['batch2list'] = 'BATCH → LIST'
+KIND_NAMES.update(merge_batch='MERGE BATCH', merge_list='MERGE LIST')
+KIND_NAMES['list_select'] = 'LIST SELECT'
+KIND_NAMES.update(batch_select='BATCH SELECT', rebatch='REBATCH')
 STATUS_NAMES = {'IDLE': '就绪', 'READY': '就绪', 'WAITING': '等待上游',
                 'SKIPPED': '已跳过', 'INTERRUPTED': '会话已中断',
                 'PENDING': '等待上游',
@@ -150,12 +156,21 @@ class ThumbnailCache(QtCore.QObject):
             self.pool.start(_ThumbnailWorker(key, self.signals))
         return None
 
+    def failed(self, path, kind):
+        try:
+            stat = os.stat(path)
+            key = (path, stat.st_size, stat.st_mtime_ns, kind)
+            return key in self.entries and self.entries[key] is None
+        except (OSError, TypeError):
+            return True
+
 
 class PortItem(QtWidgets.QGraphicsEllipseItem):
     def __init__(self, node, key, label, kind, output=False):
         super().__init__(-7, -7, 14, 14, node)
         self.node_item, self.key, self.output = node, key, output
         self.kind = kind
+        self.content_kind = kind[:-6] if kind.endswith('_input') else 'any' if kind == 'batch' else kind
         self.label = label
         self.connected = False
         self.setToolTip(('输出' if output else label) + ' · ' + str(kind))
@@ -167,18 +182,21 @@ class PortItem(QtWidgets.QGraphicsEllipseItem):
     def refresh_connection(self, connected=False):
         self.connected = bool(connected)
         colors = self.node_item.canvas_scene.colors
-        color = QtGui.QColor(kind_color(self.kind,colors))
+        color = QtGui.QColor(kind_color(self.content_kind,colors))
         self.setBrush(color if self.output or connected else QtGui.QColor(colors['surface']))
         self.setPen(QtGui.QPen(color, 2))
         if self.output:
-            self.setToolTip('结果输出 · 拖到输入端口或空白处添加下游节点')
+            detail = ('每个 Batch 作为一组独立传递；多个 Batch 不会自动合并。' if self.kind == 'batch'
+                      else '同类型结果组成 List，保持返回顺序；不会自动转为 Batch。')
+            self.setToolTip(self.label + ' · 拖到输入端口或空白处添加下游节点\n' + detail)
         else:
             has_internal = self.node_item.node['kind'] in {'app'} | set(model.MODEL_KINDS) or (self.node_item.node['kind'] == 'rename' and self.key != 'value')
             if connected:
                 detail = ('已连接：运行时覆盖内部值；' if has_internal else '已连接上游结果；') + '拖到其他端口可改接，拖到空白处可断开'
             else:
                 detail = '未连接：使用节点内部值；也可拖动连接输出' if has_internal else '等待连接上游结果；此输入为必填'
-            self.setToolTip(self.label + ' · ' + str(self.kind) + '\n' + detail)
+            type_label = model.port_type_name(self.kind)
+            self.setToolTip(self.label + ' · ' + type_label + '\n' + detail)
 
 
 class NodeItem(QtWidgets.QGraphicsObject):
@@ -197,28 +215,59 @@ class NodeItem(QtWidgets.QGraphicsObject):
         self.setFlags(self.ItemIsMovable | self.ItemIsSelectable | self.ItemSendsGeometryChanges)
         self.setAcceptHoverEvents(True)
         self.setCacheMode(self.NoCache)
-        self.setToolTip('拖动右下角调整大小；双击结果可在设置面板中查看。')
+        self.setToolTip('单击选中；双击标题打开完整设置，双击结果查看预览。拖动右下角调整大小。')
         ports = input_ports(node)
+        outputs = model.visible_output_ports(node, getattr(scene, '_document', {}).get('edges', []))
         # Reserve a result area below all input ports, including Apps with many
         # fields; result arrival then needs no geometry rebuild or moving ports.
-        self.minimum_height = self.minimum_size(node)[1]
+        self.minimum_height = max(self.minimum_size(node)[1], 96 + 22 * len(outputs))
         self.width, self.height = self.normalized_size(node.get('size'))
         for index, port in enumerate(ports):
             item = PortItem(self, port['key'], port['label'], port['type'])
-            item.setPos(0, 66 + index * 25)
+            item.setPos(0, 48 + index * 22)
             self.ports[port['key']] = item
-        types = output_types(node)
-        self.output = PortItem(self, 'output', '结果', next(iter(types)) if len(types) == 1 else 'any', True)
-        self.output.setPos(self.width, 66)
+        self.outputs = {}
+        for index, port in enumerate(outputs):
+            item = PortItem(self, port['key'], port['label'], port['type'], True)
+            item.setPos(self.width, self.output_y(index))
+            self.outputs[port['key']] = item
+        for index, port in enumerate(self.outputs.values()):port.setPos(self.width, self.output_y(index))
+        self.output = self.outputs.get('output', next(iter(self.outputs.values())))
+        self.refresh_output_counts()
         self.setPos(float(node.get('x', 0)), float(node.get('y', 0)))
+        self.refresh_bypass()
+
+    def refresh_bypass(self):
+        ignored = bool(self.node.get('bypass'))
+        if self.inline_proxy is not None:
+            self.inline_proxy.setOpacity(.6 if ignored else 1)
+        hint = ('已忽略：执行时跳过此节点，按现有旁路规则传递输入。\n'
+                '右键取消“忽略节点”可恢复；正在执行的快照不受修改影响。\n' if ignored else '')
+        self.setToolTip(hint + str(self.node.get('error') or self.node.get('message') or '')
+                        + '\n当前节点进度\n' + progress_text(self.node.get('node_progress'))
+                        + '\n标题右侧 ▶ 运行此节点；双击标题、右键或 Alt+Enter 打开完整设置。'
+                        + '\n双击结果查看预览，拖动右下角调整大小。')
 
     @classmethod
     def minimum_size(cls, node):
-        return cls.WIDTH, max(224 if node['kind'] in ('image', 'video') else 192,
-                              198 + 25 * max(0, len(input_ports(node)) - 1))
+        ports = max(len(input_ports(node)), len(model.output_ports(node)))
+        # Inputs and outputs occupy independent columns in the same slot area.
+        height = max(128, 96 + 22 * ports)
+        if node['kind'] == 'text':height = max(height, 220)
+        if node['kind'] in ('image', 'video', 'audio'):
+            height = max(height, 350)
+        return 300 if node['kind'] != 'text' else cls.WIDTH, height
+
+    def source_port(self, edge):
+        return self.outputs.get(edge.get('output', 'output'), self.output)
+
+    def refresh_output_counts(self):
+        results = self.node.get('results') or []
+        self.output_counts = {kind: len(values) for kind, values in model.result_groups(results).items()}
+        self.output_counts['output'] = len(results)
 
     def normalized_size(self, size):
-        defaults = (self.WIDTH, self.minimum_height)
+        defaults = (self.minimum_size(self.node)[0], max(self.minimum_height, getattr(self, 'form_minimum_height', 0)))
         if not isinstance(size, (list, tuple)) or len(size) != 2:
             return defaults
         result = []
@@ -234,23 +283,43 @@ class NodeItem(QtWidgets.QGraphicsObject):
             return
         self.prepareGeometryChange()
         self.width, self.height = width, height
-        self.output.setPos(width, 66)
+        for index, port in enumerate(self.outputs.values()):port.setPos(width, self.output_y(index))
         self.canvas_scene.update_edges(self.node['id'])
         self.layout_inline()
         self.update()
 
     def ensure_inline(self):
-        if self.node['kind']!='text' or not hasattr(self.canvas_scene.parent(),'histories'):return
+        if not hasattr(self.canvas_scene.parent(),'histories'):return
         if self.inline_proxy is None:
             from .inline_text import InlineText
+            from .inline_controls import InlineControls
             self.inline_proxy=QtWidgets.QGraphicsProxyWidget(self)
-            self.inline_proxy.setWidget(InlineText(self))
+            self.inline_proxy.setWidget(InlineText(self) if self.node['kind']=='text' else InlineControls(self))
             self.inline_proxy.setFocusPolicy(QtCore.Qt.StrongFocus)
+            self.refresh_bypass()
         self.layout_inline()
 
     def layout_inline(self):
         if self.inline_proxy is not None:
-            self.inline_proxy.setGeometry(self.content_rect().adjusted(1,1,-1,-1))
+            self.inline_proxy.setGeometry(self.controls_rect().adjusted(1,1,-1,-1))
+        self.align_input_ports()
+
+    def inline_ports(self):
+        if self.has_inline_form():
+            widget = self.inline_proxy.widget()
+            if hasattr(widget, 'port_positions'):return widget.port_positions()
+        return {}
+
+    def align_input_ports(self):
+        positions = self.inline_ports()
+        moved = False
+        for index, (key, port) in enumerate(self.ports.items()):
+            y = self.inline_proxy.pos().y() + positions[key] if key in positions else 48 + index * 22
+            if abs(port.pos().y() - y) > .1:
+                port.setPos(0, y);moved = True
+        if moved:
+            self.canvas_scene.update_edges(self.node['id'])
+            self.update()
 
     def resize_rect(self):
         return QtCore.QRectF(self.width - 22, self.height - 22, 22, 22)
@@ -298,19 +367,19 @@ class NodeItem(QtWidgets.QGraphicsObject):
 
     def shape(self):
         shape = QtGui.QPainterPath()
-        shape.addRoundedRect(QtCore.QRectF(0, 0, self.width, self.height), 12, 12)
-        if self.node.get('decode_settings', {}).get('enabled'):
+        shape.addRoundedRect(QtCore.QRectF(0, 0, self.width, self.height), 6, 6)
+        if (model.supports_local_decode(self.node) and self.node.get('decode_settings', {}).get('enabled')):
             shape.addRect(self.decode_rect())
         return shape
 
     def decode_rect(self):
-        return QtCore.QRectF(self.width + 10, 94, 86, 27)
+        return QtCore.QRectF(self.width + 10, max(94, 76 + 22 * (len(self.outputs) - 1)), 86, 27)
 
     def run_rect(self):
-        return QtCore.QRectF(self.width - 66, 13, 52, 25)
+        return QtCore.QRectF(self.width - 32, 4, 26, 24)
 
     def progress_rect(self):
-        return QtCore.QRectF(self.run_rect().center().x() - 22, 2, 44, 44)
+        return QtCore.QRectF(self.run_rect().center().x() - 12, 4, 24, 24)
 
     def shows_progress(self):
         return (self.node['kind'] in {'app'} | set(model.MODEL_KINDS) and node_is_active(self.node)
@@ -322,38 +391,45 @@ class NodeItem(QtWidgets.QGraphicsObject):
         return super().itemChange(change, value)
 
     def input_preview(self):
-        if self.node['kind'] == 'text':return True
-        if self.node['kind'] not in model.MEDIA:return False
-        paths = self.node.get('params', {}).get('files') or []
-        return (not self.node.get('results') or self.node.get('stale') or self.node.get('_ui_stale')
-                or len(paths) == 1 and not os.path.isdir(paths[0]))
+        return preview_data.has_inputs(self.node)
 
     def result_count(self):
-        if self.input_preview():
-            return 1 if self.node['kind'] == 'text' else len(self.node.get('params', {}).get('files') or [])
-        results = self.node.get('results') or []
-        if results:
-            return len(results)
-        if self.node['kind'] in model.MEDIA:
-            return len(self.node.get('params', {}).get('files') or [])
-        return 0
+        return preview_data.count(self.node, 'input' if self.input_preview() else 'results')
 
     def result_at(self, index):
-        if self.node['kind'] == 'text':return {'text': self.node.get('params', {}).get('text', ''), 'type': 'text'}
-        results = [] if self.input_preview() else self.node.get('results') or []
-        value = results[index] if results else {'path': self.node['params']['files'][index], 'type': self.node['kind']}
-        if (not results and self.node['kind']=='image' and not self.node.get('stale') and not self.node.get('_ui_stale')):
-            generated=next((r for r in self.node.get('results',[]) if isinstance(r,dict)
-                and r.get('source_path')==value.get('path') and r.get('composite_path')),None)
-            if generated and os.path.isfile(generated['composite_path']):
-                value={'path':generated['composite_path'],'type':'image'}
-        if not results and os.path.isdir(value.get('path', '')):
-            return {'text': '文件夹 · ' + os.path.basename(value['path']) + '\n运行时读取匹配文件', 'type': 'text'}
-        return value if isinstance(value, dict) else {'path': str(value)}
+        return preview_data.item_at(self.node, index, 'input' if self.input_preview() else 'results')
+
+    def output_y(self, index):
+        return 48 + index * 22
+
+    def has_inline_form(self):
+        return (self.inline_proxy is not None and self.inline_proxy.isVisible()
+                and self.inline_proxy.widget() is not None)
+
+    def output_column_width(self):
+        # A narrow right column keeps sockets independent of widget rows.
+        # Its width depends on labels, never on the number of output sockets.
+        font = QtGui.QFont('Microsoft YaHei UI');font.setPixelSize(12)
+        metrics = QtGui.QFontMetrics(font)
+        return max(40, min(112, max((metrics.horizontalAdvance(p.label) for p in self.outputs.values()), default=0) + 22))
+
+    def body_rect(self):
+        rows = max(len(self.ports), len(self.outputs))
+        top = 40 if self.has_inline_form() else 42 + 22 * rows
+        return QtCore.QRectF(12, top, self.width - 24, self.height - top - 29)
+
+    def controls_rect(self):
+        rect = self.body_rect()
+        rect.setRight(rect.right() - self.output_column_width())
+        if self.node['kind'] != 'text' and self.result_count():
+            rect.setHeight(max(80, rect.height() - max(100, min(220, rect.height() * .42)) - 8))
+        return rect
 
     def content_rect(self):
-        top = 83 + 25 * max(0, len(self.ports) - 1)
-        return QtCore.QRectF(14, top, self.width - 28, self.height - top - 43)
+        rect = self.body_rect()
+        if self.inline_proxy is not None and self.inline_proxy.isVisible():
+            rect.setTop(max(self.controls_rect().bottom() + 8, self.output_y(len(self.outputs) - 1) + 18))
+        return rect
 
     def result_layout(self):
         """Constant-size visible slice even when a node has thousands of results."""
@@ -374,8 +450,10 @@ class NodeItem(QtWidgets.QGraphicsObject):
 
     def result_grid(self):
         content = self.content_rect()
-        return (min(3, max(1, int((content.width() + 6) // 146))),
-                min(2, max(1, int((content.height() - 18) // 96))))
+        count = max(1, self.result_count())
+        columns = min(count, 3, max(1, int((content.width() + 6) // 146)))
+        rows = min((count + columns - 1) // columns, 2, max(1, int((content.height() - 18) // 120)))
+        return columns, rows
 
     def result_nav_rects(self):
         content = self.content_rect()
@@ -389,9 +467,17 @@ class NodeItem(QtWidgets.QGraphicsObject):
         painter.save()
         painter.setClipRect(content)
         painter.setPen(QtGui.QColor(p['muted']))
-        painter.drawText(QtCore.QRectF(content.x(), content.y(), content.width() - 54, 20),
-                         QtCore.Qt.AlignVCenter, ('输入预览' if self.input_preview() else '结果') + f' {self.result_count()} · {page + 1}/{pages}')
-        for rect, label, enabled in zip(self.result_nav_rects(), ('‹', '›'), (page > 0, page + 1 < pages)):
+        running = node_is_active(self.node) and self.node.get('status') in RUNNING_STATES | WAITING_STATES
+        grouped_heading = ('List / Batch' if 0 < self.output_counts.get('batch', 0) < self.output_counts['output'] else 'Batch 内容')
+        heading = '输入预览' if self.input_preview() else '上次结果' if self.node.get('stale') or self.node.get('_ui_stale') or running else grouped_heading if preview_data.has_batches(self.node) else '运行结果'
+        if self.output_counts.get('batch') and not self.input_preview():
+            heading = (('上次结果 · ' if self.node.get('stale') or self.node.get('_ui_stale') or running else '')
+                       + f"List {self.output_counts['output']} 项 · Batch {self.output_counts['batch']} 组 · 预览")
+        heading_rect = QtCore.QRectF(content.x(), content.y(), max(0, content.width() - (54 if pages > 1 else 0)), 20)
+        heading += f' · {self.result_count()} 项' + (f' · {page + 1}/{pages}' if pages > 1 else '')
+        painter.drawText(heading_rect, QtCore.Qt.AlignVCenter,
+                         painter.fontMetrics().elidedText(heading, QtCore.Qt.ElideRight, int(heading_rect.width())))
+        for rect, label, enabled in (zip(self.result_nav_rects(), ('‹', '›'), (page > 0, page + 1 < pages)) if pages > 1 else []):
             painter.setPen(QtCore.Qt.NoPen)
             painter.setBrush(QtGui.QColor(p['accent_soft'] if enabled else p['surface']))
             painter.drawRoundedRect(rect, 4, 4)
@@ -399,18 +485,18 @@ class NodeItem(QtWidgets.QGraphicsObject):
             painter.drawText(rect, QtCore.Qt.AlignCenter, label)
         for index, rect in tiles:
             result = self.result_at(index)
-            kind = model.result_type(result)
+            kind = preview_data.kind_of(result)
             path = result.get('path') or result.get('file_path') or ''
             painter.setPen(QtGui.QPen(QtGui.QColor(p['border']), 1))
             painter.setBrush(QtGui.QColor(p['input']))
             painter.drawRoundedRect(rect,8,8)
             painter.save()
             painter.setClipRect(rect.adjusted(4, 2, -4, -2), QtCore.Qt.IntersectClip)
-            title = f"{index + 1} · {KIND_NAMES.get(kind, '数值' if kind in ('scalar', 'number') else '文件')}"
+            title = result.get('_batch_label', f'{index + 1}') + f" · {preview_data.TYPE_NAMES.get(kind, '文件')}"
             painter.fillRect(QtCore.QRectF(rect.x()+1,rect.y()+1,rect.width()-2,18),tint(kind_color(kind,p),18))
             painter.setPen(QtGui.QColor(kind_color(kind,p)))
             painter.drawText(rect.adjusted(6, 0, -6, 0), QtCore.Qt.AlignTop, title)
-            body = rect.adjusted(6, 19, -6, -5)
+            body = rect.adjusted(6, 22, -6, -23 if path else -6)
             thumb = None
             if (kind in ('image', 'video') and path and index in self.canvas_scene.thumbnail_slots.get(self.node['id'], ())):
                 thumb = self.canvas_scene.thumbnails.get(path, kind)
@@ -423,8 +509,17 @@ class NodeItem(QtWidgets.QGraphicsObject):
                 preview=self.canvas_scene.thumbnails.get(path,'text') if kind=='text' and path and self.node['id'] in self.canvas_scene.thumbnail_nodes else None
                 text = str(preview if preview is not None else result['text'] if 'text' in result else result['value'] if 'value' in result
                            else os.path.basename(path) or result.get('url') or '暂无本地预览')
+                if path and kind in ('image', 'video', 'audio'):
+                    text = ('文件已移动或删除' if not os.path.isfile(path) else
+                            '双击查看音频' if kind == 'audio' else
+                            '无法生成预览 · 双击打开' if self.canvas_scene.thumbnails.failed(path, kind) else '正在加载预览…')
+                if not text and kind == 'text':text = '空文本'
                 painter.setPen(QtGui.QColor(p['text']))
-                painter.drawText(body, QtCore.Qt.AlignVCenter | QtCore.Qt.TextWordWrap, text[:240])
+                painter.drawText(body, (QtCore.Qt.AlignTop if kind in {'text'} | model.VALUE_TYPES else QtCore.Qt.AlignVCenter) | QtCore.Qt.TextWordWrap, text[:240])
+            if path:
+                painter.setPen(QtGui.QColor(p['muted']))
+                painter.drawText(QtCore.QRectF(rect.x()+6,rect.bottom()-21,rect.width()-12,18), QtCore.Qt.AlignVCenter,
+                                 painter.fontMetrics().elidedText(preview_data.title_of(result), QtCore.Qt.ElideMiddle, max(1,int(rect.width()-12))))
             painter.restore()
         painter.restore()
 
@@ -433,41 +528,41 @@ class NodeItem(QtWidgets.QGraphicsObject):
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         selected = self.isSelected()
         state_color = node_state_color(self.node, p)
-        accent='#9c83c9' if self.node.get('bypass') else kind_color(self.node['kind'],p)
-        border = state_color or (p['accent'] if selected else p['muted'] if self._hovered else p['border'])
-        width = (3.3 if selected else 2.3) if state_color else (2 if selected else 1)
+        ignored = bool(self.node.get('bypass'))
+        bypass_accent, bypass_body, bypass_text = bypass_colors(p)
+        accent = bypass_accent if ignored else kind_color(self.node['kind'],p)
+        border = state_color or (accent if ignored else p['accent'] if selected else p['muted'] if self._hovered else p['border'])
+        width = (3.3 if selected else 2.3) if state_color else (2.3 if ignored else 2 if selected else 1)
         body=QtCore.QRectF(0,0,self.width,self.height)
         lod=QtWidgets.QStyleOptionGraphicsItem.levelOfDetailFromTransform(painter.worldTransform())
         if lod>=.42:
             painter.setPen(QtCore.Qt.NoPen);painter.setBrush(tint('#000000',22 if QtGui.QColor(p['canvas']).lightness()<128 else 10))
-            painter.drawRoundedRect(body.translated(0,4),12,12)
+            painter.drawRoundedRect(body.translated(0,2),6,6)
             if selected or state_color:
-                painter.setBrush(QtCore.Qt.NoBrush);painter.setPen(QtGui.QPen(tint(border,35),6))
-                painter.drawRoundedRect(body.adjusted(-1,-1,1,1),13,13)
-        painter.setPen(QtGui.QPen(QtGui.QColor(border), width))
-        painter.setBrush(QtGui.QColor(p['surface']))
-        painter.drawRoundedRect(body,12,12)
+                painter.setBrush(QtCore.Qt.NoBrush);painter.setPen(QtGui.QPen(tint(border,25),3))
+                painter.drawRoundedRect(body.adjusted(-1,-1,1,1),7,7)
+        if ignored and selected:
+            painter.setBrush(QtCore.Qt.NoBrush)
+            painter.setPen(QtGui.QPen(QtGui.QColor(p['accent']), 1.5))
+            painter.drawRoundedRect(body.adjusted(-4,-4,4,4),9,9)
+        outline = QtGui.QPen(QtGui.QColor(border), width,
+                            QtCore.Qt.DashLine if ignored and not state_color else QtCore.Qt.SolidLine)
+        outline.setCosmetic(ignored)
+        painter.setPen(outline)
+        painter.setBrush(tint(bypass_body, 220) if ignored else QtGui.QColor(p['surface']))
+        painter.drawRoundedRect(body,6,6)
         painter.save()
-        clip=QtGui.QPainterPath();clip.addRoundedRect(body.adjusted(1,1,-1,-1),11,11);painter.setClipPath(clip)
-        gradient=QtGui.QLinearGradient(0,0,self.width,48)
-        gradient.setColorAt(0,tint(accent,26));gradient.setColorAt(1,tint(accent,5))
-        painter.fillRect(QtCore.QRectF(0,0,self.width,48),gradient);painter.restore()
-        painter.setPen(QtCore.Qt.NoPen);painter.setBrush(tint(accent,28))
-        painter.drawRoundedRect(QtCore.QRectF(12,10,28,28),7,7)
-        draw_kind_icon(painter,QtCore.QRectF(16,14,20,20),self.node['kind'],accent)
-        font = painter.font()
-        font.setPixelSize(13)
-        font.setBold(True)
-        painter.setFont(font)
+        clip=QtGui.QPainterPath();clip.addRoundedRect(body.adjusted(1,1,-1,-1),5,5);painter.setClipPath(clip)
+        painter.fillRect(QtCore.QRectF(0,0,self.width,32),tint(accent,24));painter.restore()
+        draw_kind_icon(painter,QtCore.QRectF(10,8,16,16),self.node['kind'],accent)
+        font = QtGui.QFont('Microsoft YaHei UI')
+        font.setStyleStrategy(QtGui.QFont.PreferAntialias)
+        font.setPixelSize(14);font.setBold(True);painter.setFont(font)
         painter.setPen(QtGui.QColor(p['text']))
-        title = model.node_title(self.node)
-        painter.drawText(QtCore.QRectF(50,7,self.width-127,21),QtCore.Qt.AlignVCenter,
-                         QtGui.QFontMetrics(font).elidedText(title,QtCore.Qt.ElideRight,int(self.width-128)))
-        if lod<.35:
-            return
-        font.setPixelSize(9);font.setBold(False);painter.setFont(font);painter.setPen(QtGui.QColor(accent))
-        subtitle=KIND_NAMES.get(self.node['kind'],'节点')+(' · 已忽略' if self.node.get('bypass') else '')
-        painter.drawText(QtCore.QRectF(50,28,self.width-127,13),QtCore.Qt.AlignVCenter,subtitle)
+        title = ('已忽略 · ' if ignored else '') + model.node_title(self.node)
+        painter.drawText(QtCore.QRectF(34,3,self.width-72,26),QtCore.Qt.AlignVCenter,
+                         QtGui.QFontMetrics(font).elidedText(title,QtCore.Qt.ElideRight,int(self.width-72)))
+        if lod<.35:return
         show_progress = self.shows_progress()
         if show_progress:
             current = current_node_percent(self.node.get('status'), self.node.get('node_progress'))
@@ -481,26 +576,36 @@ class NodeItem(QtWidgets.QGraphicsObject):
             font.setPixelSize(11)
             painter.setFont(font)
             painter.setPen(QtGui.QColor(p['accent']))
-            painter.drawText(self.run_rect(), QtCore.Qt.AlignCenter, '运行')
+            triangle = QtGui.QPolygonF([QtCore.QPointF(self.width-22,10),
+                                       QtCore.QPointF(self.width-22,22),QtCore.QPointF(self.width-13,16)])
+            painter.setBrush(QtGui.QColor(p['accent']));painter.drawPolygon(triangle)
         font.setBold(False)
-        font.setPixelSize(11)
+        font.setPixelSize(12)
         painter.setFont(font)
         painter.setPen(QtGui.QColor(p['border']))
-        painter.drawLine(QtCore.QPointF(14, 48), QtCore.QPointF(self.width - 14, 48))
+        painter.drawLine(QtCore.QPointF(1, 32), QtCore.QPointF(self.width - 1, 32))
         painter.setPen(QtGui.QColor(p['muted']))
+        aligned_ports = self.inline_ports()
         for index, port in enumerate(input_ports(self.node)):
+            if port['key'] in aligned_ports:continue
             connected = self.ports[port['key']].connected
-            if index%2==0:
-                painter.fillRect(QtCore.QRectF(8,54+index*25,self.width-16,24),tint(p['input'],110))
             painter.setPen(QtGui.QColor(p['text'] if connected else p['muted']))
-            internal = self.node['kind'] in {'app'} | set(model.MODEL_KINDS) or self.node['kind'] == 'rename' and port['key'] != 'value'
-            label = str(port['label']) + (' · 已连接' if connected else ' · 内部值' if internal else ' · 待连接')
-            label_width = int(self.width - 78)
-            painter.drawText(QtCore.QRectF(14, 54 + index * 25, label_width, 24), QtCore.Qt.AlignVCenter,
+            label = str(port['label'])
+            label_width = int((self.width - 36) / 2)
+            painter.drawText(QtCore.QRectF(14, 37 + index * 22, label_width, 22), QtCore.Qt.AlignVCenter,
                              QtGui.QFontMetrics(font).elidedText(label, QtCore.Qt.ElideRight, label_width - 5))
-        painter.drawText(QtCore.QRectF(self.width - 60, 54, 44, 24), QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, '结果')
+        for index, port in enumerate(self.outputs.values()):
+            label = port.label
+            painter.setPen(QtGui.QColor(p['muted']))
+            label_width = self.output_column_width() - 18 if self.has_inline_form() else self.width / 2 - 18
+            painter.drawText(QtCore.QRectF(self.width - 14 - label_width, port.pos().y() - 11, label_width, 22),
+                             QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter,
+                             QtGui.QFontMetrics(font).elidedText(label, QtCore.Qt.ElideRight, int(label_width)))
         content = self.content_rect()
-        if content.height() > 20 and (self.inline_proxy is None or not self.inline_proxy.isVisible()):
+        painter.save()
+        if ignored:
+            painter.setOpacity(painter.opacity() * (.75 if selected else .5))
+        if content.height() > 20:
             if self.result_count():
                 self._paint_results(painter)
             else:
@@ -529,29 +634,34 @@ class NodeItem(QtWidgets.QGraphicsObject):
                         text_rect.setTop(center.y()+2)
                         alignment=QtCore.Qt.AlignHCenter|QtCore.Qt.AlignTop|QtCore.Qt.TextWordWrap
                 painter.drawText(text_rect,alignment,summary[:150])
+        painter.restore()
         status = str(self.node.get('status') or 'IDLE')
         color = state_color or (p['success'] if status in ('SUCCESS', 'REUSED') else p['muted'])
         painter.setPen(QtGui.QColor(color))
         label = '等待调度' if status == 'PENDING' and node_is_active(self.node) else STATUS_NAMES.get(status, status)
+        if ignored and not state_color:
+            color = accent
+            label = '已忽略 · 旁路传递'
         progress = self.node.get('progress')
         if not show_progress and progress is not None and status in RUNNING_STATES:
             label += f'  {progress_percent(status, progress)}%'
         if (self.node.get('_ui_stale') or self.node.get('stale')) and (self.node.get('results') or status not in ('IDLE', 'READY')):
             label += ' · 参数已修改'
         painter.setPen(QtGui.QPen(tint(p['border'],150),1))
-        painter.drawLine(QtCore.QPointF(14,self.height-40),QtCore.QPointF(self.width-14,self.height-40))
-        painter.setPen(QtCore.Qt.NoPen);painter.setBrush(QtGui.QColor(color));painter.drawEllipse(QtCore.QPointF(18,self.height-22),3,3)
+        painter.drawLine(QtCore.QPointF(14,self.height-26),QtCore.QPointF(self.width-14,self.height-26))
+        painter.setPen(QtCore.Qt.NoPen);painter.setBrush(QtGui.QColor(color));painter.drawEllipse(QtCore.QPointF(18,self.height-13),3,3)
         painter.setPen(QtGui.QColor(color))
-        painter.drawText(QtCore.QRectF(29,self.height-34,self.width-59,24),QtCore.Qt.AlignVCenter,
+        painter.drawText(QtCore.QRectF(29,self.height-25,self.width-59,24),QtCore.Qt.AlignVCenter,
                          QtGui.QFontMetrics(font).elidedText(label,QtCore.Qt.ElideRight,int(self.width-59)))
         painter.setPen(QtGui.QPen(QtGui.QColor(p['accent'] if self._resize_hover or self._resize_start else p['muted']),
                                  1.5, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
         for offset in (7, 12):
             painter.drawLine(QtCore.QPointF(self.width - 6 - offset, self.height - 6),
                              QtCore.QPointF(self.width - 6, self.height - 6 - offset))
-        if self.node.get('decode_settings', {}).get('enabled'):
+        if (model.supports_local_decode(self.node) and self.node.get('decode_settings', {}).get('enabled')):
             painter.setPen(QtGui.QPen(QtGui.QColor(p['border']), 1))
-            painter.drawLine(QtCore.QPointF(self.width, 107), QtCore.QPointF(self.width + 10, 107))
+            center_y = self.decode_rect().center().y()
+            painter.drawLine(QtCore.QPointF(self.width, center_y), QtCore.QPointF(self.width + 10, center_y))
             painter.setBrush(QtGui.QColor(p['accent_soft']))
             painter.drawRoundedRect(self.decode_rect(), 4, 4)
             painter.setPen(QtGui.QColor(p['accent']))
@@ -566,7 +676,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
             event.accept();return
         if event.button() == QtCore.Qt.LeftButton and self.result_count():
             tiles, page, pages = self.result_layout()
-            for step, rect in zip((-1, 1), self.result_nav_rects()):
+            for step, rect in (zip((-1, 1), self.result_nav_rects()) if pages > 1 else []):
                 if rect.contains(event.pos()):
                     if 0 <= page + step < pages:
                         # Capacity can change while resizing; keep a result anchor.
@@ -592,7 +702,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
             self.canvas_scene.run_requested.emit(self.node['id'], False)
             event.accept()
             return
-        if event.button() == QtCore.Qt.LeftButton and self.node.get('decode_settings', {}).get('enabled') and self.decode_rect().contains(event.pos()):
+        if event.button() == QtCore.Qt.LeftButton and (model.supports_local_decode(self.node) and self.node.get('decode_settings', {}).get('enabled')) and self.decode_rect().contains(event.pos()):
             self.canvas_scene.clearSelection()
             self.setSelected(True)
             self.canvas_scene.decode_requested.emit(self.node['id'])
@@ -615,12 +725,16 @@ class NodeItem(QtWidgets.QGraphicsObject):
         super().mouseMoveEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        if event.button() == QtCore.Qt.LeftButton and self.node.get('results'):
+        if event.button() == QtCore.Qt.LeftButton and self.result_count():
             for index, rect in self.result_layout()[0]:
                 if rect.contains(event.pos()):
                     self.canvas_scene.result_requested.emit(self.node['id'], index)
                     event.accept()
                     return
+        if event.button() == QtCore.Qt.LeftButton:
+            self.canvas_scene.settings_requested.emit(self.node['id'])
+            event.accept()
+            return
         super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -660,6 +774,13 @@ class EdgeItem(QtWidgets.QGraphicsPathItem):
         self.setZValue(-1)
         self.update_path()
 
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.canvas_scene.settings_requested.emit(self.edge['id'])
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def update_path(self):
         scene, edge = self.canvas_scene, self.edge
         if edge['source'] not in scene.nodes or edge['target'] not in scene.nodes:
@@ -667,7 +788,7 @@ class EdgeItem(QtWidgets.QGraphicsPathItem):
         target = scene.nodes[edge['target']].ports.get(edge['input'])
         if target is None:
             return
-        start, end = scene.nodes[edge['source']].output.scenePos(), target.scenePos()
+        start, end = scene.nodes[edge['source']].source_port(edge).scenePos(), target.scenePos()
         path = connection_path(start, end)
         self.setPath(path)
         fraction = min(.2, 20 / max(1, path.length()))
@@ -678,8 +799,9 @@ class EdgeItem(QtWidgets.QGraphicsPathItem):
             angle=math.atan2(mid.y()-previous.y(),mid.x()-previous.x())
             self._direction=QtGui.QPolygonF([mid+QtCore.QPointF(-6*math.cos(angle)+3*math.sin(angle),-6*math.sin(angle)-3*math.cos(angle)),
                                             mid,mid+QtCore.QPointF(-6*math.cos(angle)-3*math.sin(angle),-6*math.sin(angle)+3*math.cos(angle))])
-        self.setToolTip({'first': '首个匹配结果', 'index': '指定结果', 'all': '全部匹配结果逐项运行'}.get(edge.get('mode'), '首个匹配结果')
-                        + '\n拖动端点可改接，释放到空白处断开')
+        self.setToolTip((model.ITEM_OUTPUT_TYPES.get(edge.get('output'), '') + ' List\n' if edge.get('output') in model.ITEM_OUTPUT_TYPES else '')
+                        + {'first': '首个匹配结果', 'index': '指定结果', 'all': '全部匹配结果逐项运行'}.get(edge.get('mode'), '首个匹配结果')
+                        + '\n双击打开连线设置；拖动端点可改接，释放到空白处断开')
 
     def shape(self):
         stroker = QtGui.QPainterPathStroker()
@@ -696,7 +818,7 @@ class EdgeItem(QtWidgets.QGraphicsPathItem):
         p=self.canvas_scene.colors
         target=self.canvas_scene.nodes.get(self.edge['target'])
         port=target.ports.get(self.edge['input']) if target else None
-        color=p['accent'] if highlighted else kind_color(port.kind if port else 'any',p)
+        color=p['accent'] if highlighted else kind_color(port.content_kind if port else 'any',p)
         if highlighted:
             painter.setPen(QtGui.QPen(tint(color,30),8,QtCore.Qt.SolidLine,QtCore.Qt.RoundCap));painter.drawPath(self.path())
         painter.setPen(QtGui.QPen(tint(color,255 if highlighted else 150),
@@ -732,17 +854,18 @@ class CanvasScene(QtWidgets.QGraphicsScene):
     nodes_moved = QtCore.pyqtSignal(dict)
     nodes_resized = QtCore.pyqtSignal(dict)
     result_requested = QtCore.pyqtSignal(str, int)
-    connect_requested = QtCore.pyqtSignal(str, str, str)
+    connect_requested = QtCore.pyqtSignal(str, str, str, str)
     run_requested = QtCore.pyqtSignal(str, bool)
     decode_requested = QtCore.pyqtSignal(str)
     mask_requested = QtCore.pyqtSignal(str)
     options_requested = QtCore.pyqtSignal(str)
+    settings_requested = QtCore.pyqtSignal(str)
     option_changed = QtCore.pyqtSignal(str,str,object)
     batch_option_changed = QtCore.pyqtSignal(object,str,object)
     run_selection_requested = QtCore.pyqtSignal(object,bool)
     action_requested = QtCore.pyqtSignal(str)
     add_requested = QtCore.pyqtSignal(object, object)
-    reconnect_requested = QtCore.pyqtSignal(str, str, str, str)
+    reconnect_requested = QtCore.pyqtSignal(str, str, str, str, str)
     disconnect_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -766,6 +889,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
         self.setSceneRect(-20000, -20000, 40000, 40000)
 
     def set_document(self, doc):
+        model.sync_dynamic_inputs(doc)
         self.cancel_resize()
         self.cancel_link()
         self.clear()
@@ -784,11 +908,59 @@ class CanvasScene(QtWidgets.QGraphicsScene):
         self.refresh_ports()
 
     def refresh_ports(self):
+        input_colors, output_colors = model.port_colors(self._document)
         connected = {(item.edge['target'], item.edge['input']) for item in self.edges.values()}
         for node_id, node in self.nodes.items():
-            node.output.refresh_connection()
+            input_labels = {port['key']: port['label'] for port in model.input_ports(node.node)}
+            for port in node.outputs.values():
+                port.content_kind = output_colors.get((node_id,port.key),'any')
+                port.label = model.port_type_name(port.content_kind)
+                port.refresh_connection()
             for key, port in node.ports.items():
+                port.label = input_labels.get(key, port.label)
+                port.content_kind = input_colors.get((node_id,key),'any')
                 port.refresh_connection((node_id, key) in connected)
+
+    def sync_connections(self, doc):
+        """Reconcile sockets and edges without destroying existing node widgets."""
+        self.cancel_link()
+        self._document = doc
+        desired_edges = {edge['id']: edge for edge in doc.get('edges', [])}
+        outgoing = {}
+        for edge in desired_edges.values():outgoing.setdefault(edge['source'], []).append(edge)
+        for key in set(self.edges) - desired_edges.keys():
+            self.removeItem(self.edges.pop(key))
+        for node in doc.get('nodes', []):
+            item = self.nodes[node['id']]
+            item.node = node
+            desired = {port['key']: port for port in model.input_ports(node)}
+            for key in set(item.ports) - desired.keys():
+                port = item.ports.pop(key)
+                self.removeItem(port);port.setParentItem(None)
+            for key, spec in desired.items():
+                if key not in item.ports:
+                    item.ports[key] = PortItem(item, key, spec['label'], spec['type'])
+                item.ports[key].kind = spec['type']
+            item.ports = {key: item.ports[key] for key in desired}
+            desired_outputs = {port['key']: port for port in model.visible_output_ports(node, outgoing.get(node['id'], []))}
+            for key in set(item.outputs) - desired_outputs.keys():
+                port = item.outputs.pop(key)
+                self.removeItem(port);port.setParentItem(None)
+            for key, spec in desired_outputs.items():
+                if key not in item.outputs:
+                    item.outputs[key] = PortItem(item, key, spec['label'], spec['type'], True)
+                item.outputs[key].kind = spec['type']
+            item.outputs = {key: item.outputs[key] for key in desired_outputs}
+            item.output = item.outputs.get('output', next(iter(item.outputs.values())))
+            item.minimum_height = max(item.minimum_size(node)[1], 96 + 22 * len(item.outputs))
+        for key, edge in desired_edges.items():
+            if key not in self.edges:
+                item = EdgeItem(edge, self);self.edges[key] = item;self.addItem(item)
+            else:
+                self.edges[key].edge = edge
+        self.refresh_nodes(doc)
+        for item in self.nodes.values():item.layout_inline()
+        for edge in self.edges.values():edge.update_path()
 
     def refresh_nodes(self, doc):
         self._document = doc
@@ -799,13 +971,15 @@ class CanvasScene(QtWidgets.QGraphicsScene):
                 if item.inline_proxy is not None:item.inline_proxy.widget().refresh()
                 if item._resize_start is None:
                     item.set_size(node.get('size'))
-                types = output_types(node)
-                item.output.kind = next(iter(types)) if len(types) == 1 else 'any'
-                item.output.refresh_connection()
-                item.setToolTip(str(node.get('error') or node.get('message') or '')
-                                + '\n当前节点进度\n' + progress_text(node.get('node_progress'))
-                                + '\n拖动右下角调整大小；双击结果可在设置面板中查看。')
+                for port in item.ports.values():port.refresh_connection(port.connected)
+                for port in model.output_ports(node, legacy=True):
+                    if port['key'] in item.outputs:
+                        item.outputs[port['key']].kind = port['type']
+                        item.outputs[port['key']].refresh_connection()
+                item.refresh_output_counts()
+                item.refresh_bypass()
                 item.update()
+        self.refresh_ports()
 
     def cancel_resize(self):
         if self._resizing_node is not None:
@@ -854,27 +1028,28 @@ class CanvasScene(QtWidgets.QGraphicsScene):
         if self._rewire_edge is not None:
             edge = self._rewire_edge.edge
             if self._rewire_end == 'source' and port.output:
-                return port.node_item.node['id'], edge['target'], edge['input']
+                return port.node_item.node['id'], edge['target'], edge['input'], port.key
             if self._rewire_end == 'target' and not port.output:
-                return edge['source'], port.node_item.node['id'], port.key
+                return edge['source'], port.node_item.node['id'], port.key, edge.get('output', 'output')
             return None
         if first.output == port.output:
             return None
         source, target = (first, port) if first.output else (port, first)
-        return source.node_item.node['id'], target.node_item.node['id'], target.key
+        return source.node_item.node['id'], target.node_item.node['id'], target.key, source.key
 
     def _valid_connection(self, port):
         connection = self._connection_to(port)
         if connection is None:
             return False
-        source, target, key = connection
+        source, target, key, output = connection
         old_id = self._rewire_edge.edge['id'] if self._rewire_edge is not None else None
         graph = dict(self._document, edges=[edge for edge in self._document['edges']
                      if edge['id'] != old_id and (edge['target'], edge['input']) != (target, key)])
         try:
-            model.connect(graph, source, target, key)
+            model.connect(graph, source, target, key, output=output)
             return True
-        except ValueError:
+        except ValueError as error:
+            if port is not None:port.setToolTip(str(error))
             return False
 
     def _animate_link(self):
@@ -893,7 +1068,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
             event.accept();return
         edge, end = self._edge_endpoint_at(event.scenePos()) if event.button() == QtCore.Qt.LeftButton else (None, None)
         if edge is not None:
-            port = (self.nodes[edge.edge['source']].output if end == 'source'
+            port = (self.nodes[edge.edge['source']].source_port(edge.edge) if end == 'source'
                     else self.nodes[edge.edge['target']].ports[edge.edge['input']])
         if event.button() == QtCore.Qt.LeftButton and port is not None:
             self._link_port = port
@@ -917,7 +1092,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
             if self._rewire_edge is not None:
                 edge = self._rewire_edge.edge
                 anchor = (self.nodes[edge['target']].ports[edge['input']] if self._rewire_end == 'source'
-                          else self.nodes[edge['source']].output)
+                          else self.nodes[edge['source']].source_port(edge))
             candidate = self._port_at(event.scenePos())
             if candidate is not self._hover_port:
                 if self._hover_port is not None:
@@ -1012,6 +1187,9 @@ class CanvasScene(QtWidgets.QGraphicsScene):
         selected=sorted([i.node for i in self.selectedItems() if isinstance(i,NodeItem)],key=lambda n:n['id'])
         if selected:
             from .selection import options
+            menu.addAction('打开批量设置' if len(selected)>1 else '打开节点设置',
+                           lambda:self.settings_requested.emit(selected[0]['id']))
+            menu.addSeparator()
             if len(selected)>1:menu.addSection(f'已选中 {len(selected)} 个节点')
             for option in options(selected):
                 label=option['label']+('（部分开启）' if option['mixed'] else '')
@@ -1099,6 +1277,9 @@ class CanvasView(QtWidgets.QGraphicsView):
         self._adapt_timer.setSingleShot(True)
         self._adapt_timer.setInterval(80)
         self._adapt_timer.timeout.connect(self._adapt_view)
+        self._inline_timer = QtCore.QTimer(self)
+        self._inline_timer.setSingleShot(True)
+        self._inline_timer.timeout.connect(self._sync_inline)
         self.view_changed.connect(self.remember_view)
         self.centerOn(0, 0)
 
@@ -1137,17 +1318,18 @@ class CanvasView(QtWidgets.QGraphicsView):
 
     def _screen_changed(self, screen):
         if screen is not self._observed_screen:
-            if self._observed_screen is not None:
-                try:
-                    self._observed_screen.availableGeometryChanged.disconnect(self.schedule_adapt)
-                except (TypeError, RuntimeError):
-                    pass
+            for name in ('availableGeometryChanged', 'geometryChanged', 'logicalDotsPerInchChanged'):
+                if self._observed_screen is not None:
+                    try:
+                        getattr(self._observed_screen, name).disconnect(self.schedule_adapt)
+                    except (TypeError, RuntimeError):
+                        pass
+                if screen is not None:
+                    getattr(screen, name).connect(self.schedule_adapt)
             self._observed_screen = screen
-            if screen is not None:
-                screen.availableGeometryChanged.connect(self.schedule_adapt)
         self.schedule_adapt()
 
-    def schedule_adapt(self):
+    def schedule_adapt(self, *args):
         if self._view_reference is None:
             self.remember_view()
         self._adapt_timer.start()
@@ -1165,7 +1347,8 @@ class CanvasView(QtWidgets.QGraphicsView):
     def _adapt_view(self):
         if not self.isVisible():
             return
-        if self._pan is not None or self.scene().mouseGrabberItem() is not None or self.scene()._link_port is not None:
+        if (self._pan is not None or self.scene().mouseGrabberItem() is not None or
+                self.scene()._link_port is not None or QtWidgets.QApplication.mouseButtons() != QtCore.Qt.NoButton):
             self._adapt_timer.start()
             return
         if self._view_reference is None or not self.scene().nodes:
@@ -1178,9 +1361,11 @@ class CanvasView(QtWidgets.QGraphicsView):
             return
         # Panel/window layout changes preserve the viewport origin. Recentering
         # on selection changes moves the scene beneath a pending node drag.
-        target = max(.12, min(3.5, zoom * min(screen.width() / size.width(), screen.height() / size.height())))
+        target = max(.12, min(3.5, zoom * self._screen_scale(screen) / self._screen_scale(size)))
         if abs(self.transform().m11() - target) < .0001:
-            self.remember_view()
+            # Keep the original zoom basis across automatic transitions, even
+            # at the zoom limits. Round trips must not compound aspect ratios.
+            self._view_reference = (size, zoom, self.mapToScene(self.available_rect().center().toPoint()))
             return
         self._adapting = True
         try:
@@ -1204,17 +1389,22 @@ class CanvasView(QtWidgets.QGraphicsView):
         if (isinstance(previous, (list, tuple)) and len(previous) == 2 and
                 all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0 for v in previous)):
             screen = self.screen_size()
-            zoom = max(.12, min(3.5, zoom * min(screen.width() / previous[0], screen.height() / previous[1])))
+            zoom = max(.12, min(3.5, zoom * self._screen_scale(screen) /
+                                self._screen_scale(QtCore.QSizeF(*previous))))
         self.resetTransform();self.scale(zoom, zoom)
         self.centerOn(float(state.get('x', 0)), float(state.get('y', 0)))
         self.remember_view()
 
     def initial_node_size(self, node):
         screen = self.screen_size()
-        factor = min(screen.width() / 1920, screen.height() / 1080)
+        factor = self._screen_scale(screen)
         width, height = NodeItem.minimum_size(node)
         return [round(max(width, min(480, 350 * factor))),
-                round(max(height, min(360, 270 * factor)))]
+                round(max(height, min(height * 1.2, height * factor)))]
+
+    @staticmethod
+    def _screen_scale(size):
+        return max(.01, min(size.width() / 1920, size.height() / 1080))
 
     def reveal_nodes(self, identities):
         self._adapt_timer.stop()
@@ -1240,6 +1430,11 @@ class CanvasView(QtWidgets.QGraphicsView):
         self.viewport().update(dirty.intersected(self.viewport().rect()))
 
     def wheelEvent(self, event):
+        if not event.modifiers() & QtCore.Qt.ControlModifier and any(
+                isinstance(item, QtWidgets.QGraphicsProxyWidget) for item in self.items(event.pos())):
+            # Scroll long forms/text inside the node. Ctrl+wheel still zooms the canvas.
+            super().wheelEvent(event)
+            return
         factor = 1.15 ** (event.angleDelta().y() / 120)
         zoom = self.transform().m11() * factor
         if .12 <= zoom <= 3.5:
@@ -1247,13 +1442,35 @@ class CanvasView(QtWidgets.QGraphicsView):
             self.view_changed.emit()
         event.accept()
 
-    def paintEvent(self, event):
+    def _sync_inline(self):
+        """Build at most two forms per event turn and keep a bounded working set."""
+        if not hasattr(self.scene().parent(), 'histories'):return
         center=self.mapToScene(self.viewport().rect().center())
-        candidates=[item for item in self.items(self.viewport().rect()) if isinstance(item,NodeItem) and item.node['kind']=='text'] if self.transform().m11()>=.42 else []
-        visible_text=set(sorted(candidates,key=lambda item:(item.scenePos()-center).manhattanLength())[:64])
-        for item in visible_text:item.ensure_inline()
-        for item in self.scene().nodes.values():
-            if item.inline_proxy is not None:item.inline_proxy.setVisible(item in visible_text)
+        candidates=[item for item in self.items(self.viewport().rect()) if isinstance(item,NodeItem)] if self.transform().m11()>=.42 else []
+        ordered=sorted(candidates,key=lambda item:(item.scenePos()-center).manhattanLength())[:32]
+        visible=set(ordered)
+        pending=[item for item in ordered if item.inline_proxy is None]
+        for item in pending[:2]:item.ensure_inline()
+        retained=[item for item in self.scene().nodes.values() if item.inline_proxy is not None]
+        for item in retained:
+            proxy=item.inline_proxy
+            focused=self.scene().focusItem() is proxy
+            proxy.setVisible(item in visible or focused)
+            item.layout_inline()
+        # Preserve focused editors, open model pickers and text-tool jobs.
+        excess=max(0,len(retained)-48)
+        for item in retained:
+            if not excess:break
+            proxy=item.inline_proxy;widget=proxy.widget()
+            if item in visible or self.scene().focusItem() is proxy or getattr(widget,'_job',None):continue
+            if any(getattr(w,'dialog',None) is not None for w in widget.findChildren(QtWidgets.QWidget)):continue
+            if hasattr(widget,'validate') and not widget.validate():continue
+            if hasattr(widget,'inspector'):widget.inspector.changed.disconnect()
+            proxy.hide();proxy.deleteLater();item.inline_proxy=None;excess-=1
+        if pending[2:]:self._inline_timer.start(0)
+
+    def paintEvent(self, event):
+        if not self._inline_timer.isActive():self._inline_timer.start(0)
         # Large zoomed-out canvases use simple node bodies. In a large viewport
         # only the nearest 64 visible media nodes decode, preventing LRU churn.
         if self.transform().m11() < .42:

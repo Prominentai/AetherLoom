@@ -6,7 +6,8 @@ class ModelSelector(QtWidgets.QDialog):
     def __init__(self, owner, title, names, selected):
         super().__init__(owner)
         self.setWindowTitle('选择模型 · ' + title)
-        self.setStyleSheet(owner.api_page.styleSheet().replace('#api_page_root', ''))
+        self._theme_source = lambda: owner.api_page.styleSheet().replace('#api_page_root', '')
+        self.setStyleSheet(self._theme_source())
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(20,20,20,20);layout.setSpacing(12)
         self.search = QtWidgets.QLineEdit();self.search.setClearButtonEnabled(True)

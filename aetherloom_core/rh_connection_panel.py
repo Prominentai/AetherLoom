@@ -100,48 +100,65 @@ def button(text, action, parent=None):
     return value
 
 
+class _StatusLabel(QtWidgets.QLabel):
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+        self.setVisible(bool(text))
+
+    def clear(self):
+        self.setText('')
+
+
 class KeyRow(QtWidgets.QFrame):
     def __init__(self, panel, key, index, count, draft=None):
         super().__init__()
         self.panel, self.key, self.host = panel, key, panel.settings.host
         self.setObjectName('rhKeyRow')
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-        editor = QtWidgets.QHBoxLayout()
-        order = QtWidgets.QLabel(f'{index + 1:02}')
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(9)
+        header = QtWidgets.QHBoxLayout();header.setSpacing(6)
+        order = QtWidgets.QLabel(f'{index + 1:02}  ' + ('首选密钥' if index == 0 else '备用密钥'))
         order.setObjectName('rhKeyOrder')
         order.setToolTip('首选密钥' if index == 0 else '重试顺序 ' + str(index + 1))
-        editor.addWidget(order)
+        header.addWidget(order);header.addStretch(1)
+        self.up = button('↑', lambda: panel.move(self, -1))
+        self.down = button('↓', lambda: panel.move(self, 1))
+        self.up.setToolTip('提前使用此 Key'); self.down.setToolTip('延后使用此 Key')
+        self.up.setAccessibleName('提前使用此密钥');self.down.setAccessibleName('延后使用此密钥')
+        self.up.setEnabled(index > 0); self.down.setEnabled(index < count - 1)
+        for control in (self.up, self.down):
+            control.setObjectName('rhKeyMove');control.setFixedSize(28, 26);header.addWidget(control)
+        self.remove_button = button('删除', lambda: panel.remove(self))
+        self.remove_button.setObjectName('rhKeyDelete');header.addWidget(self.remove_button)
+        layout.addLayout(header)
+        editor = QtWidgets.QHBoxLayout();editor.setSpacing(6)
         self.edit = QtWidgets.QLineEdit(key if draft is None else draft)
         self.edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self.edit.setMinimumWidth(60)
         self.edit.setAccessibleName(f'第 {index + 1} 个 API Key')
         editor.addWidget(self.edit, 1)
         self.reveal = button('显示', self._reveal)
+        self.reveal.setAccessibleName('显示或隐藏此密钥')
         self.reveal.setCheckable(True)
         editor.addWidget(self.reveal)
         self.save = button('保存', self._save)
         self.save.setObjectName('rhConnectionPrimary')
         editor.addWidget(self.save)
         layout.addLayout(editor)
-        actions = QtWidgets.QHBoxLayout()
+        actions = QtWidgets.QHBoxLayout();actions.setSpacing(10)
         self.query = button('查询账户', self._query)
-        actions.addWidget(self.query)
-        actions.addStretch(1)
-        self.up = button('↑', lambda: panel.move(self, -1))
-        self.down = button('↓', lambda: panel.move(self, 1))
-        self.up.setToolTip('提前使用此 Key'); self.down.setToolTip('延后使用此 Key')
-        self.up.setEnabled(index > 0); self.down.setEnabled(index < count - 1)
-        actions.addWidget(self.up); actions.addWidget(self.down)
-        actions.addWidget(button('删除', lambda: panel.remove(self)))
-        layout.addLayout(actions)
+        self.query.setObjectName('rhAccountQuery')
         self.account = QtWidgets.QLabel()
         self.account.setObjectName('rhAccountResult')
         self.account.setTextFormat(QtCore.Qt.PlainText)
         self.account.setWordWrap(True)
         self.account.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        layout.addWidget(self.account)
+        self.account.setMinimumWidth(0)
+        self.account.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        actions.addWidget(self.account, 1);actions.addWidget(self.query)
+        layout.addLayout(actions)
         self.edit.textChanged.connect(self._edited)
         self.edit.returnPressed.connect(self._save)
         self._edited()
@@ -171,9 +188,9 @@ class KeyRow(QtWidgets.QFrame):
         self.query.setText('查询中…' if pending else '刷新账户' if result else '查询账户')
         self._edited()
         suffix = '尾号 ' + self.key[-4:] if len(self.key) > 8 else '短密钥'
-        text = (result[1] + '\n' + suffix + ' · 更新于 ' + time.strftime('%H:%M:%S', time.localtime(result[2]))
-                if result else suffix + ' · 尚未查询账户')
+        text = result[1] if result else suffix + (' · 查询中…' if pending else ' · 未查询账户')
         self.account.setText(text)
+        self.account.setToolTip(text + ('\n' + suffix + ' · 更新于 ' + time.strftime('%H:%M:%S', time.localtime(result[2])) if result else ''))
         self.account.setProperty('failed', bool(result and not result[0]))
         self.account.style().unpolish(self.account); self.account.style().polish(self.account)
 
@@ -192,46 +209,79 @@ class RhConnectionPanel(QtWidgets.QWidget):
         self._new_drafts = {}
         self.setObjectName('rhConnectionPanel')
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        title = QtWidgets.QLabel('RunningHub 连接')
+        layout.setSizeConstraint(QtWidgets.QLayout.SetNoConstraint)
+        layout.setContentsMargins(22, 20, 22, 18);layout.setSpacing(12)
+        title = QtWidgets.QLabel('连接设置')
         title.setObjectName('rhConnectionTitle'); layout.addWidget(title)
-        hint = QtWidgets.QLabel('主页与画布同步 · .cn / .ai 密钥分别管理')
-        hint.setObjectName('rhConnectionMuted'); hint.setWordWrap(True); layout.addWidget(hint)
-        self.host_combo = _HostCombo()
+        self.hint = QtWidgets.QLabel('RunningHub · 应用主页与画布共用连接')
+        self.hint.setObjectName('rhConnectionMuted'); self.hint.setWordWrap(True); layout.addWidget(self.hint)
+        self.host_combo = _HostCombo(self)
+        self.site_buttons = []
+        self.site_group = QtWidgets.QButtonGroup(self);self.site_group.setExclusive(True)
+        self.site_frame = QtWidgets.QFrame();self.site_frame.setObjectName('rhSiteSelector')
+        site_row = QtWidgets.QHBoxLayout(self.site_frame);site_row.setContentsMargins(4, 4, 4, 4);site_row.setSpacing(4)
         for host, unused, label in SITES:
             self.host_combo.addItem(label, host)
-        layout.addWidget(self.host_combo)
+            index = len(self.site_buttons)
+            site_button = button('中文站 · .cn' if index == 0 else '国际站 · .ai',
+                                 lambda checked=False, i=index:self.host_combo.setCurrentIndex(i))
+            site_button.setObjectName('rhSiteButton');site_button.setCheckable(True)
+            site_button.setToolTip(host + '\n此站点的密钥独立保存')
+            self.site_group.addButton(site_button,index);self.site_buttons.append(site_button);site_row.addWidget(site_button,1)
+        self.host_combo.hide()
+        layout.addWidget(self.site_frame)
+        self.site_note = QtWidgets.QLabel('.cn 与 .ai 的 API Key 不通用，请在对应站点添加。')
+        self.site_note.setObjectName('rhConnectionMuted');self.site_note.setWordWrap(True);layout.addWidget(self.site_note)
+        key_heading = QtWidgets.QHBoxLayout()
+        key_title = QtWidgets.QLabel('API 密钥');key_title.setObjectName('rhConnectionSection');key_heading.addWidget(key_title)
+        key_heading.addStretch(1)
         self.summary = QtWidgets.QLabel()
-        self.summary.setObjectName('rhConnectionMuted'); self.summary.setWordWrap(True); layout.addWidget(self.summary)
+        self.summary.setObjectName('rhConnectionMuted');key_heading.addWidget(self.summary)
+        layout.addLayout(key_heading)
         self.scroll = QtWidgets.QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.container = QtWidgets.QWidget()
         self.items = QtWidgets.QVBoxLayout(self.container)
-        self.items.setContentsMargins(0, 0, 3, 0); self.items.setSpacing(10)
-        self.scroll.setWidget(self.container); layout.addWidget(self.scroll, 1)
-        self.empty = QtWidgets.QLabel('本站还没有 API Key\n在下方粘贴密钥即可添加')
+        self.items.setContentsMargins(0, 0, 5, 0); self.items.setSpacing(10)
+        self.scroll.setWidget(self.container)
+        self.key_stack = QtWidgets.QStackedWidget();self.key_stack.setMinimumHeight(90)
+        self.key_stack.addWidget(self.scroll)
+        self.empty = QtWidgets.QLabel('尚未添加密钥\n\n粘贴本站 API Key，建立第一个连接')
         self.empty.setAlignment(QtCore.Qt.AlignCenter); self.empty.setObjectName('rhConnectionMuted')
-        layout.addWidget(self.empty)
+        self.empty.setWordWrap(True);self.key_stack.addWidget(self.empty);layout.addWidget(self.key_stack,1)
+        self.add_frame = QtWidgets.QFrame();self.add_frame.setObjectName('rhConnectionAdd')
+        add_layout = QtWidgets.QVBoxLayout(self.add_frame);add_layout.setContentsMargins(12,12,12,12);add_layout.setSpacing(8)
+        add_header = QtWidgets.QHBoxLayout()
+        add_title = QtWidgets.QLabel('添加密钥');add_title.setObjectName('rhConnectionSection');add_header.addWidget(add_title)
+        add_header.addStretch(1)
+        self.get_key_button = button('获取 API Key ↗', lambda: QtGui.QDesktopServices.openUrl(
+            QtCore.QUrl(self.settings.host + '/enterprise-api/sharedApi')))
+        self.get_key_button.setObjectName('rhConnectionLink');add_header.addWidget(self.get_key_button);add_layout.addLayout(add_header)
         self.key_edit = QtWidgets.QLineEdit()
         self.key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.key_edit.setPlaceholderText('粘贴新 Key；多个 Key 可用空格分隔')
+        self.key_edit.setPlaceholderText('粘贴本站 API Key')
+        self.key_edit.setAccessibleName('待添加的 API Key')
         self.key_edit.setClearButtonEnabled(True)
         self.key_edit.setMinimumWidth(60)
         entry = QtWidgets.QHBoxLayout(); entry.addWidget(self.key_edit, 1)
         self.reveal_button = button('显示', self._reveal_new)
         self.reveal_button.setCheckable(True)
+        self.reveal_button.setAccessibleName('显示或隐藏待添加的密钥')
         entry.addWidget(self.reveal_button)
-        entry.addWidget(button('添加', self._add)); layout.addLayout(entry)
-        self.message = QtWidgets.QLabel()
+        self.add_button = button('添加', self._add);self.add_button.setObjectName('rhConnectionPrimary')
+        entry.addWidget(self.add_button);add_layout.addLayout(entry)
+        self.add_hint = QtWidgets.QLabel('可批量粘贴，用空格或逗号分隔；按列表顺序尝试。')
+        self.add_hint.setWordWrap(True);self.add_hint.setObjectName('rhConnectionMuted');add_layout.addWidget(self.add_hint)
+        layout.addWidget(self.add_frame)
+        self.message = _StatusLabel()
         self.message.setTextFormat(QtCore.Qt.PlainText); self.message.setWordWrap(True)
+        self.message.setObjectName('rhConnectionMessage')
+        self.message.setMaximumHeight(42)
+        self.message.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        self.message.setVisible(False)
         layout.addWidget(self.message)
-        footer = QtWidgets.QHBoxLayout()
-        footer.addWidget(button('获取 API Key', lambda: QtGui.QDesktopServices.openUrl(
-            QtCore.QUrl(self.settings.host + '/enterprise-api/sharedApi'))))
-        footer.addStretch(1)
-        layout.addLayout(footer)
         self.key_edit.returnPressed.connect(self._add)
         self.host_combo.currentIndexChanged.connect(self._host_changed)
         settings.changed.connect(self._refresh)
@@ -267,13 +317,14 @@ class RhConnectionPanel(QtWidgets.QWidget):
         blocker = QtCore.QSignalBlocker(self.host_combo)
         self.host_combo.setCurrentIndex(self.host_combo.findData(self.settings.host))
         del blocker
+        for index, site_button in enumerate(self.site_buttons):site_button.setChecked(index == self.host_combo.currentIndex())
         keys = self.settings.keys_for()
-        self.summary.setText(f'{len(keys)} 个密钥 · 按列表顺序重试，第一项优先')
+        self.summary.setText(f'{len(keys)} 个 · 从上到下依次尝试')
         for index, key in enumerate(keys):
             row = KeyRow(self, key, index, len(keys), self._drafts.get(identity(self.settings.host, key)))
             self.items.addWidget(row); self.rows.append(row)
         self.items.addStretch(1)
-        self.empty.setVisible(not keys); self.scroll.setVisible(bool(keys))
+        self.key_stack.setCurrentIndex(0 if keys else 1)
 
     def _accounts_changed(self):
         for row in self.rows:
@@ -322,6 +373,31 @@ class RhConnectionPanel(QtWidgets.QWidget):
     def showEvent(self, event):
         self.apply_theme(); super().showEvent(event)
 
+    def minimumSizeHint(self):
+        # Allow the first resize to reach compact mode instead of forcing the
+        # expanded layout's minimum height back onto the native dialog.
+        return QtCore.QSize(280, 320)
+
+    def hasHeightForWidth(self):
+        return False
+
+    def heightForWidth(self, width):
+        # The key list scrolls inside the available height; wrapped row labels
+        # must not make QDialog resize itself to the list's preferred height.
+        return -1
+
+    def resizeEvent(self, event):
+        compact = self.height() < 520
+        self.hint.setVisible(not compact)
+        self.add_hint.setVisible(not compact)
+        self.layout().setContentsMargins(14 if compact else 22, 12 if compact else 20, 14 if compact else 22, 12 if compact else 18)
+        self.layout().setSpacing(6 if compact else 12)
+        self.site_note.setText('.cn / .ai 密钥独立，互不通用。' if compact else '.cn 与 .ai 的 API Key 不通用，请在对应站点添加。')
+        self.key_stack.setMinimumHeight(64 if compact else 90)
+        self.add_frame.layout().setContentsMargins(10 if compact else 12, 8 if compact else 12, 10 if compact else 12, 8 if compact else 12)
+        self.add_frame.layout().setSpacing(6 if compact else 8)
+        super().resizeEvent(event)
+
     def hideEvent(self, event):
         self.reveal_button.setChecked(False); self._reveal_new()
         for row in self.rows:
@@ -336,8 +412,13 @@ class RhConnectionPanel(QtWidgets.QWidget):
             QWidget#rhConnectionPanel QWidget {{ color: {p['text']}; font-size: 12px; }}
             QWidget#rhConnectionPanel QScrollArea, QWidget#rhConnectionPanel QScrollArea QWidget {{ background: transparent; }}
             QWidget#rhConnectionPanel QFrame#rhKeyRow {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 10px; }}
+            QWidget#rhConnectionPanel QFrame#rhConnectionAdd {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 12px; }}
+            QWidget#rhConnectionPanel QFrame#rhSiteSelector {{ background: {p['input']}; border: 1px solid {p['border']}; border-radius: 11px; }}
             QWidget#rhConnectionPanel QLabel {{ background: transparent; border: none; padding: 0; }}
-            QWidget#rhConnectionPanel QLabel#rhConnectionTitle {{ font-size: 20px; font-weight: 700; }}
+            QWidget#rhConnectionPanel QLabel#rhConnectionTitle {{ font-size: 23px; font-weight: 700; }}
+            QWidget#rhConnectionPanel QLabel#rhConnectionSection {{ font-size: 13px; font-weight: 600; }}
+            QWidget#rhConnectionPanel QLabel#rhKeyOrder {{ color: {p['accent']}; font-weight: 600; }}
+            QWidget#rhConnectionPanel QLabel#rhConnectionMessage {{ color: {p['accent']}; padding: 2px 0; }}
             QWidget#rhConnectionPanel QLabel#rhConnectionMuted, QWidget#rhConnectionPanel QLabel#rhAccountResult {{ color: {p['muted']}; }}
             QWidget#rhConnectionPanel QLabel[failed="true"] {{ color: {p['danger']}; }}
             QWidget#rhConnectionPanel QLineEdit, QWidget#rhConnectionPanel QComboBox {{ background: {p['input']}; color: {p['text']}; border: 1px solid {p['border']}; border-radius: 6px; padding: 8px 6px; selection-background-color: {p['accent']}; }}
@@ -346,5 +427,18 @@ class RhConnectionPanel(QtWidgets.QWidget):
             QWidget#rhConnectionPanel QPushButton:hover {{ background: {p['hover']}; border-color: {p['accent']}; }}
             QWidget#rhConnectionPanel QPushButton:disabled {{ color: {p['muted']}; background: {p['input']}; }}
             QWidget#rhConnectionPanel QPushButton#rhConnectionPrimary:enabled {{ background: {p['accent']}; color: white; border: 1px solid {p['accent']}; }}
+            QWidget#rhConnectionPanel QPushButton#rhSiteButton {{ background: transparent; border: none; padding: 9px 6px; border-radius: 8px; color: {p['muted']}; }}
+            QWidget#rhConnectionPanel QPushButton#rhSiteButton:checked {{ background: {p['accent_soft']}; color: {p['accent']}; font-weight: 600; }}
+            QWidget#rhConnectionPanel QPushButton#rhSiteButton:hover {{ color: {p['text']}; background: {p['hover']}; }}
+            QWidget#rhConnectionPanel QPushButton#rhConnectionLink, QWidget#rhConnectionPanel QPushButton#rhAccountQuery {{ color: {p['accent']}; background: transparent; border-color: transparent; padding: 5px 4px; }}
+            QWidget#rhConnectionPanel QPushButton#rhConnectionLink:hover, QWidget#rhConnectionPanel QPushButton#rhAccountQuery:hover {{ background: {p['accent_soft']}; }}
+            QWidget#rhConnectionPanel QPushButton#rhKeyMove {{ padding: 0; background: transparent; border-color: transparent; }}
+            QWidget#rhConnectionPanel QPushButton#rhKeyMove:hover {{ background: {p['hover']}; }}
+            QWidget#rhConnectionPanel QPushButton#rhKeyDelete {{ padding: 3px 7px; background: transparent; border-color: transparent; color: {p['muted']}; }}
+            QWidget#rhConnectionPanel QPushButton#rhKeyDelete:hover {{ color: {p['danger']}; background: {p['hover']}; }}
+            QWidget#rhConnectionPanel QScrollBar:vertical {{ background: transparent; width: 7px; margin: 0; }}
+            QWidget#rhConnectionPanel QScrollBar::handle:vertical {{ background: {p['border']}; min-height: 24px; border-radius: 3px; }}
+            QWidget#rhConnectionPanel QScrollBar::add-line:vertical, QWidget#rhConnectionPanel QScrollBar::sub-line:vertical {{ height: 0; }}
+            QWidget#rhConnectionPanel QScrollBar::add-page:vertical, QWidget#rhConnectionPanel QScrollBar::sub-page:vertical {{ background: transparent; }}
             QWidget#rhConnectionPanel QComboBox QAbstractItemView {{ background: {p['surface']}; color: {p['text']}; selection-background-color: {p['accent_soft']}; }}
         ''')

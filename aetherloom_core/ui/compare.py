@@ -344,13 +344,12 @@ class CompareTile(QtWidgets.QFrame):
         self._tile_size = tile_size
         self.setAcceptDrops(True)
         self.setObjectName('compareTile')
-        self.setStyleSheet('QFrame#compareTile { background: #0f1720; border: 1px solid #1f2a37; border-radius: 10px; }')
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
         self.tag_label = QtWidgets.QLabel('')
         self.tag_label.setAlignment(Qt.AlignCenter)
-        self.tag_label.setStyleSheet('color: #d1d5db; font-size: 10pt; font-weight: 600;')
+        self.tag_label.setObjectName('compareTag')
         layout.addWidget(self.tag_label)
         self.preview = ComparePreviewLabel(alignment=Qt.AlignCenter)
         self.preview.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
@@ -475,6 +474,18 @@ class CompareWindow(QtWidgets.QMainWindow):
             self._compare_pool.setMaxThreadCount(3)
         self._setup_ui()
         self.sync_theme()
+        from .popups import DialogBoundary
+        self._popup_boundary = DialogBoundary(self)
+        QtWidgets.QApplication.instance().screenRemoved.connect(self._popup_boundary.schedule)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._popup_boundary.schedule()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.WindowStateChange and hasattr(self, '_popup_boundary'):
+            self._popup_boundary.schedule()
 
     def _setup_ui(self):
         central = QtWidgets.QWidget()
@@ -483,17 +494,9 @@ class CompareWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        controls_frame = QtWidgets.QFrame()
+        controls_frame = self.controls_frame = QtWidgets.QFrame()
         controls_frame.setObjectName('compareControls')
-        controls_frame.setStyleSheet(
-            'QFrame#compareControls { background: #111823; border: 1px solid #1f2a37; border-radius: 10px; }'
-            'QFrame#compareControls QLabel { color: #e5e7eb; font-weight: 600; }'
-            'QFrame#compareControls QSpinBox, QFrame#compareControls QLineEdit {'
-            ' background: #0b111a; color: #f8fafc; border: 1px solid #1f2a37; border-radius: 6px; padding: 4px 6px; }'
-            'QFrame#compareControls QPushButton { background: #2563eb; color: #ffffff; border: none; border-radius: 6px; padding: 8px 14px; }'
-            'QFrame#compareControls QPushButton:hover { background: #1d4ed8; }'
-        )
-        controls = QtWidgets.QGridLayout(controls_frame)
+        controls = self.controls_layout = QtWidgets.QGridLayout(controls_frame)
         controls.setContentsMargins(16, 12, 16, 12)
         controls.setHorizontalSpacing(12)
         controls.setVerticalSpacing(8)
@@ -523,16 +526,18 @@ class CompareWindow(QtWidgets.QMainWindow):
         self.layout_apply_btn.clicked.connect(self._apply_layout_from_controls)
         controls.addWidget(self.layout_apply_btn, 0, 5)
 
-        controls.addWidget(QtWidgets.QLabel('X 标签 (逗号分隔):'), 1, 0)
+        self.x_caption = QtWidgets.QLabel('X 标签（逗号分隔）')
+        controls.addWidget(self.x_caption, 1, 0)
         self.x_labels_edit = QtWidgets.QLineEdit()
         self.x_labels_edit.setPlaceholderText('例如: Prompt1,Prompt2')
-        self.x_labels_edit.setMinimumWidth(220)
+        self.x_labels_edit.setMinimumWidth(0)
         self.x_labels_edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         controls.addWidget(self.x_labels_edit, 1, 1, 1, 2)
-        controls.addWidget(QtWidgets.QLabel('Y 标签 (逗号分隔):'), 1, 3)
+        self.y_caption = QtWidgets.QLabel('Y 标签（逗号分隔）')
+        controls.addWidget(self.y_caption, 1, 3)
         self.y_labels_edit = QtWidgets.QLineEdit()
         self.y_labels_edit.setPlaceholderText('例如: CFG7,CFG11')
-        self.y_labels_edit.setMinimumWidth(220)
+        self.y_labels_edit.setMinimumWidth(0)
         self.y_labels_edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         controls.addWidget(self.y_labels_edit, 1, 4, 1, 2)
         self.labels_apply_btn = QtWidgets.QPushButton('应用标注')
@@ -585,6 +590,20 @@ class CompareWindow(QtWidgets.QMainWindow):
                 mode = getattr(self._host, '_theme_mode', 'dark')
             if mode is None:
                 mode = 'dark'
+            from aetherloom_core.rh_ui import palette
+            p = palette(mode)
+            self.setStyleSheet(f'''QMainWindow {{ background: {p['canvas']}; color: {p['text']}; }}
+                QWidget {{ font-size: 13px; }}
+                QFrame#compareControls, QFrame#compareTile {{ background: {p['surface']};
+                    border: 1px solid {p['border']}; border-radius: 10px; }}
+                QFrame#compareControls QLabel, QLabel#compareTag {{ color: {p['text']}; background: transparent; border: none; }}
+                QLabel#compareAxis {{ color: {p['muted']}; font-weight: 600; }}
+                QFrame#compareControls QLineEdit, QFrame#compareControls QSpinBox {{ background: {p['input']};
+                    color: {p['text']}; border: 1px solid {p['border']}; border-radius: 6px; padding: 5px 8px; }}
+                QFrame#compareControls QPushButton {{ background: {p['surface']}; color: {p['text']};
+                    border: 1px solid {p['border']}; border-radius: 6px; padding: 7px 10px; }}
+                QFrame#compareControls QPushButton:hover {{ background: {p['hover']}; border-color: {p['accent']}; }}
+                QScrollArea#compareScroll, QWidget#compareGrid {{ background: {p['canvas']}; border: none; }}''')
             _set_native_titlebar_dark(self, mode == 'dark')
         except Exception:
             pass
@@ -702,7 +721,7 @@ class CompareWindow(QtWidgets.QMainWindow):
 
     def _make_axis_label(self, text, axis):
         lbl = QtWidgets.QLabel(text)
-        lbl.setStyleSheet('color:#4b5563; font-weight:600;')
+        lbl.setObjectName('compareAxis')
         if axis == 'x':
             lbl.setAlignment(Qt.AlignCenter)
         else:
@@ -818,6 +837,18 @@ class CompareWindow(QtWidgets.QMainWindow):
         try:
             super().resizeEvent(event)
         finally:
+            if hasattr(self, 'controls_layout'):
+                compact = self.width() < 1000
+                if compact != getattr(self, '_compact_controls', None):
+                    self._compact_controls = compact
+                    controls = self.controls_layout
+                    for widget in (self.x_caption, self.x_labels_edit, self.y_caption, self.y_labels_edit, self.labels_apply_btn):
+                        controls.removeWidget(widget)
+                    controls.addWidget(self.x_caption, 1, 0)
+                    controls.addWidget(self.x_labels_edit, 1, 1, 1, 5 if compact else 2)
+                    controls.addWidget(self.y_caption, 2 if compact else 1, 0 if compact else 3)
+                    controls.addWidget(self.y_labels_edit, 2 if compact else 1, 1 if compact else 4, 1, 5 if compact else 2)
+                    controls.addWidget(self.labels_apply_btn, 1, 6)
             self._schedule_tile_refresh()
 
     def _trim_lowres_cache(self):

@@ -124,7 +124,7 @@ class ModelCard(QtWidgets.QFrame):
         self.url = ''
         self.setObjectName('rhModelCard')
         self.setMinimumWidth(205)
-        self.setFixedHeight(366)
+        self.setFixedHeight(320)
         box = QtWidgets.QVBoxLayout(self)
         box.setContentsMargins(5, 5, 5, 5);box.setSpacing(0)
         self.cover = Cover(self)

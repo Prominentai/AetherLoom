@@ -244,8 +244,19 @@ def response_text(data, protocol):
     return result
 
 
+def image_sources(image):
+    """Normalize legacy (mime, base64) and multi-image inputs without truncation."""
+    if image is None:return []
+    sources = [image] if isinstance(image, (tuple, list)) and len(image) == 2 and all(isinstance(v, str) for v in image) else image
+    if not isinstance(sources, (tuple, list)) or not 1 <= len(sources) <= 256:
+        raise ProviderAPIError('图像输入必须包含 1–256 张有效图像。', status='invalid_image')
+    if any(not isinstance(value, (tuple, list)) or len(value) != 2 or not all(isinstance(v, str) and v for v in value) for value in sources):
+        raise ProviderAPIError('图像输入格式无效。', status='invalid_image')
+    return list(sources)
+
+
 def complete_text(endpoint, api_key, model, system_prompt, user_text, *, provider=None,
-                  temperature=None, timeout=30, max_tokens=None, image=None, reasoning_effort=None,
+                  temperature=None, timeout=90, max_tokens=None, image=None, reasoning_effort=None,
                   thinking=None, web_search=None):
     from aetherloom_core.agent_catalog import AGENTS
     if provider in AGENTS:
@@ -258,13 +269,13 @@ def complete_text(endpoint, api_key, model, system_prompt, user_text, *, provide
     if max_tokens is not None and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0):
         raise ProviderAPIError('输出 token 上限必须是正整数。', status='invalid_config')
     messages = []
+    images = image_sources(image)
     if system_prompt:
         messages.append({'role': 'system', 'content': str(system_prompt)})
     content = str(user_text)
-    if image:
-        mime, encoded = image
-        content = [{'type': 'text', 'text': str(user_text)},
-                   {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{encoded}'}}]
+    if images:
+        content = [{'type': 'text', 'text': str(user_text)}] + [
+                   {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{encoded}'}} for mime, encoded in images]
     messages.append({'role': 'user', 'content': content})
     payload = {'model': model.strip(), 'messages': messages, 'stream': False}
     if protocol == 'claude':
@@ -272,9 +283,9 @@ def complete_text(endpoint, api_key, model, system_prompt, user_text, *, provide
         payload['max_tokens'] = max_tokens or 4096
         if system_prompt:
             payload['system'] = str(system_prompt)
-        if image:
+        if images:
             payload['messages'][-1]['content'] = [
-                {'type': 'image', 'source': {'type': 'base64', 'media_type': mime, 'data': encoded}},
+                {'type': 'image', 'source': {'type': 'base64', 'media_type': mime, 'data': encoded}} for mime, encoded in images] + [
                 {'type': 'text', 'text': str(user_text)}]
         # Native reasoning models reject sampling controls; omit them rather
         # than overriding each model's own supported defaults.
@@ -284,11 +295,11 @@ def complete_text(endpoint, api_key, model, system_prompt, user_text, *, provide
             if system_prompt:
                 payload['system'] = str(system_prompt)
             if image:
-                payload['images'] = [encoded]
+                payload['images'] = [encoded for mime, encoded in images]
         else:
             payload['messages'][-1]['content'] = str(user_text)
             if image:
-                payload['messages'][-1]['images'] = [encoded]
+                payload['messages'][-1]['images'] = [encoded for mime, encoded in images]
         options = {}
         if temperature is not None:
             options['temperature'] = temperature
@@ -298,8 +309,7 @@ def complete_text(endpoint, api_key, model, system_prompt, user_text, *, provide
             payload['options'] = options
     elif protocol == 'responses':
         input_content = [{'type': 'input_text', 'text': str(user_text)}]
-        if image:
-            input_content.append({'type': 'input_image', 'image_url': f'data:{mime};base64,{encoded}'})
+        input_content.extend({'type': 'input_image', 'image_url': f'data:{mime};base64,{encoded}'} for mime, encoded in images)
         payload = {'model': model.strip(), 'input': [{'role': 'user', 'content': input_content}], 'stream': False}
         if system_prompt:
             payload['instructions'] = str(system_prompt)

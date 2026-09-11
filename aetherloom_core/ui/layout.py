@@ -44,43 +44,16 @@ class MainLayoutMixin:
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         h = QtWidgets.QHBoxLayout(central)
+        h.setContentsMargins(8, 8, 8, 8)
+        h.setSpacing(8)
 
         # Left: vertical sidebar (compact icon+label buttons)
         self.sidebar_frame = QtWidgets.QFrame()
         self.sidebar_frame.setObjectName('sidebarFrame')
-        # set an initial width based on base width and current scale, capped by sensible limits
-        try:
-            scale = getattr(self, '_ui_scale_factor', 1.0)
-            # determine available width (window preferred, fallback to primary screen)
-            try:
-                win_w = int(self.width() or 0)
-            except Exception:
-                win_w = 0
-            if not win_w or win_w < 200:
-                try:
-                    screen = QtWidgets.QApplication.primaryScreen()
-                    win_w = int(screen.availableGeometry().width()) if screen is not None else 1200
-                except Exception:
-                    win_w = 1200
-            base_frac = float(getattr(self, '_sidebar_base_frac', 0.12))
-            min_frac = float(getattr(self, '_sidebar_min_frac', 0.06))
-            cap_frac = float(getattr(self, '_sidebar_max_fraction', 0.18))
-            # compute widths proportionally
-            base_w = max(int(win_w * min_frac), int(win_w * base_frac))
-            cap_w = max(int(win_w * 0.12), int(win_w * cap_frac))
-            # scale by UI scale and clamp
-            initial_w = int(max(base_w * scale, min(base_w, cap_w)))
-            # absolute px safety bounds
-            initial_w = max(int(getattr(self, '_sidebar_base_width', 160)), min(initial_w, int(getattr(self, '_sidebar_max_px', 420))))
-            self.sidebar_frame.setFixedWidth(initial_w)
-        except Exception:
-            try:
-                self.sidebar_frame.setFixedWidth(self._sidebar_base_width)
-            except Exception:
-                pass
+        self.sidebar_frame.setFixedWidth(64)
         sidebar_layout = QtWidgets.QVBoxLayout(self.sidebar_frame)
-        sidebar_layout.setContentsMargins(14, 16, 14, 14)
-        sidebar_layout.setSpacing(10)
+        sidebar_layout.setContentsMargins(8, 12, 8, 12)
+        sidebar_layout.setSpacing(6)
 
         # self.sidebar_brand_label = QtWidgets.QLabel('GRC 工具台')
         # self.sidebar_brand_label.setObjectName('sidebarBrand')
@@ -237,36 +210,15 @@ class MainLayoutMixin:
                 self.theme_toggle_btn.setIconSize(QtCore.QSize(base_icon, base_icon))
         except Exception:
             pass
-        theme_row.addWidget(self.theme_toggle_btn)
+        theme_row.addWidget(self.theme_toggle_btn, 0, Qt.AlignHCenter)
         sidebar_layout.addLayout(theme_row)
         self.sidebar_scroll = SidebarScroll(self.sidebar_frame)
         h.addWidget(self.sidebar_scroll)
-        # ensure collapsed flag default
-        try:
-            self._sidebar_collapsed = False
-        except Exception:
-            pass
-
-        # collapse toggle button to the right of sidebar (shows only an arrow)
-        try:
-            self.sidebar_toggle_btn = QtWidgets.QToolButton()
-            self.sidebar_toggle_btn.setObjectName('sidebarToggle')
-            self.sidebar_toggle_btn.setText('\u203A')  # single character arrow '›'
-            self.sidebar_toggle_btn.setFixedWidth(28)
-            self.sidebar_toggle_btn.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
-            self.sidebar_toggle_btn.setToolTip('折叠/展开侧边栏')
-            # minimal styling so it looks like a splitter button
-            try:
-                self.sidebar_toggle_btn.setStyleSheet('QToolButton#sidebarToggle { border: none; background: transparent; font-weight: 700; }')
-            except Exception:
-                pass
-            h.addWidget(self.sidebar_toggle_btn)
-        except Exception:
-            self.sidebar_toggle_btn = None
-
         # Right: stacked pages (decode page + settings page)
         self.pages = QtWidgets.QStackedWidget()
         h.addWidget(self.pages, 1)
+        from aetherloom_core.ui.navigation import NavigationReveal
+        self.navigation_reveal = NavigationReveal(self)
 
         # --- Page: 主页 (home) ---
         from aetherloom_core.ui.home import HomePage
@@ -274,7 +226,7 @@ class MainLayoutMixin:
         self.home_page = home_page
         self.home_readme = home_page.readme
         self.home_subtitle = home_page.subtitle
-        make_responsive(home_page)
+        make_responsive(home_page).widget().setObjectName('homeContent')
         self.pages.addWidget(home_page)
 
         # --- Page: 本地解码 (decode) ---
@@ -774,6 +726,8 @@ class MainLayoutMixin:
                 self._apikeys_file = None
                 self._apikeys = {}
 
+            from aetherloom_core.api_provider_editor import migrate_legacy_custom
+            migrate_legacy_custom(self)
             # map provider_key -> widgets for apikey panel rows
             self.apikey_rows = {}
 
@@ -832,7 +786,14 @@ class MainLayoutMixin:
                     pass
                 return items
 
+            def _key_protocol(prov_key):
+                for category, values in self.api_provider_profiles.items():
+                    if prov_key in values:
+                        return api_manager.effective_protocol(category, prov_key, values[prov_key])
+                return prov_key
+
             def _make_provider_row(display, prov_key):
+                is_baidu = _key_protocol(prov_key) == 'baidu_translate'
                 row = QtWidgets.QWidget(keys_holder)
                 h = QtWidgets.QGridLayout(row)
                 h.setContentsMargins(0, 0, 0, 0)
@@ -855,28 +816,26 @@ class MainLayoutMixin:
                 baidu_secret = QtWidgets.QLineEdit(row)
                 baidu_secret.setPlaceholderText('请输入 Secret')
                 baidu_secret.setEchoMode(QtWidgets.QLineEdit.Password)
-                baidu_appid.setVisible(prov_key == 'baidu_translate')
-                baidu_secret.setVisible(prov_key == 'baidu_translate')
+                baidu_appid.setVisible(is_baidu)
+                baidu_secret.setVisible(is_baidu)
 
                 key_edit = QtWidgets.QLineEdit(row)
                 key_edit.setPlaceholderText('请输入 API Key，仅保存在本地')
                 key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
                 key_edit.setMinimumWidth(0)
                 # hide API key input for Baidu rows (we show AppID/Secret instead)
-                key_edit.setVisible(prov_key != 'baidu_translate')
+                key_edit.setVisible(not is_baidu)
 
                 # Keep inputs on their own row so provider names never force overflow.
                 h.addWidget(label, 0, 0)
                 h.addWidget(btn_holder, 0, 1, Qt.AlignRight)
                 h.setColumnStretch(0, 1)
                 h.setColumnStretch(1, 1)
-                if prov_key == 'baidu_translate':
-                    baidu_appid.setMinimumWidth(0)
-                    baidu_secret.setMinimumWidth(0)
-                    h.addWidget(baidu_appid, 1, 0)
-                    h.addWidget(baidu_secret, 1, 1)
-                else:
-                    h.addWidget(key_edit, 1, 0, 1, 2)
+                baidu_appid.setMinimumWidth(0)
+                baidu_secret.setMinimumWidth(0)
+                h.addWidget(baidu_appid, 1, 0)
+                h.addWidget(baidu_secret, 1, 1)
+                h.addWidget(key_edit, 1, 0, 1, 2)
 
                 # prefill stored values
                 try:
@@ -902,19 +861,16 @@ class MainLayoutMixin:
                 try:
                     if isinstance(getattr(self, '_apikeys', None), dict):
                         rec = api_credentials_for(self._apikeys, prov_key)
-                        if prov_key == 'baidu_translate':
-                            if isinstance(rec, dict):
-                                baidu_appid.setText(rec.get('appid', ''))
-                                baidu_secret.setText(rec.get('secret', ''))
-                        else:
-                            if isinstance(rec, dict):
-                                key_edit.setText(rec.get('api_key', ''))
+                        if isinstance(rec, dict):
+                            baidu_appid.setText(rec.get('appid', ''))
+                            baidu_secret.setText(rec.get('secret', ''))
+                            key_edit.setText(rec.get('api_key', ''))
                 except Exception:
                     pass
 
                 def _on_get():
                     try:
-                        url = api_manager.get_api_key_portal(prov_key) if api_manager and hasattr(api_manager, 'get_api_key_portal') else ''
+                        url = api_manager.get_api_key_portal(_key_protocol(prov_key)) if api_manager and hasattr(api_manager, 'get_api_key_portal') else ''
                         if url:
                             webbrowser.open(url)
                     except Exception:
@@ -928,16 +884,9 @@ class MainLayoutMixin:
 
                         # update in-memory apikeys store only; file write happens on 顶部 保存 click
                         try:
-                            if prov_key == 'baidu_translate':
-                                if appid or secret:
-                                    self._apikeys[prov_key] = {'appid': appid, 'secret': secret}
-                                elif prov_key in self._apikeys:
-                                    del self._apikeys[prov_key]
-                            else:
-                                if val:
-                                    self._apikeys[prov_key] = {'api_key': val}
-                                elif prov_key in self._apikeys:
-                                    del self._apikeys[prov_key]
+                            data = {'api_key': val, 'appid': appid, 'secret': secret}
+                            if any(data.values()):self._apikeys[prov_key] = data
+                            else:self._apikeys.pop(prov_key, None)
                         except Exception:
                             pass
                     except Exception:
@@ -950,20 +899,27 @@ class MainLayoutMixin:
 
                 # register widgets so header 保存 can write them to apikeys.json
                 try:
-                    self.apikey_rows[prov_key] = {'key_edit': key_edit, 'appid': baidu_appid, 'secret': baidu_secret}
+                    self.apikey_rows[prov_key] = {'key_edit': key_edit, 'appid': baidu_appid, 'secret': baidu_secret,
+                                                 'label': label, 'get_button': get_btn}
                 except Exception:
                     pass
 
                 return row
 
-            # build provider rows once
-            try:
-                providers = _get_all_providers()
-                for display, pk in providers:
-                    row = _make_provider_row(display, pk)
-                    keys_container.addWidget(row)
-            except Exception:
-                pass
+            def _refresh_apikey_rows():
+                # Preserve existing edits when adding, renaming or changing protocol.
+                for display, pk in _get_all_providers():
+                    if pk not in self.apikey_rows:
+                        keys_container.addWidget(_make_provider_row(display, pk))
+                    row = self.apikey_rows[pk]
+                    row['label'].setText(display)
+                    is_baidu = _key_protocol(pk) == 'baidu_translate'
+                    row['key_edit'].setVisible(not is_baidu)
+                    row['appid'].setVisible(is_baidu)
+                    row['secret'].setVisible(is_baidu)
+                    row['get_button'].setVisible(bool(api_manager.get_api_key_portal(_key_protocol(pk))))
+            self._refresh_apikey_rows = _refresh_apikey_rows
+            _refresh_apikey_rows()
 
             # write apikeys.json when 保存 clicked
             def _write_apikeys_file(_checked=False, *, show_feedback=True):
@@ -975,19 +931,10 @@ class MainLayoutMixin:
                     try:
                         for pk, widgets in (getattr(self, 'apikey_rows', {}) or {}).items():
                             try:
-                                if pk == 'baidu_translate':
-                                    appid = (widgets.get('appid') and widgets['appid'].text().strip()) or ''
-                                    secret = (widgets.get('secret') and widgets['secret'].text().strip()) or ''
-                                    if appid or secret:
-                                        self._apikeys[pk] = {'appid': appid, 'secret': secret}
-                                    elif pk in self._apikeys:
-                                        del self._apikeys[pk]
-                                else:
-                                    ak = (widgets.get('key_edit') and widgets['key_edit'].text().strip()) or ''
-                                    if ak:
-                                        self._apikeys[pk] = {'api_key': ak}
-                                    elif pk in self._apikeys:
-                                        del self._apikeys[pk]
+                                data = {name: widgets[field].text().strip()
+                                        for name, field in (('api_key','key_edit'),('appid','appid'),('secret','secret'))}
+                                if any(data.values()):self._apikeys[pk] = data
+                                else:self._apikeys.pop(pk, None)
                             except Exception:
                                 pass
                     except Exception:
@@ -1167,6 +1114,7 @@ class MainLayoutMixin:
                 provider_combo.addItem(text, val)
 
             saved_provider = str(cfg.get('provider', '') or '')
+            if saved_provider == 'custom':saved_provider = 'custom_' + key
             if (key in ('text2img', 'image_edit') and saved_provider and
                     not saved_provider.startswith('custom') and provider_combo.findData(saved_provider) < 0):
                 label = api_manager.PROVIDERS.get(saved_provider, {}).get('name', saved_provider)
@@ -1184,8 +1132,7 @@ class MainLayoutMixin:
                         provider_combo.setCurrentIndex(0)
                         saved_provider = provider_combo.itemData(0)
                     else:
-                        provider_combo.addItem('自定义', 'custom')
-                        provider_combo.setCurrentIndex(0)
+                        provider_combo.setCurrentIndex(-1)
                 except Exception:
                     pass
 
@@ -1238,9 +1185,9 @@ class MainLayoutMixin:
             timeout.setRange(5, 600)
             timeout.setSingleStep(5)
             try:
-                timeout.setValue(int(cfg.get('timeout', 30) or 30))
+                timeout.setValue(int(cfg.get('timeout', 90) or 90))
             except Exception:
-                timeout.setValue(30)
+                timeout.setValue(90)
             self._install_combo_wheel_blocker(timeout)
 
             for le in (endpoint, api_key, baidu_appid, baidu_secret):
@@ -1398,7 +1345,7 @@ class MainLayoutMixin:
                         base_endpoint = ''
                         base_api_key = ''
                         base_model = ''
-                        base_timeout = 30
+                        base_timeout = 90
                         if cached:
                             base_endpoint = cached.get('endpoint', '') or ''
                             base_api_key = cached.get('api_key', '') or ''
@@ -1433,10 +1380,10 @@ class MainLayoutMixin:
                             pass
                         if timeout_widget is not None:
                             try:
-                                timeout_widget.setValue(int(base_timeout or 30))
+                                timeout_widget.setValue(int(base_timeout or 90))
                             except Exception:
                                 try:
-                                    timeout_widget.setValue(30)
+                                    timeout_widget.setValue(90)
                                 except Exception:
                                     pass
                         if model_widget is not None:
@@ -2255,7 +2202,7 @@ class MainLayoutMixin:
                 return None
 
             def _create_app_button(title: str) -> QtWidgets.QPushButton:
-                return AppCard(title, self._rh_dashboard)
+                return AppCard(title, self._rh_dashboard, rh_flow_widget)
 
             def _set_button_thumbnail(btn: QtWidgets.QPushButton, url: str, wid: str, force: bool = False):
                 try:
@@ -2412,13 +2359,15 @@ class MainLayoutMixin:
                 spacing = 12
                 columns = max(1, (width + spacing) // (200 + spacing))
                 card_width = max(140, min(260, (width - (columns - 1) * spacing) // columns))
-                signature = (columns, card_width, tuple(id(button) for button in self.rh_workflow_buttons))
+                from aetherloom_core.rh_model_app_ui import visible_cards
+                buttons = visible_cards(self, self.rh_workflow_buttons)
+                signature = (columns, card_width, tuple(id(button) for button in buttons))
                 if getattr(self, '_rh_grid_signature', None) == signature:
                     return
                 self._rh_grid_signature = signature
                 while rh_flow_layout.count():
                     rh_flow_layout.takeAt(0)
-                for i, button in enumerate(self.rh_workflow_buttons):
+                for i, button in enumerate(buttons):
                     button.setFixedSize(card_width, int(card_width * 0.62) + 70)
                     rh_flow_layout.addWidget(button, i // columns, i % columns, Qt.AlignTop | Qt.AlignLeft)
                 self._rh_dashboard.refresh()
@@ -2463,7 +2412,7 @@ class MainLayoutMixin:
                     for btn in list(self.rh_workflow_buttons[1:]):
                         try:
                             rh_flow_layout.removeWidget(btn)
-                            btn.setParent(None)
+                            btn.hide()
                             btn.deleteLater()
                         except Exception:
                             pass
@@ -2684,9 +2633,9 @@ class MainLayoutMixin:
                     def _id_key(item):
                         wid = item[0]
                         try:
-                            return int(wid)
+                            return (0, int(wid))
                         except Exception:
-                            return wid
+                            return (1, wid)
                     try:
                         favs = getattr(self, 'rh_favorites', None) or set()
                     except Exception:
@@ -2699,6 +2648,7 @@ class MainLayoutMixin:
                     _clear_app_buttons()
                     for webapp_id, path in files:
                         title_short = webapp_id
+                        parsed = {}
                         try:
                             with open(path, 'rb') as f:
                                 txt = f.read().decode('utf-8')
@@ -2716,6 +2666,7 @@ class MainLayoutMixin:
                         else:
                             title_display = title_short
                         btn = _create_app_button(title_display)
+                        btn._rh_backend = parsed.get('backend', 'rh_app') if isinstance(parsed, dict) else 'rh_app'
                         try:
                             # store full title on the widget for wrapping/scaling
                             try:
@@ -2835,7 +2786,7 @@ class MainLayoutMixin:
                                             pass
                                         try:
                                             if not hasattr(page, '_app_nav_visible'):
-                                                page._app_nav_visible = True
+                                                page._app_nav_visible = False
                                         except Exception:
                                             pass
                                         def _apply_nav_visibility(pg=page, visible=None):
@@ -3159,8 +3110,8 @@ class MainLayoutMixin:
                                     _ensure_app_nav_container(app_page)
                                     main_holder = QtWidgets.QWidget()
                                     app_layout = QtWidgets.QVBoxLayout(main_holder)
-                                    app_layout.setContentsMargins(12, 14, 16, 14)
-                                    app_layout.setSpacing(16)
+                                    from aetherloom_core.ui.design import page_layout
+                                    page_layout(app_page, app_layout)
                                     try:
                                         root_layout.addWidget(main_holder, 1)
                                     except Exception:
@@ -3177,6 +3128,8 @@ class MainLayoutMixin:
                                     back_btn.setFixedHeight(36)
                                     title_label = QtWidgets.QLabel(parsed.get('title') or wid)
                                     title_label.setObjectName('rhPageTitle')
+                                    from aetherloom_core.ui import design
+                                    design.title(title_label)
                                     title_label.setWordWrap(True)
                                     title_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
                                     title_label.setToolTip(str(parsed.get('title') or wid))
@@ -3196,10 +3149,27 @@ class MainLayoutMixin:
                                         btn_reset.setToolTip('从 RunningHub 拉取最新节点信息并覆盖本地应用文件')
                                     except Exception:
                                         btn_reset = QtWidgets.QPushButton('重置/更新')
+                                    if parsed.get('backend') in ('rh_standard', 'rh_llm'):
+                                        btn_reset.hide()
+                                        page_caption.setText('RH 标准模型' if parsed['backend'] == 'rh_standard' else 'RH LLM · 独立对话')
                                     btn_reset.setObjectName('rhSecondaryButton')
                                     btn_reset.setFixedHeight(36)
-                                    header.addWidget(btn_reset)
-                                    app_layout.addLayout(header)
+                                    from aetherloom_core.rh_connections import SiteSwitchButton, open_connection_settings
+                                    connection_actions = QtWidgets.QVBoxLayout()
+                                    connection_actions.setSpacing(6)
+                                    connection_row = QtWidgets.QHBoxLayout()
+                                    connection_row.setSpacing(8)
+                                    app_page._rh_site_switch = SiteSwitchButton(self)
+                                    app_page._rh_connection_button = QtWidgets.QPushButton('连接设置')
+                                    app_page._rh_connection_button.setObjectName('rhSecondaryButton')
+                                    app_page._rh_connection_button.setMinimumHeight(34)
+                                    app_page._rh_connection_button.clicked.connect(lambda: open_connection_settings(self))
+                                    connection_row.addWidget(app_page._rh_site_switch)
+                                    connection_row.addWidget(app_page._rh_connection_button)
+                                    connection_actions.addLayout(connection_row)
+                                    connection_actions.addWidget(btn_reset, 0, Qt.AlignRight)
+                                    header.addLayout(connection_actions)
+                                    app_layout.addWidget(design.header(header))
 
                                     # scroll area for nodes
                                     nodes_scroll = QtWidgets.QScrollArea()
@@ -3284,7 +3254,11 @@ class MainLayoutMixin:
                                         app_page._rh_parsed = parsed
                                     except Exception:
                                         pass
+                                    from aetherloom_core.rh_multi_inputs import groups as media_groups, group_values, distribute
+                                    multi_groups = media_groups(node_list or [], parsed.get('model_definition') if isinstance(parsed, dict) else None)
+                                    multi_hidden = {i for group in multi_groups.values() for i in group['indices'][1:]}
                                     for idx, node in enumerate(node_list or []):
+                                        if idx in multi_hidden:continue
                                         try:
                                             box = QtWidgets.QFrame()
                                             box.setObjectName('nodeCard')
@@ -3500,7 +3474,7 @@ class MainLayoutMixin:
                                                                     try:
                                                                         if isinstance(nd, dict) and 'fieldValue' in nd:
                                                                             v = nd.get('fieldValue')
-                                                                            nd['fieldValue'] = '' if v is None else str(v)
+                                                                            nd['fieldValue'] = v if nd.get('_model_multiple') and isinstance(v, list) else '' if v is None else str(v)
                                                                     except Exception:
                                                                         pass
                                                             _coerce_fieldvalues(to_dump)
@@ -3578,7 +3552,7 @@ class MainLayoutMixin:
                                                                         try:
                                                                             if isinstance(nd, dict) and 'fieldValue' in nd:
                                                                                 v = nd.get('fieldValue')
-                                                                                nd['fieldValue'] = '' if v is None else str(v)
+                                                                                nd['fieldValue'] = v if nd.get('_model_multiple') and isinstance(v, list) else '' if v is None else str(v)
                                                                         except Exception:
                                                                             pass
                                                                 _coerce_fieldvalues(to_dump)
@@ -3603,7 +3577,17 @@ class MainLayoutMixin:
 
                                             # choose widget by type
                                             from aetherloom_core.rh_model_picker import ModelField, model_resource_type
-                                            if model_resource_type(node):
+                                            if idx in multi_groups:
+                                                from aetherloom_core.rh_multi_input_ui import MediaListEditor
+                                                group = multi_groups[idx]
+                                                files = MediaListEditor(group['param'], group_values(node_list, group['indices']), app_page)
+                                                def _save_files(paths, indices=group['indices'], persist=_persist_and_write, fields=node_list):
+                                                    distribute(fields, indices, paths)
+                                                    persist(fields[indices[0]]['fieldValue'], indices[0])
+                                                files.changed.connect(_save_files)
+                                                field_row.addRow(files)
+                                                node_widgets[idx] = {'files': files, 'multi_indices': group['indices']}
+                                            elif model_resource_type(node):
                                                 model_field = ModelField(node, fval, app_page)
                                                 le2 = model_field.editor
                                                 le2.editingFinished.connect(lambda _le=le2, _i=idx: _persist_and_write(_le.text(), _i))
@@ -4089,12 +4073,12 @@ class MainLayoutMixin:
                                                             provider = api_cfg.get('provider') if isinstance(api_cfg, dict) else None
                                                             endpoint = api_cfg.get('endpoint') if isinstance(api_cfg, dict) else None
                                                             model = api_cfg.get('model') if isinstance(api_cfg, dict) else None
-                                                            timeout = int(api_cfg.get('timeout', 30)) if isinstance(api_cfg, dict) else 30
+                                                            timeout = int(api_cfg.get('timeout', 90)) if isinstance(api_cfg, dict) else 90
                                                         except Exception:
                                                             provider = None
                                                             endpoint = None
                                                             model = None
-                                                            timeout = 30
+                                                            timeout = 90
                                                         from aetherloom_core.api_credentials import get_credentials
                                                         api_key = get_credentials(getattr(self, '_apikeys', {}), provider, 'llm').get('api_key', '')
                                                         if not api_key:
@@ -4422,7 +4406,7 @@ class MainLayoutMixin:
                                             nodes_v.addWidget(box)
                                             # for IMAGE/VIDEO fields, add a separate preview card under the node card
                                             try:
-                                                if ftype in ('IMAGE', 'VIDEO'):
+                                                if ftype in ('IMAGE', 'VIDEO') and idx not in multi_groups:
                                                     prev_box = QtWidgets.QFrame()
                                                     prev_box.setFrameShape(QtWidgets.QFrame.StyledPanel)
                                                     prev_box.setObjectName('nodePreviewCard')
@@ -4975,6 +4959,10 @@ class MainLayoutMixin:
                                                     try:
                                                         val = n.get('fieldValue') if n.get('fieldValue') is not None else ''
                                                         entry = nw.get(i) or {}
+                                                        if entry.get('files') is not None:
+                                                            paths = group_values(nodes2, entry['multi_indices'])
+                                                            if entry['files'].paths() != paths:entry['files'].set_paths(paths)
+                                                            continue
                                                         try:
                                                             if 'le' in entry and entry.get('le') is not None:
                                                                 try:
@@ -5176,301 +5164,304 @@ class MainLayoutMixin:
                                         except Exception:
                                             pc_h = QtWidgets.QVBoxLayout(preview_container)
 
-                                        # right-side sidebar (hidden by default) with local-decode options per app
-                                        sidebar_frame = QtWidgets.QFrame()
-                                        try:
-                                            sidebar_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
-                                            sidebar_layout = QtWidgets.QVBoxLayout(sidebar_frame)
-                                            sidebar_layout.setContentsMargins(8, 8, 8, 8)
-                                            sidebar_layout.setSpacing(6)
-                                            decode_scope_hint = QtWidgets.QLabel('以下设置用于之后发起的任务。已提交和等候任务保留发起时的解码配置。')
-                                            decode_scope_hint.setObjectName('rhMuted')
-                                            decode_scope_hint.setWordWrap(True)
-                                            sidebar_layout.addWidget(decode_scope_hint)
-                                            # enable checkbox (created here but placed beside the toggle button)
-                                            local_cb = QtWidgets.QCheckBox('启用本地解码')
-                                            local_cb.setToolTip('用于之后发起的任务，不修改现有任务的解码配置')
-                                            local_cb.setChecked(False)
-                                            # decode mode selector (GRC/SST)
-                                            mode_row = QtWidgets.QHBoxLayout()
-                                            mode_row.addWidget(QtWidgets.QLabel('解码方式:'))
-                                            local_mode_combo = QtWidgets.QComboBox()
-                                            local_mode_combo.addItem('GRC', 'grc')
-                                            local_mode_combo.addItem('SST', 'sst')
-                                            local_mode_combo.setCurrentIndex(0)
-                                            mode_row.addWidget(local_mode_combo)
-                                            sidebar_layout.addLayout(mode_row)
-                                            # password for SSTool
-                                            pwd_row_widget = QtWidgets.QWidget()
-                                            pwd_row = QtWidgets.QHBoxLayout(pwd_row_widget)
-                                            pwd_row.setContentsMargins(0, 0, 0, 0)
-                                            pwd_row.addWidget(QtWidgets.QLabel('密码:'))
-                                            local_pwd_edit = QtWidgets.QLineEdit()
-                                            local_pwd_edit.setEchoMode(QtWidgets.QLineEdit.Normal)
-                                            local_pwd_edit.setPlaceholderText('无')
-                                            pwd_row.addWidget(local_pwd_edit)
-                                            sidebar_layout.addWidget(pwd_row_widget)
-                                            # grid cols
-                                            g_row_widget = QtWidgets.QWidget()
-                                            g_row = QtWidgets.QHBoxLayout(g_row_widget)
-                                            g_row.setContentsMargins(0, 0, 0, 0)
-                                            g_row.addWidget(QtWidgets.QLabel('网格列数:'))
-                                            local_grid = QtWidgets.QSpinBox()
+                                        from aetherloom_core.rh_model_apps import supports_local_decode
+                                        has_local_decode = supports_local_decode(parsed)
+                                        if has_local_decode:
+                                            # right-side sidebar (hidden by default) with local-decode options per app
+                                            sidebar_frame = QtWidgets.QFrame()
                                             try:
-                                                local_grid.setRange(4, 256)
-                                                local_grid.setValue(int(getattr(self, 'grid_spin', None).value() if hasattr(self, 'grid_spin') else 32))
-                                            except Exception:
+                                                sidebar_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+                                                sidebar_layout = QtWidgets.QVBoxLayout(sidebar_frame)
+                                                sidebar_layout.setContentsMargins(8, 8, 8, 8)
+                                                sidebar_layout.setSpacing(6)
+                                                decode_scope_hint = QtWidgets.QLabel('以下设置用于之后发起的任务。已提交和等候任务保留发起时的解码配置。')
+                                                decode_scope_hint.setObjectName('rhMuted')
+                                                decode_scope_hint.setWordWrap(True)
+                                                sidebar_layout.addWidget(decode_scope_hint)
+                                                # enable checkbox (created here but placed beside the toggle button)
+                                                local_cb = QtWidgets.QCheckBox('启用本地解码')
+                                                local_cb.setToolTip('用于之后发起的任务，不修改现有任务的解码配置')
+                                                local_cb.setChecked(False)
+                                                # decode mode selector (GRC/SST)
+                                                mode_row = QtWidgets.QHBoxLayout()
+                                                mode_row.addWidget(QtWidgets.QLabel('解码方式:'))
+                                                local_mode_combo = QtWidgets.QComboBox()
+                                                local_mode_combo.addItem('GRC', 'grc')
+                                                local_mode_combo.addItem('SST', 'sst')
+                                                local_mode_combo.setCurrentIndex(0)
+                                                mode_row.addWidget(local_mode_combo)
+                                                sidebar_layout.addLayout(mode_row)
+                                                # password for SSTool
+                                                pwd_row_widget = QtWidgets.QWidget()
+                                                pwd_row = QtWidgets.QHBoxLayout(pwd_row_widget)
+                                                pwd_row.setContentsMargins(0, 0, 0, 0)
+                                                pwd_row.addWidget(QtWidgets.QLabel('密码:'))
+                                                local_pwd_edit = QtWidgets.QLineEdit()
+                                                local_pwd_edit.setEchoMode(QtWidgets.QLineEdit.Normal)
+                                                local_pwd_edit.setPlaceholderText('无')
+                                                pwd_row.addWidget(local_pwd_edit)
+                                                sidebar_layout.addWidget(pwd_row_widget)
+                                                # grid cols
+                                                g_row_widget = QtWidgets.QWidget()
+                                                g_row = QtWidgets.QHBoxLayout(g_row_widget)
+                                                g_row.setContentsMargins(0, 0, 0, 0)
+                                                g_row.addWidget(QtWidgets.QLabel('网格列数:'))
+                                                local_grid = QtWidgets.QSpinBox()
                                                 try:
-                                                    local_grid.setValue(32)
+                                                    local_grid.setRange(4, 256)
+                                                    local_grid.setValue(int(getattr(self, 'grid_spin', None).value() if hasattr(self, 'grid_spin') else 32))
                                                 except Exception:
-                                                    pass
-                                            g_row.addWidget(local_grid)
-                                            sidebar_layout.addWidget(g_row_widget)
-                                            # delete original option
-                                            delete_orig_cb = QtWidgets.QCheckBox('删除原图像')
-                                            delete_orig_cb.setToolTip('解码完成后删除未解码的原输出文件')
-                                            delete_orig_cb.setChecked(True)
-                                            sidebar_layout.addWidget(delete_orig_cb)
-                                            # open local decode folder button
-                                            open_row = QtWidgets.QHBoxLayout()
-                                            open_btn = QtWidgets.QPushButton('打开本地解码目录')
-                                            try:
-                                                open_btn.clicked.connect(lambda: self._reveal_in_explorer(self.local_decode_dir) if hasattr(self, '_reveal_in_explorer') else os.startfile(self.local_decode_dir))
-                                            except Exception:
-                                                try:
-                                                    open_btn.clicked.connect(lambda: os.startfile(self.local_decode_dir))
-                                                except Exception:
-                                                    pass
-                                            open_row.addStretch(1)
-                                            open_row.addWidget(open_btn)
-                                            sidebar_layout.addLayout(open_row)
-                                            try:
-                                                sidebar_frame.setMinimumWidth(0)
-                                                sidebar_frame.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-                                            except Exception:
-                                                pass
-                                            # expose widgets on app_page for run-time access
-                                            try:
-                                                app_page._rh_local_decode_cb = local_cb
-                                                app_page._rh_local_grid_spin = local_grid
-                                                app_page._rh_local_mode_combo = local_mode_combo
-                                                app_page._rh_local_pwd_edit = local_pwd_edit
-                                                app_page._rh_local_delete_original_cb = delete_orig_cb
-                                                # initial attrs
-                                                app_page._rh_local_decode_enabled = bool(local_cb.isChecked())
-                                                app_page._rh_local_grid_cols = int(local_grid.value())
-                                                app_page._rh_local_decode_mode = local_mode_combo.currentData() or 'grc'
-                                                app_page._rh_local_password = local_pwd_edit.text() or ''
-                                                app_page._rh_local_delete_original = bool(delete_orig_cb.isChecked())
-                                                app_page._rh_local_sidebar_visible = bool(sidebar_frame.isVisible())
-                                                def _persist_local_decode_settings(ap=app_page, wid_local=wid):
                                                     try:
-                                                        store = getattr(self, 'rh_local_decode_settings', None)
-                                                    except Exception:
-                                                        store = None
-                                                    try:
-                                                        if not isinstance(store, dict):
-                                                            store = {}
-                                                            try:
-                                                                self.rh_local_decode_settings = store
-                                                            except Exception:
-                                                                pass
-                                                        cfg = {
-                                                            'enabled': bool(getattr(ap, '_rh_local_decode_enabled', False)),
-                                                            'mode': str(getattr(ap, '_rh_local_decode_mode', 'grc') or 'grc'),
-                                                            'password': str(getattr(ap, '_rh_local_password', '') or ''),
-                                                            'grid_cols': int(getattr(ap, '_rh_local_grid_cols', 32) or 32),
-                                                            'delete_original': bool(getattr(ap, '_rh_local_delete_original', True)),
-                                                            'sidebar_visible': bool(getattr(ap, '_rh_local_sidebar_visible', False))
-                                                        }
-                                                        store[str(wid_local)] = cfg
-                                                        try:
-                                                            if isinstance(getattr(self, 'settings', None), dict):
-                                                                self.settings['rh_local_decode_settings'] = store
-                                                        except Exception:
-                                                            pass
-                                                        try:
-                                                            self._save_settings()
-                                                        except Exception:
-                                                            pass
+                                                        local_grid.setValue(32)
                                                     except Exception:
                                                         pass
-                                                # wire signals to attributes
+                                                g_row.addWidget(local_grid)
+                                                sidebar_layout.addWidget(g_row_widget)
+                                                # delete original option
+                                                delete_orig_cb = QtWidgets.QCheckBox('删除原图像')
+                                                delete_orig_cb.setToolTip('解码完成后删除未解码的原输出文件')
+                                                delete_orig_cb.setChecked(True)
+                                                sidebar_layout.addWidget(delete_orig_cb)
+                                                # open local decode folder button
+                                                open_row = QtWidgets.QHBoxLayout()
+                                                open_btn = QtWidgets.QPushButton('打开本地解码目录')
                                                 try:
-                                                    local_cb.toggled.connect(lambda v, ap=app_page: (setattr(ap, '_rh_local_decode_enabled', bool(v)), _persist_local_decode_settings(ap)))
+                                                    open_btn.clicked.connect(lambda: self._reveal_in_explorer(self.local_decode_dir) if hasattr(self, '_reveal_in_explorer') else os.startfile(self.local_decode_dir))
                                                 except Exception:
-                                                    pass
-                                                try:
-                                                    local_grid.valueChanged.connect(lambda v, ap=app_page: (setattr(ap, '_rh_local_grid_cols', int(v)), _persist_local_decode_settings(ap)))
-                                                except Exception:
-                                                    pass
-                                                try:
-                                                    delete_orig_cb.toggled.connect(lambda v, ap=app_page: (setattr(ap, '_rh_local_delete_original', bool(v)), _persist_local_decode_settings(ap)))
-                                                except Exception:
-                                                    pass
-                                                try:
-                                                    local_pwd_edit.textChanged.connect(lambda v, ap=app_page: (setattr(ap, '_rh_local_password', v), _persist_local_decode_settings(ap)))
-                                                except Exception:
-                                                    pass
-                                                try:
-                                                    def _update_local_grid_visibility(mode=None, w=g_row_widget):
-                                                        try:
-                                                            m = mode or (local_mode_combo.currentData() or 'grc')
-                                                            w.setVisible(m == 'grc')
-                                                            try:
-                                                                pwd_row_widget.setVisible(m == 'sst')
-                                                            except Exception:
-                                                                pass
-                                                        except Exception:
-                                                            try:
-                                                                w.setVisible(True)
-                                                            except Exception:
-                                                                pass
-                                                    local_mode_combo.currentIndexChanged.connect(lambda _idx, ap=app_page: (setattr(ap, '_rh_local_decode_mode', local_mode_combo.currentData() or 'grc'), _update_local_grid_visibility(), _persist_local_decode_settings(ap)))
-                                                    _update_local_grid_visibility(local_mode_combo.currentData())
-                                                except Exception:
-                                                    pass
-                                                try:
-                                                    # hydrate from persisted settings if available
-                                                    persisted = None
                                                     try:
-                                                        if isinstance(getattr(self, 'rh_local_decode_settings', None), dict):
-                                                            persisted = self.rh_local_decode_settings.get(str(wid)) or self.rh_local_decode_settings.get(wid)
+                                                        open_btn.clicked.connect(lambda: os.startfile(self.local_decode_dir))
                                                     except Exception:
+                                                        pass
+                                                open_row.addStretch(1)
+                                                open_row.addWidget(open_btn)
+                                                sidebar_layout.addLayout(open_row)
+                                                try:
+                                                    sidebar_frame.setMinimumWidth(0)
+                                                    sidebar_frame.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                                                except Exception:
+                                                    pass
+                                                # expose widgets on app_page for run-time access
+                                                try:
+                                                    app_page._rh_local_decode_cb = local_cb
+                                                    app_page._rh_local_grid_spin = local_grid
+                                                    app_page._rh_local_mode_combo = local_mode_combo
+                                                    app_page._rh_local_pwd_edit = local_pwd_edit
+                                                    app_page._rh_local_delete_original_cb = delete_orig_cb
+                                                    # initial attrs
+                                                    app_page._rh_local_decode_enabled = bool(local_cb.isChecked())
+                                                    app_page._rh_local_grid_cols = int(local_grid.value())
+                                                    app_page._rh_local_decode_mode = local_mode_combo.currentData() or 'grc'
+                                                    app_page._rh_local_password = local_pwd_edit.text() or ''
+                                                    app_page._rh_local_delete_original = bool(delete_orig_cb.isChecked())
+                                                    app_page._rh_local_sidebar_visible = bool(sidebar_frame.isVisible())
+                                                    def _persist_local_decode_settings(ap=app_page, wid_local=wid):
+                                                        try:
+                                                            store = getattr(self, 'rh_local_decode_settings', None)
+                                                        except Exception:
+                                                            store = None
+                                                        try:
+                                                            if not isinstance(store, dict):
+                                                                store = {}
+                                                                try:
+                                                                    self.rh_local_decode_settings = store
+                                                                except Exception:
+                                                                    pass
+                                                            cfg = {
+                                                                'enabled': bool(getattr(ap, '_rh_local_decode_enabled', False)),
+                                                                'mode': str(getattr(ap, '_rh_local_decode_mode', 'grc') or 'grc'),
+                                                                'password': str(getattr(ap, '_rh_local_password', '') or ''),
+                                                                'grid_cols': int(getattr(ap, '_rh_local_grid_cols', 32) or 32),
+                                                                'delete_original': bool(getattr(ap, '_rh_local_delete_original', True)),
+                                                                'sidebar_visible': bool(getattr(ap, '_rh_local_sidebar_visible', False))
+                                                            }
+                                                            store[str(wid_local)] = cfg
+                                                            try:
+                                                                if isinstance(getattr(self, 'settings', None), dict):
+                                                                    self.settings['rh_local_decode_settings'] = store
+                                                            except Exception:
+                                                                pass
+                                                            try:
+                                                                self._save_settings()
+                                                            except Exception:
+                                                                pass
+                                                        except Exception:
+                                                            pass
+                                                    # wire signals to attributes
+                                                    try:
+                                                        local_cb.toggled.connect(lambda v, ap=app_page: (setattr(ap, '_rh_local_decode_enabled', bool(v)), _persist_local_decode_settings(ap)))
+                                                    except Exception:
+                                                        pass
+                                                    try:
+                                                        local_grid.valueChanged.connect(lambda v, ap=app_page: (setattr(ap, '_rh_local_grid_cols', int(v)), _persist_local_decode_settings(ap)))
+                                                    except Exception:
+                                                        pass
+                                                    try:
+                                                        delete_orig_cb.toggled.connect(lambda v, ap=app_page: (setattr(ap, '_rh_local_delete_original', bool(v)), _persist_local_decode_settings(ap)))
+                                                    except Exception:
+                                                        pass
+                                                    try:
+                                                        local_pwd_edit.textChanged.connect(lambda v, ap=app_page: (setattr(ap, '_rh_local_password', v), _persist_local_decode_settings(ap)))
+                                                    except Exception:
+                                                        pass
+                                                    try:
+                                                        def _update_local_grid_visibility(mode=None, w=g_row_widget):
+                                                            try:
+                                                                m = mode or (local_mode_combo.currentData() or 'grc')
+                                                                w.setVisible(m == 'grc')
+                                                                try:
+                                                                    pwd_row_widget.setVisible(m == 'sst')
+                                                                except Exception:
+                                                                    pass
+                                                            except Exception:
+                                                                try:
+                                                                    w.setVisible(True)
+                                                                except Exception:
+                                                                    pass
+                                                        local_mode_combo.currentIndexChanged.connect(lambda _idx, ap=app_page: (setattr(ap, '_rh_local_decode_mode', local_mode_combo.currentData() or 'grc'), _update_local_grid_visibility(), _persist_local_decode_settings(ap)))
+                                                        _update_local_grid_visibility(local_mode_combo.currentData())
+                                                    except Exception:
+                                                        pass
+                                                    try:
+                                                        # hydrate from persisted settings if available
                                                         persisted = None
-                                                    if isinstance(persisted, dict):
                                                         try:
-                                                            local_cb.blockSignals(True)
-                                                            local_cb.setChecked(bool(persisted.get('enabled', local_cb.isChecked())))
-                                                            local_cb.blockSignals(False)
+                                                            if isinstance(getattr(self, 'rh_local_decode_settings', None), dict):
+                                                                persisted = self.rh_local_decode_settings.get(str(wid)) or self.rh_local_decode_settings.get(wid)
                                                         except Exception:
-                                                            pass
-                                                        try:
-                                                            mode_val = str(persisted.get('mode', local_mode_combo.currentData() or 'grc') or 'grc')
-                                                            idx_mode = local_mode_combo.findData(mode_val)
-                                                            if idx_mode < 0:
-                                                                idx_mode = 0
-                                                            local_mode_combo.blockSignals(True)
-                                                            local_mode_combo.setCurrentIndex(idx_mode)
-                                                            local_mode_combo.blockSignals(False)
-                                                        except Exception:
-                                                            pass
-                                                        try:
-                                                            local_pwd_edit.blockSignals(True)
-                                                            local_pwd_edit.setText(persisted.get('password', local_pwd_edit.text()) or '')
-                                                            local_pwd_edit.blockSignals(False)
-                                                        except Exception:
-                                                            pass
-                                                        try:
-                                                            val_cols = int(persisted.get('grid_cols', local_grid.value()) or local_grid.value())
-                                                            local_grid.blockSignals(True)
-                                                            local_grid.setValue(val_cols)
-                                                            local_grid.blockSignals(False)
-                                                        except Exception:
-                                                            pass
-                                                        try:
-                                                            delete_orig_cb.blockSignals(True)
-                                                            delete_orig_cb.setChecked(bool(persisted.get('delete_original', delete_orig_cb.isChecked())))
-                                                            delete_orig_cb.blockSignals(False)
-                                                        except Exception:
-                                                            pass
-                                                        try:
-                                                            app_page._rh_local_decode_enabled = bool(local_cb.isChecked())
-                                                            app_page._rh_local_decode_mode = str(mode_val if 'mode_val' in locals() else (local_mode_combo.currentData() or 'grc') or 'grc')
-                                                            app_page._rh_local_password = str(local_pwd_edit.text() or '')
-                                                            app_page._rh_local_grid_cols = int(local_grid.value())
-                                                            app_page._rh_local_delete_original = bool(delete_orig_cb.isChecked())
-                                                        except Exception:
-                                                            pass
-                                                        try:
-                                                            # restore sidebar visibility state too
-                                                            vis = bool(persisted.get('sidebar_visible', False))
+                                                            persisted = None
+                                                        if isinstance(persisted, dict):
                                                             try:
-                                                                sidebar_frame.setVisible(vis)
+                                                                local_cb.blockSignals(True)
+                                                                local_cb.setChecked(bool(persisted.get('enabled', local_cb.isChecked())))
+                                                                local_cb.blockSignals(False)
                                                             except Exception:
                                                                 pass
                                                             try:
-                                                                app_page._rh_local_sidebar_visible = vis
+                                                                mode_val = str(persisted.get('mode', local_mode_combo.currentData() or 'grc') or 'grc')
+                                                                idx_mode = local_mode_combo.findData(mode_val)
+                                                                if idx_mode < 0:
+                                                                    idx_mode = 0
+                                                                local_mode_combo.blockSignals(True)
+                                                                local_mode_combo.setCurrentIndex(idx_mode)
+                                                                local_mode_combo.blockSignals(False)
                                                             except Exception:
                                                                 pass
-                                                        except Exception:
-                                                            pass
+                                                            try:
+                                                                local_pwd_edit.blockSignals(True)
+                                                                local_pwd_edit.setText(persisted.get('password', local_pwd_edit.text()) or '')
+                                                                local_pwd_edit.blockSignals(False)
+                                                            except Exception:
+                                                                pass
+                                                            try:
+                                                                val_cols = int(persisted.get('grid_cols', local_grid.value()) or local_grid.value())
+                                                                local_grid.blockSignals(True)
+                                                                local_grid.setValue(val_cols)
+                                                                local_grid.blockSignals(False)
+                                                            except Exception:
+                                                                pass
+                                                            try:
+                                                                delete_orig_cb.blockSignals(True)
+                                                                delete_orig_cb.setChecked(bool(persisted.get('delete_original', delete_orig_cb.isChecked())))
+                                                                delete_orig_cb.blockSignals(False)
+                                                            except Exception:
+                                                                pass
+                                                            try:
+                                                                app_page._rh_local_decode_enabled = bool(local_cb.isChecked())
+                                                                app_page._rh_local_decode_mode = str(mode_val if 'mode_val' in locals() else (local_mode_combo.currentData() or 'grc') or 'grc')
+                                                                app_page._rh_local_password = str(local_pwd_edit.text() or '')
+                                                                app_page._rh_local_grid_cols = int(local_grid.value())
+                                                                app_page._rh_local_delete_original = bool(delete_orig_cb.isChecked())
+                                                            except Exception:
+                                                                pass
+                                                            try:
+                                                                # restore sidebar visibility state too
+                                                                vis = bool(persisted.get('sidebar_visible', False))
+                                                                try:
+                                                                    sidebar_frame.setVisible(vis)
+                                                                except Exception:
+                                                                    pass
+                                                                try:
+                                                                    app_page._rh_local_sidebar_visible = vis
+                                                                except Exception:
+                                                                    pass
+                                                            except Exception:
+                                                                pass
+                                                            try:
+                                                                _update_local_grid_visibility(local_mode_combo.currentData())
+                                                            except Exception:
+                                                                pass
+                                                            try:
+                                                                _persist_local_decode_settings(app_page)
+                                                            except Exception:
+                                                                pass
+                                                    except Exception:
+                                                        pass
+                                                except Exception:
+                                                    pass
+                                            except Exception:
+                                                sidebar_frame = QtWidgets.QFrame()
+
+                                            # hide sidebar by default
+                                            try:
+                                                sidebar_frame.setVisible(False)
+                                            except Exception:
+                                                pass
+
+                                            # small toggle button above previews to show/hide sidebar
+                                            try:
+                                                toggle_row = QtWidgets.QHBoxLayout()
+                                                toggle_row.setContentsMargins(0, 0, 0, 0)
+                                                toggle_row.setSpacing(6)
+                                                toggle_btn = QtWidgets.QToolButton()
+                                                toggle_btn.setText('本地解码设置')
+                                                toggle_btn.setObjectName('rhSecondaryButton')
+                                                toggle_btn.setMinimumHeight(32)
+                                                toggle_btn.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
+                                                toggle_btn.setToolTip('展开之后发起任务使用的本地解码选项')
+                                                app_page._rh_decode_toggle = toggle_btn
+                                                app_page._rh_decode_panel = sidebar_frame
+                                                toggle_btn.setCheckable(True)
+                                                toggle_btn.setChecked(False)
+                                                def _toggle_sidebar(checked):
+                                                    try:
+                                                        sidebar_frame.setVisible(bool(checked))
                                                         try:
-                                                            _update_local_grid_visibility(local_mode_combo.currentData())
+                                                            # remember per-page state
+                                                            app_page._rh_local_sidebar_visible = bool(checked)
                                                         except Exception:
                                                             pass
                                                         try:
                                                             _persist_local_decode_settings(app_page)
                                                         except Exception:
                                                             pass
-                                                except Exception:
-                                                    pass
-                                            except Exception:
-                                                pass
-                                        except Exception:
-                                            sidebar_frame = QtWidgets.QFrame()
-
-                                        # hide sidebar by default
-                                        try:
-                                            sidebar_frame.setVisible(False)
-                                        except Exception:
-                                            pass
-
-                                        # small toggle button above previews to show/hide sidebar
-                                        try:
-                                            toggle_row = QtWidgets.QHBoxLayout()
-                                            toggle_row.setContentsMargins(0, 0, 0, 0)
-                                            toggle_row.setSpacing(6)
-                                            toggle_btn = QtWidgets.QToolButton()
-                                            toggle_btn.setText('本地解码设置')
-                                            toggle_btn.setObjectName('rhSecondaryButton')
-                                            toggle_btn.setMinimumHeight(32)
-                                            toggle_btn.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
-                                            toggle_btn.setToolTip('展开之后发起任务使用的本地解码选项')
-                                            app_page._rh_decode_toggle = toggle_btn
-                                            app_page._rh_decode_panel = sidebar_frame
-                                            toggle_btn.setCheckable(True)
-                                            toggle_btn.setChecked(False)
-                                            def _toggle_sidebar(checked):
+                                                    except Exception:
+                                                        pass
                                                 try:
-                                                    sidebar_frame.setVisible(bool(checked))
-                                                    try:
-                                                        # remember per-page state
-                                                        app_page._rh_local_sidebar_visible = bool(checked)
-                                                    except Exception:
-                                                        pass
-                                                    try:
-                                                        _persist_local_decode_settings(app_page)
-                                                    except Exception:
-                                                        pass
+                                                    toggle_btn.toggled.connect(_toggle_sidebar)
                                                 except Exception:
                                                     pass
-                                            try:
-                                                toggle_btn.toggled.connect(_toggle_sidebar)
+                                                try:
+                                                    toggle_btn.blockSignals(True)
+                                                    init_vis = bool(getattr(app_page, '_rh_local_sidebar_visible', False))
+                                                    toggle_btn.setChecked(init_vis)
+                                                    sidebar_frame.setVisible(init_vis)
+                                                    toggle_btn.blockSignals(False)
+                                                except Exception:
+                                                    pass
+                                                toggle_row.addStretch(1)
+                                                # place the local decode enable checkbox to the left of the toggle
+                                                try:
+                                                    toggle_row.addWidget(local_cb)
+                                                except Exception:
+                                                    pass
+                                                toggle_row.addWidget(toggle_btn)
+                                                app_layout.insertLayout(1, toggle_row)
                                             except Exception:
                                                 pass
-                                            try:
-                                                toggle_btn.blockSignals(True)
-                                                init_vis = bool(getattr(app_page, '_rh_local_sidebar_visible', False))
-                                                toggle_btn.setChecked(init_vis)
-                                                sidebar_frame.setVisible(init_vis)
-                                                toggle_btn.blockSignals(False)
-                                            except Exception:
-                                                pass
-                                            toggle_row.addStretch(1)
-                                            # place the local decode enable checkbox to the left of the toggle
-                                            try:
-                                                toggle_row.addWidget(local_cb)
-                                            except Exception:
-                                                pass
-                                            toggle_row.addWidget(toggle_btn)
-                                            app_layout.insertLayout(1, toggle_row)
-                                        except Exception:
-                                            pass
 
                                         # add the preview scroll area and the sidebar into the container
                                         try:
-                                            app_layout.insertWidget(2, sidebar_frame)
+                                            if has_local_decode:app_layout.insertWidget(2, sidebar_frame)
                                             pc_h.addWidget(preview_stack, 1)
                                         except Exception:
                                             try:
@@ -7435,6 +7426,11 @@ class MainLayoutMixin:
                                 act_open = menu.addAction('打开应用网址')
                                 act_open_local = menu.addAction('在本地文件夹中打开')
                                 act_update = menu.addAction('更新应用')
+                                model_backend = getattr(_btn, '_rh_backend', 'rh_app')
+                                if model_backend != 'rh_app':
+                                    act_update.setEnabled(False)
+                                    act_update.setToolTip('保留本应用的模型定义和设置；可从对应分页添加新的模型应用')
+                                    act_open.setText('打开 RH 模型目录' if model_backend == 'rh_standard' else '打开 RH 接口文档')
                                 act_rename = menu.addAction('重命名')
                                 try:
                                     favs = getattr(self, 'rh_favorites', None)
@@ -7457,6 +7453,11 @@ class MainLayoutMixin:
                                     url2 = None
 
                                 if act == act_open:
+                                    if model_backend != 'rh_app':
+                                        from aetherloom_core.rh_model_apps import official_site
+                                        base = official_site(self._rh_connection_snapshot()['base_url'])
+                                        QtGui.QDesktopServices.openUrl(QtCore.QUrl(base + ('/call-api/standard-api' if model_backend == 'rh_standard' else '/runninghub-api-doc-cn/')))
+                                        return
                                     try:
                                         if url2:
                                             import webbrowser as _wb
@@ -8099,7 +8100,15 @@ class MainLayoutMixin:
                     pass
 
             try:
-                add_wf_btn.clicked.connect(_show_add_dialog)
+                def _show_category_add_dialog():
+                    tabs = getattr(self, '_rh_application_tabs', None)
+                    index = tabs.currentIndex() if tabs is not None else 0
+                    if index == 0:
+                        _show_add_dialog()
+                    else:
+                        from aetherloom_core.rh_model_app_ui import open_add
+                        open_add(self, os.path.join(current_dir, 'RH_apps'), 'rh_standard' if index == 1 else 'rh_llm')
+                add_wf_btn.clicked.connect(_show_category_add_dialog)
             except Exception:
                 pass
 
@@ -8154,6 +8163,8 @@ class MainLayoutMixin:
             if isinstance(runninghub_layout.itemAt(i).layout(), QtWidgets.QHBoxLayout)) + ((rh_hbox_l, 980),))
         self._rh_dashboard.apply_theme()
         self._rh_dashboard.setup_header(runninghub_layout)
+        from aetherloom_core.rh_model_app_ui import dashboard_tabs
+        dashboard_tabs(self, runninghub_layout, os.path.join(current_dir, 'RH_apps'))
         self._rh_dashboard.watch_grid(rh_flow_scroll, _reflow_buttons)
         self.pages.addWidget(runninghub_page)
 
@@ -8743,11 +8754,6 @@ class MainLayoutMixin:
         self.settings_btn.clicked.connect(_set_settings_page)
         self.local_btn.clicked.connect(_set_local_page)
         self.api_btn.clicked.connect(_set_api_page)
-        try:
-            if getattr(self, 'sidebar_toggle_btn', None):
-                self.sidebar_toggle_btn.clicked.connect(lambda: self._set_sidebar_collapsed(not getattr(self, '_sidebar_effective_collapsed', False)))
-        except Exception:
-            pass
         try:
             def _set_runninghub_page():
                 try:

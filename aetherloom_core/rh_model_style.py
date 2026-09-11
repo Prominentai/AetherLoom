@@ -8,7 +8,7 @@ def stylesheet(mode):
     check = (Path(__file__).resolve().parent.parent / 'icons' / 'ui-check.svg').as_posix()
     return f'''
         QDialog#rhModelPicker {{ background: {p['canvas']}; }}
-        QDialog#rhModelPicker QWidget {{ color: {p['text']}; font-size: 12px; }}
+        QDialog#rhModelPicker QWidget {{ color: {p['text']}; font-size: 13px; }}
         QDialog#rhModelPicker QLabel {{ border: none; background: transparent; padding: 0; }}
         QDialog#rhModelPicker QLabel#rhModelHeading {{ font-size: 20px; font-weight: 700; }}
         QDialog#rhModelPicker QLabel#rhModelSectionTitle {{ color: {p['text']}; font-size: 14px; font-weight: 600; }}

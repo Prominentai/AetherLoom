@@ -109,7 +109,8 @@ class AgentAccounts(QtCore.QObject):
         token = self.serial
         dialog = QtWidgets.QDialog(self.editor.owner); dialog.setWindowTitle('登录 ' + AGENTS[provider]['name'])
         dialog.setModal(True); dialog.resize(540, 250)
-        dialog.setStyleSheet(self.editor.owner.api_page.styleSheet().replace('#api_page_root', ''))
+        dialog._theme_source = lambda: self.editor.owner.api_page.styleSheet().replace('#api_page_root', '')
+        dialog.setStyleSheet(dialog._theme_source())
         layout = QtWidgets.QVBoxLayout(dialog); layout.setContentsMargins(22, 20, 22, 20); layout.setSpacing(14)
         message = QtWidgets.QLabel('正在准备安全登录…'); message.setWordWrap(True); layout.addWidget(message)
         url = QtWidgets.QLineEdit(); url.setReadOnly(True); url.setPlaceholderText('授权链接准备中'); layout.addWidget(url)

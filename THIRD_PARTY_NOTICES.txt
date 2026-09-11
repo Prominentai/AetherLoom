@@ -24,3 +24,10 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+RunningHub standard model parameter catalog
+Source: https://github.com/HM-RunningHub/ComfyUI_RH_OpenAPI
+License: Apache-2.0; full text: aetherloom_core/RH_MODEL_CATALOG_LICENSE.txt
+The models_registry.json data is redistributed inside rh_standard_catalog.json
+with provenance metadata. AetherLoom uses its own execution and UI adapters.

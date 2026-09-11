@@ -286,6 +286,10 @@ def collect_node_values(nodes, widgets):
         if not 0 <= index < len(result):
             continue
         value = None
+        if entry.get('files') is not None:
+            from .rh_multi_inputs import distribute
+            distribute(result, entry['multi_indices'], entry['files'].paths())
+            continue
         if entry.get('te') is not None:
             editor = entry['te']
             timer = getattr(editor, '_rh_persist_timer', None)

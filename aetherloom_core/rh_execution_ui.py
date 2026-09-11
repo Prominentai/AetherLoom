@@ -30,10 +30,11 @@ def app_snapshot(owner, captured):
         raise ValueError('应用缺少 webappId，请重新添加应用')
     title = str(parsed.get('title') or parsed.get('name') or parsed.get('webappName') or wid)
     output_dir, _ = app_output_directories(captured['output_dir'], title, wid)
-    return dict(webapp_id=wid, app_name=title, nodes=copy.deepcopy(captured['nodes']),
+    from .rh_model_apps import metadata, supports_local_decode
+    return dict(**metadata(parsed), webapp_id=wid, app_name=title, nodes=copy.deepcopy(captured['nodes']),
                 base_url=captured['host'], api_key=captured['api_key'],
                 api_keys=copy.deepcopy(captured.get('api_keys') or [captured['api_key']]), output_dir=output_dir,
-                input_dir=captured.get('input_dir'), decode_settings=copy.deepcopy(captured.get('decode_settings', {})),
+                input_dir=captured.get('input_dir'), decode_settings=copy.deepcopy(captured.get('decode_settings', {})) if supports_local_decode(parsed) else {'enabled': False},
                 retry_max=captured.get('retry_max', 100), retry_delay=captured.get('retry_delay', 5),
                 retry_concurrency=captured.get('retry_concurrency', 25), origin=copy.deepcopy(captured.get('origin') or {}))
 
@@ -63,8 +64,9 @@ def prepare_canvas_app(owner, node, nodes):
         keys = list(getattr(lifecycle, 'site_keyrings', {}).get(host) or ([key] if key else []))
     title = str(app.get('name') or node.get('title') or wid)
     directory, _ = app_output_directories(owner.output_dir, title, wid)
-    return dict(webapp_id=wid, app_name=title, base_url=host, api_key=key, api_keys=keys,
-                nodes=copy.deepcopy(nodes), decode_settings=copy.deepcopy(node.get('decode_settings', {})),
+    from .rh_model_apps import metadata, supports_local_decode
+    return dict(**metadata(app), webapp_id=wid, app_name=title, base_url=host, api_key=key, api_keys=keys,
+                nodes=copy.deepcopy(nodes), decode_settings=copy.deepcopy(node.get('decode_settings', {})) if supports_local_decode(app) else {'enabled': False},
                 input_dir=owner.input_dir, output_dir=directory,
                 retry_max=getattr(owner, 'rh_retry_max', 100),
                 retry_delay=getattr(owner, 'rh_retry_delay', 5),
@@ -317,6 +319,8 @@ class AppResultBridge(QtCore.QObject):
 
     @staticmethod
     def _decode_summary(record):
+        from .rh_model_apps import supports_local_decode
+        if not supports_local_decode(record.get('snapshot') or {}):return '', ''
         decode = (record.get('snapshot') or {}).get('decode_settings')
         if not isinstance(decode, dict):
             return '本次解码：配置未记录', '本次任务未保存完整解码配置。'
@@ -371,7 +375,7 @@ class AppResultBridge(QtCore.QObject):
         source = ('画布 · ' + str(origin.get('canvas_name') or origin['canvas_id'])
                   + ' / ' + str(origin.get('node_title') or origin.get('node_id', ''))
                   if origin.get('canvas_id') else 'App 页面发起')
-        details = source + '\n' + summary + '\n' + summary_hint
+        details = '\n'.join(text for text in (source, summary, summary_hint) if text)
         card._rh_source_badge.setToolTip(details)
         card._rh_actions_button.setToolTip(details + '\n查看任务参数、取消任务或管理结果')
         card._rh_task_document = record.get('task_document')

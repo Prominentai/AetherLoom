@@ -8,7 +8,7 @@ from .mask_assets import matches
 
 def build(dialog,path,mask):
     layout=QtWidgets.QVBoxLayout(dialog);layout.setContentsMargins(12,12,12,10);layout.setSpacing(8)
-    canvas=dialog.canvas=AdvancedMaskCanvas(path,dialog)
+    canvas=dialog.canvas=AdvancedMaskCanvas(path,dialog);canvas.setMinimumHeight(120)
     if matches(mask,path):canvas.restore_config(mask)
     tabs=dialog.edit_tabs=QtWidgets.QTabBar(dialog);tabs.setObjectName('imageEditTabs')
     tabs.addTab('遮罩绘制');tabs.addTab('直接绘制');tabs.setExpanding(True);layout.addWidget(tabs)
@@ -35,7 +35,8 @@ def build(dialog,path,mask):
         display=QtWidgets.QLineEdit(value);display.setReadOnly(True);display.setPlaceholderText('尚未保存；运行时保存到输入目录 / '+('paintings' if attribute=='paint_path_display' else 'masks'))
         display.setToolTip(value);setattr(dialog,attribute,display);row.addWidget(display,1);layout.addWidget(container);path_rows[attribute]=container
     body=QtWidgets.QHBoxLayout();body.setSpacing(8)
-    rail=QtWidgets.QVBoxLayout();rail.setSpacing(6);group=QtWidgets.QButtonGroup(dialog);group.setExclusive(True)
+    rail_content=QtWidgets.QWidget();rail=QtWidgets.QVBoxLayout(rail_content);rail.setContentsMargins(0,0,0,0);rail.setSpacing(6)
+    group=QtWidgets.QButtonGroup(dialog);group.setExclusive(True)
     buttons={}
     tools=[('mask','遮罩笔','B'),('paint','绘画笔','P'),('erase','橡皮擦','E'),('fill','油漆桶','G'),('color','选色区','C')]
     def choose(tool):
@@ -53,7 +54,9 @@ def build(dialog,path,mask):
     rail.addStretch()
     for label,callback in [('适应',canvas.fit),('100%',canvas.actual_size)]:
         button=QtWidgets.QPushButton(label);button.setFixedSize(78,32);button.clicked.connect(callback);rail.addWidget(button)
-    body.addLayout(rail);body.addWidget(canvas,1)
+    rail_scroll=QtWidgets.QScrollArea();rail_scroll.setFrameShape(QtWidgets.QFrame.NoFrame);rail_scroll.setWidgetResizable(True)
+    rail_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff);rail_scroll.setFixedWidth(94);rail_scroll.setWidget(rail_content)
+    body.addWidget(rail_scroll);body.addWidget(canvas,1)
     sidebar=QtWidgets.QScrollArea();sidebar.setFrameShape(QtWidgets.QFrame.NoFrame);sidebar.setWidgetResizable(True)
     sidebar.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff);sidebar.setFixedWidth(204)
     content=QtWidgets.QWidget();settings=QtWidgets.QVBoxLayout(content);settings.setContentsMargins(6,0,6,0);settings.setSpacing(7)

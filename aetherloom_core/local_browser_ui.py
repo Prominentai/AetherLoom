@@ -213,14 +213,15 @@ def configure(window, page):
             retire_layout(item.layout())
     layout = page.layout()
     retire_layout(layout)
-    layout.setContentsMargins(14, 16, 16, 12)
-    layout.setSpacing(12)
+    from .ui import design
+    design.page_layout(page, layout)
 
     header = QtWidgets.QHBoxLayout()
     titles = QtWidgets.QVBoxLayout()
     titles.setSpacing(3)
     title = QtWidgets.QLabel('本地文件')
     title.setObjectName('localTitle')
+    design.title(title)
     hint = QtWidgets.QLabel('浏览输入素材与生成结果')
     hint.setObjectName('rhSubtitle')
     titles.addWidget(title)
@@ -234,7 +235,7 @@ def configure(window, page):
     window.local_refresh_btn.clicked.connect(lambda: window._refresh_local_list())
     header.addWidget(window.local_preview_btn)
     header.addWidget(window.local_refresh_btn)
-    layout.addLayout(header)
+    layout.addWidget(design.header(header))
 
     browse_row = QtWidgets.QHBoxLayout()
     browse_row.setSpacing(8)

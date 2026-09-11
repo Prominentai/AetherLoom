@@ -277,6 +277,35 @@ class _HostCombo(QtWidgets.QComboBox):
         event.ignore()
 
 
+class SiteSwitchButton(QtWidgets.QPushButton):
+    """A view of the shared site selection, never a separate per-page setting."""
+    def __init__(self, owner, parent=None):
+        super().__init__(parent)
+        self.settings = ensure_connections(owner)
+        self.owner = owner
+        self.setObjectName('rhSecondaryButton')
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setAutoDefault(False)
+        self.setMinimumHeight(34)
+        self.clicked.connect(self.switch_site)
+        self.settings.changed.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self):
+        cn = self.settings.host == SITES[0][0]
+        label, other = ('中文站', '国际站') if cn else ('国际站', '中文站')
+        self.setText(label + ' ⇄')
+        self.setAccessibleName('当前' + label + '，切换到' + other)
+        self.setToolTip(f'当前：{self.settings.host}\n点击切换到{other}，使用该站点的 API Key。\n与连接设置同步；已发起任务保持原站点。')
+
+    def switch_site(self):
+        target = SITES[1][0] if self.settings.host == SITES[0][0] else SITES[0][0]
+        if not self.settings._guard(lambda:self.settings.set_host(target)):
+            callback = getattr(self.owner, '_show_toast', None)
+            if callback:callback('站点切换未保存，请检查连接设置。', 3500)
+        self.refresh()
+
+
 from .rh_connection_panel import RhConnectionPanel
 
 
@@ -286,8 +315,8 @@ def open_connection_settings(owner, parent=None):
         dialog = QtWidgets.QDialog(owner if isinstance(owner, QtWidgets.QWidget) else parent)
         dialog.setWindowTitle('RunningHub 连接设置')
         dialog.setModal(False)
-        dialog.resize(560, 640)
-        dialog.setMinimumSize(360, 460)
+        dialog.resize(620, 680)
+        dialog.setMinimumSize(360, 360)
         layout = QtWidgets.QVBoxLayout(dialog)
         layout.setContentsMargins(0, 0, 0, 0)
         panel = RhConnectionPanel(ensure_connections(owner), dialog)

@@ -14,6 +14,7 @@ import requests
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from aetherloom_core import __version__
+from . import design
 
 REPOSITORY = 'https://github.com/Prominentai/AetherLoom'
 README_URL = REPOSITORY + '/blob/main/README.md'
@@ -276,18 +277,18 @@ class HomePage(QtWidgets.QWidget):
         self.setObjectName('aetherHome')
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(16)
+        design.page_layout(self, layout)
         self.hero = QtWidgets.QHBoxLayout()
         self.hero.setSpacing(16)
         self.logo = QtWidgets.QLabel()
-        self.logo.setFixedSize(72, 72)
-        self.logo.setPixmap(QtGui.QIcon(str(Path(directory) / 'icons' / 'home_emblem.svg')).pixmap(72, 72))
+        self.logo.setFixedSize(48, 48)
+        self.logo.setPixmap(QtGui.QIcon(str(Path(directory) / 'icons' / 'home_emblem.svg')).pixmap(48, 48))
         self.hero.addWidget(self.logo)
         heading = QtWidgets.QVBoxLayout()
         heading.setSpacing(4)
         title = QtWidgets.QLabel('AetherLoom')
         title.setObjectName('homeHeading')
+        design.title(title)
         heading.addWidget(title)
         self.subtitle = QtWidgets.QLabel('连接云端应用，在本地组织创作。')
         self.subtitle.setObjectName('homeMuted')
@@ -297,7 +298,7 @@ class HomePage(QtWidgets.QWidget):
         version = QtWidgets.QLabel('v' + __version__)
         version.setObjectName('homeVersion')
         self.hero.addWidget(version, 0, QtCore.Qt.AlignTop)
-        layout.addLayout(self.hero)
+        layout.addWidget(design.header(self.hero))
         self.actions = QtWidgets.QHBoxLayout()
         self.actions.setSpacing(10)
         for label, description, attr in (
@@ -359,7 +360,7 @@ class HomePage(QtWidgets.QWidget):
         text, muted, surface, border, accent = (('#172b46', '#586d87', '#ffffff', '#d8e3ef', '#146eac') if light
                                                else ('#e5edf9', '#9aadc7', '#182235', '#2d3d54', '#8bceef'))
         self.setStyleSheet('''
-            QWidget#aetherHome { background: %s; }
+            QWidget#aetherHome, QWidget#homeContent { background: %s; }
             QWidget#aetherHome QLabel { color: %s; background: transparent; }
             QLabel#homeHeading { font-size: 34px; font-weight: 700; }
             QWidget#aetherHome QLabel#homeMuted { color: %s; font-size: 12px; }

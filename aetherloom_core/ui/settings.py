@@ -24,7 +24,7 @@ class SettingsMixin:
             import json
             # capture current UI settings
             try:
-                geom = self.normalGeometry() if self.isMaximized() else self.geometry()
+                geom = self.normalGeometry() if (self.isMaximized() or self.isFullScreen() or self.isMinimized()) else self.geometry()
             except Exception:
                 geom = self.geometry()
             screen = None
@@ -478,21 +478,19 @@ class SettingsMixin:
                         cfg.pop('system_prompt', None)
                         cfg.pop('merge_system_prompt', None)
                 self.api_settings = merged
+                from aetherloom_core.api_provider_editor import migrate_legacy_custom
+                migrate_legacy_custom(self)
+                if hasattr(self, '_refresh_apikey_rows'):self._refresh_apikey_rows()
                 if hasattr(self, 'api_config_fields'):
                     for k, fields in self.api_config_fields.items():
                         cfg = merged.get(k, {}) if isinstance(merged, dict) else {}
+                        with QtCore.QSignalBlocker(fields['provider']):
+                            fields['provider'].clear()
+                            for text, value in self._provider_items_for_category(k):fields['provider'].addItem(text, value)
                         try:
                             provider_val = str(cfg.get('provider', ''))
-                            # detect provider values in form 'custom_<category>' and map to 'custom' for UI
                             custom_provider_key = None
-                            try:
-                                if isinstance(provider_val, str) and provider_val.startswith('custom_'):
-                                    parts = provider_val.split('_', 1)
-                                    if len(parts) == 2 and parts[1]:
-                                        custom_provider_key = parts[1]
-                                        provider_val = 'custom'
-                            except Exception:
-                                custom_provider_key = None
+                            if provider_val == 'custom':provider_val = 'custom_' + k
                             endpoint_val = str(cfg.get('endpoint', ''))
                             model_val = str(cfg.get('model', ''))
                             # provider combo
@@ -508,8 +506,7 @@ class SettingsMixin:
                                         fields['provider'].setCurrentIndex(0)
                                         provider_val = fields['provider'].itemData(0)
                                     else:
-                                        fields['provider'].addItem('自定义', 'custom')
-                                        fields['provider'].setCurrentIndex(0)
+                                        fields['provider'].setCurrentIndex(-1)
                             except Exception:
                                 pass
 
@@ -525,7 +522,7 @@ class SettingsMixin:
                                 effective_endpoint = ''
                                 effective_model = ''
                                 effective_api_key = ''
-                                effective_timeout = 30
+                                effective_timeout = 90
                                 if custom_entry:
                                     effective_endpoint = custom_entry.get('endpoint', '') or ''
                                     effective_model = custom_entry.get('model', '') or ''
@@ -546,7 +543,7 @@ class SettingsMixin:
                                 effective_endpoint = endpoint_val
                                 effective_model = model_val
                                 effective_api_key = cfg.get('api_key', '')
-                                effective_timeout = cfg.get('timeout', 30)
+                                effective_timeout = cfg.get('timeout', 90)
 
                             # Ollama does not use API keys: ensure api_key is empty for that provider
                             try:
@@ -617,7 +614,7 @@ class SettingsMixin:
                             except Exception:
                                 pass
                             try:
-                                fields['timeout'].setValue(int(effective_timeout or 30))
+                                fields['timeout'].setValue(int(effective_timeout or 90))
                             except Exception:
                                 pass
                             # ensure provider profile map has at least the active entry populated
@@ -625,7 +622,7 @@ class SettingsMixin:
                                 'endpoint': str(fields['endpoint'].text()),
                                 'api_key': str(fields['api_key'].text()),
                                 'model': str(fields['model'].currentText()) if fields.get('model') is not None else '',
-                                'timeout': int(fields['timeout'].value()) if fields.get('timeout') else 30,
+                                'timeout': int(fields['timeout'].value()) if fields.get('timeout') else 90,
                             }
                             if provider_val == 'baidu_translate':
                                 try:

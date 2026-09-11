@@ -90,17 +90,29 @@ def _outputs(data, protocol):
     return data.get('data') or data.get('images') or []
 
 
-def generate(config, prompt, image_path=None, *, system_prompt='', timeout=120, stop=None):
+def generate(config, prompt, image_path=None, *, system_prompt='', timeout=90, stop=None):
     protocol = config.get('protocol') or config.get('provider')
     check_stop(stop)
-    source = load_image(image_path) if image_path else None
+    paths = list(image_path) if isinstance(image_path, (list, tuple)) else [image_path] if image_path else []
+    if isinstance(image_path, (list, tuple)) and not paths:
+        raise ProviderAPIError('图像编辑 Batch 为空，未提交请求。', status='invalid_image')
+    if paths:
+        from aetherloom_core.image_model_catalog import validate_edit_input_count
+        try:validate_edit_input_count(config, len(paths))
+        except ValueError as error:raise ProviderAPIError(str(error), status='invalid_image') from error
+    if sum(Path(path).stat().st_size for path in paths) > MAX_BYTES:
+        raise ProviderAPIError('单次编辑的输入图像合计超过 32 MB，请缩小图片或减少 Batch 项数。', status='invalid_image')
+    sources = []
+    for path in paths:
+        check_stop(stop);sources.append(load_image(path))
+    source = sources[0] if sources else None
     if protocol in ('agent_codex', 'agent_grok'):
         from aetherloom_core.agent_client import edit_images, generate_images
         args = (protocol, config.get('api_key', ''), config['model'], prompt)
         options = dict(timeout=timeout, system_prompt=system_prompt or None,
                        merge_system_prompt=config.get('merge_system_prompt', False))
         if source:
-            return edit_images(*args, [(source[0], base64.b64encode(source[1]).decode('ascii'))], **options)
+            return edit_images(*args, [(mime, base64.b64encode(raw).decode('ascii')) for mime, raw in sources], **options)
         return generate_images(*args, **options)
     if str(protocol).startswith('agent_'):
         raise ProviderAPIError('此 Agent 不支持图像生成或编辑。', status='unsupported')
@@ -108,30 +120,32 @@ def generate(config, prompt, image_path=None, *, system_prompt='', timeout=120, 
     deadline = time.monotonic() + timeout
     headers = {'Authorization': 'Bearer ' + config.get('api_key', '')}
     payload = dict(model=config['model'], prompt=prompt)
-    data_url = ('data:' + source[0] + ';base64,' + base64.b64encode(source[1]).decode('ascii')) if source else None
+    data_urls = ['data:' + mime + ';base64,' + base64.b64encode(raw).decode('ascii') for mime, raw in sources]
+    data_url = data_urls[0] if data_urls else None
     files = None
     if protocol == 'gemini':
         headers = {'x-goog-api-key': config.get('api_key', '')}
         content = [dict(type='text', text=prompt)]
-        if source:content.append(dict(type='image', mime_type=source[0], data=data_url.split(',', 1)[1]))
+        content.extend(dict(type='image', mime_type=mime, data=url.split(',', 1)[1]) for (mime, raw), url in zip(sources, data_urls))
         payload = dict(model=config['model'], input=content, store=False)
     elif protocol == 'grok':
         payload['response_format'] = 'b64_json'
-        if source:payload['image'] = dict(url=data_url, type='image_url')
+        if len(sources) > 1:payload['images'] = [dict(url=url, type='image_url') for url in data_urls]
+        elif source:payload['image'] = dict(url=data_url, type='image_url')
     elif protocol in ('volcengine', 'byteplus_ap', 'byteplus_eu'):
         payload.update(response_format='b64_json', stream=False, sequential_image_generation='disabled')
-        if source:payload['image'] = data_url
+        if source:payload['image'] = data_urls if len(sources) > 1 else data_url
     elif protocol in ('siliconflow_cn', 'siliconflow_com'):
         if source:payload['image'] = data_url
     elif str(protocol).startswith('alibaba_'):
-        content = ([dict(image=data_url)] if source else []) + [dict(text=prompt)]
+        content = [dict(image=url) for url in data_urls] + [dict(text=prompt)]
         if 'image-synthesis' in url:
             payload = dict(model=config['model'], input=dict(prompt=prompt), parameters=dict(n=1))
             if source:
                 if config['model'].startswith('wanx2.1-'):
                     payload['input'].update(base_image_url=data_url, function='description_edit')
                 else:
-                    payload['input']['images'] = [data_url]
+                    payload['input']['images'] = data_urls
             headers['X-DashScope-Async'] = 'enable'
         else:
             payload = dict(model=config['model'], input=dict(messages=[dict(role='user', content=content)]), parameters=dict(n=1))
@@ -141,7 +155,10 @@ def generate(config, prompt, image_path=None, *, system_prompt='', timeout=120, 
         if source:raise ProviderAPIError('此供应商未接入图像编辑。', status='unsupported')
     elif protocol == 'openai' or str(protocol).startswith('custom'):
         # The custom image route follows the Images API, not chat completion.
-        if source:files = [('image', ('input' + ('.jpg' if source[0] == 'image/jpeg' else '.' + source[0].split('/')[1]), source[1], source[0]))]
+        if source:
+            files = [('image[]' if len(sources) > 1 else 'image',
+                      (f'input_{index+1}' + ('.jpg' if mime == 'image/jpeg' else '.' + mime.split('/')[1]), raw, mime))
+                     for index, (mime, raw) in enumerate(sources)]
     else:
         raise ProviderAPIError('此图像供应商的调用协议尚未接入。', status='unsupported')
     data = _http('POST', url, deadline, stop, headers=headers,

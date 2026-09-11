@@ -6,6 +6,19 @@ Regional catalogs are deliberately separate; saved custom names remain editable.
 from urllib.parse import urlsplit, urlunsplit
 
 IMAGE_CATEGORIES = ('text2img', 'image_edit')
+
+
+def validate_edit_input_count(config, count, *, batch=False):
+    """Enforce only known adapter limits; unknown cardinality stays unrestricted."""
+    protocol = config.get('protocol') or config.get('provider') or ''
+    name = config.get('model', '')
+    limit = (1 if protocol in ('siliconflow_cn', 'siliconflow_com') or name == 'dall-e-2'
+             or protocol.startswith('alibaba_') and name.startswith('wanx2.1-') else
+             5 if protocol in ('agent_codex', 'grok') else 3 if protocol == 'agent_grok' else None)
+    if limit is not None and count > limit:
+        raise ValueError(f'当前图像编辑接口最多接收 {limit} 张图像，此次为 {count} 张；请调整 Batch 组大小或转为 List 逐项运行。')
+
+
 CATALOG_UPDATED = '2026-09-10'
 OPENAI_MODELS = ['gpt-image-2.5-sunburst', 'gpt-image-2.5-flare', 'gpt-image-2']
 GEMINI_MODELS = ['gemini-3.1-flash-image', 'gemini-3-pro-image',

@@ -64,7 +64,7 @@ class TaskStore:
     """Atomically update a task map; never serialize API keys or Qt objects."""
 
     FIELDS = frozenset({'webapp_id', 'base_url', 'output_dir', 'status', 'decode_token',
-                        'run_id', 'app_name', 'submission_order', 'key_id', 'task_document'})
+                        'run_id', 'app_name', 'submission_order', 'key_id', 'task_document', 'backend'})
 
     @classmethod
     def clean_context(cls, value):
@@ -570,6 +570,10 @@ class TaskLifecycle:
     def _cancel_step(self, task_id, context):
         """At most one cancel and one confirmation query in this status slot."""
         if self._recovery_stopped(task_id):
+            return
+        if context.get('backend') == 'rh_standard':
+            self._note(context['webapp_id'], task_id, '已停止本地任务；客户端尚未接入标准模型远端取消，云端任务可能继续处理')
+            self._cancel_confirmed(task_id, context)
             return
         context = self.context(task_id, persisted=context, refresh_key=True)
         if not context.get('api_key'):

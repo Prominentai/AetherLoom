@@ -310,7 +310,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                         'endpoint': v.get('endpoint', ''),
                         'api_key': v.get('api_key', ''),
                         'model': v.get('model', ''),
-                        'timeout': v.get('timeout', 30),
+                        'timeout': v.get('timeout', 90),
                         'protocol': v.get('protocol', v.get('provider', '')),
                         'translation_prompt': v.get('translation_prompt', ''),
                     })
@@ -330,7 +330,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                     'endpoint': cfg.get('endpoint', ''),
                     'api_key': cfg.get('api_key', ''),
                     'model': cfg.get('model', ''),
-                    'timeout': cfg.get('timeout', 30),
+                    'timeout': cfg.get('timeout', 90),
                 })
         self.api_config_fields = {}
         os.makedirs(self.input_dir, exist_ok=True)
@@ -344,31 +344,16 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         self._active_screen_size = None
         self._active_screen_name = None
         self._pending_restore_maximized = False
-        self._screen_signal_bound = False
+        self._screen_window = None
         self._bound_screen = None
         base_font = self.font() or QtWidgets.QApplication.font()
         try:
             self._base_font_point = base_font.pointSizeF() if base_font is not None else 11.5
         except Exception:
             self._base_font_point = 11.5
-        # Sidebar sizing: prefer fractions of window/screen width over fixed px
-        # fraction of window width used for base sidebar width (e.g. 0.12 == 12%)
-        self._sidebar_base_frac = 0.06
-        # minimum fraction of window width for sidebar (won't shrink below this fraction)
-        self._sidebar_min_frac = 0.06
-        # fraction used for collapsed sidebar minimum width (icon-only)
-        self._sidebar_collapsed_min_frac = 0.04
-        # increase sidebar button height base so buttons are taller (interpreted as base units scaled)
-        self._sidebar_button_height_base = 110
-        # icon base size (scaled by UI scale)
-        self._sidebar_icon_px_base = 44
-        # legacy pixel fallback for environments where screen width cannot be determined
-        self._sidebar_base_width = 200
-        self._sidebar_collapsed_min_px = 80
-        # maximum fraction of window width the sidebar may occupy (conservative default)
-        self._sidebar_max_fraction = 0.12
-        # absolute maximum width in pixels for sidebar
-        self._sidebar_max_px = 420
+        # Stable logical pixels; Qt handles display DPI scaling.
+        self._sidebar_button_height_base = 44
+        self._sidebar_icon_px_base = 22
         self._theme_toggle_size_base = 52
         self._theme_toggle_icon_px_base = 32
         self._sidebar_buttons = []
@@ -432,18 +417,18 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                     'provider': provider_default,
                     'endpoint': endpoint_default,
                     'model': '',
-                    'timeout': 30,
+                    'timeout': 90,
                 }
         except Exception:
             pass
         if not base:
             base = {
-                'translator': {'provider': '', 'endpoint': '', 'model': '', 'timeout': 30},
+                'translator': {'provider': '', 'endpoint': '', 'model': '', 'timeout': 90},
                 'llm': {'provider': '', 'endpoint': '', 'model': '', 'timeout': 90},
-                'vision': {'provider': '', 'endpoint': '', 'model': '', 'timeout': 120},
-                'text2img': {'provider': '', 'endpoint': '', 'model': '', 'timeout': 120},
-                'image_edit': {'provider': '', 'endpoint': '', 'model': '', 'timeout': 150},
-                'runninghub': {'provider': '', 'endpoint': '', 'model': '', 'timeout': 30},
+                'vision': {'provider': '', 'endpoint': '', 'model': '', 'timeout': 90},
+                'text2img': {'provider': '', 'endpoint': '', 'model': '', 'timeout': 90},
+                'image_edit': {'provider': '', 'endpoint': '', 'model': '', 'timeout': 90},
+                'runninghub': {'provider': '', 'endpoint': '', 'model': '', 'timeout': 90},
             }
         return base
 
@@ -465,7 +450,6 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                 _api_debug(f"no providers for category {key}; api_catalog keys: {list(self.api_catalog.keys()) if isinstance(getattr(self, 'api_catalog', None), dict) else 'n/a'}")
         except Exception:
             pass
-        items.append(('自定义', 'custom'))
         return items
 
 
@@ -560,9 +544,9 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         else:
             model_val = ''
         try:
-            timeout_val = int(fields['timeout'].value()) if fields.get('timeout') else 30
+            timeout_val = int(fields['timeout'].value()) if fields.get('timeout') else 90
         except Exception:
-            timeout_val = 30
+            timeout_val = 90
         payload = {
             'endpoint': endpoint_val,
             'api_key': api_key_val,
@@ -2202,11 +2186,6 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
             super().resizeEvent(event)
         except Exception:
             pass
-        compact = self.width() < 1000
-        if compact != getattr(self, '_sidebar_auto_collapsed', False):
-            self._sidebar_auto_collapsed = compact
-            self._sidebar_auto_override = None
-            self._apply_ui_scale(getattr(self, '_ui_scale_factor', 1.0))
         try:
             # Debounced reflow of RunningHub app buttons when main window resizes
             if hasattr(self, '_reflow_rh_buttons'):

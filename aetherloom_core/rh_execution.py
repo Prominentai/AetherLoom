@@ -92,7 +92,7 @@ def public_snapshot(snapshot):
     """Copy only execution inputs suitable for models/files, removing secrets."""
     result = {key: copy.deepcopy(value) for key, value in snapshot.items()
               if key in {'webapp_id', 'app_name', 'base_url', 'nodes', 'output_dir',
-                         'retry_max', 'retry_delay', 'retry_concurrency', 'origin', 'run_id'}}
+                         'retry_max', 'retry_delay', 'retry_concurrency', 'origin', 'run_id', 'backend', 'model_definition'}}
     decode = snapshot.get('decode_settings') or {}
     result['decode_settings'] = {key: copy.deepcopy(value) for key, value in decode.items()
                                   if key in {'enabled', 'mode', 'grid_cols', 'delete_original',
@@ -262,6 +262,12 @@ class RhExecutionService(QtCore.QObject):
                                   body=None if legacy else dict(webappId=record['webapp_id'],
                                                                nodeInfoList=copy.deepcopy(public.get('nodes') or []))))
         document.update(self._document_state(record))
+        if snapshot.get('backend') in ('rh_standard', 'rh_llm'):
+            from .rh_model_runtime import llm_base, endpoint_path
+            document['backend'] = snapshot['backend']
+            document['post'].update(body=None, endpoint=(llm_base(snapshot['base_url']) + '/chat/completions'
+                if snapshot['backend'] == 'rh_llm' else normalize_base_url(snapshot['base_url'])
+                + endpoint_path(snapshot['model_definition']['endpoint'])))
         self.documents.put('applications', run_id, document,
                            private_password=(snapshot.get('decode_settings') or {}).get('password') or None)
 
@@ -440,7 +446,13 @@ class RhExecutionService(QtCore.QObject):
         snapshot['webapp_id'] = webapp_id
         snapshot['base_url'] = normalize_base_url(snapshot.get('base_url'))
         snapshot['output_dir'] = os.path.abspath(os.fspath(snapshot['output_dir']))
-        snapshot['decode_settings'] = frozen_decode_settings(snapshot.get('decode_settings'))
+        from .rh_model_apps import supports_local_decode
+        snapshot['decode_settings'] = frozen_decode_settings(snapshot.get('decode_settings') if supports_local_decode(snapshot) else {'enabled': False})
+        if snapshot.get('backend') == 'rh_standard':
+            from .rh_multi_inputs import values as array_values
+            for node in snapshot.get('nodes', []):
+                if isinstance(node, dict) and node.get('_model_multiple'):
+                    node['fieldValue'] = array_values(node.get('fieldValue'))
         run_id = str(snapshot.get('run_id') or uuid.uuid4().hex)
         snapshot['run_id'] = run_id
         with self._condition:
@@ -449,16 +461,18 @@ class RhExecutionService(QtCore.QObject):
             if run_id in self._records:
                 raise ValueError('运行标识已存在，不能重复提交')
             self._input_leases[run_id] = self.temporary.retain(
-                node.get('fieldValue','') for node in snapshot.get('nodes',[]) if isinstance(node,dict))
+                value for node in snapshot.get('nodes',[]) if isinstance(node,dict)
+                for value in (node.get('fieldValue') if isinstance(node.get('fieldValue'), list) else [node.get('fieldValue', '')]))
             self._snapshots[run_id] = snapshot
             self._records[run_id] = dict(
                 run_id=run_id, task_id=None, webapp_id=webapp_id,
                 app_name=str(snapshot.get('app_name') or webapp_id), status='LOCAL_WAIT',
                 submission_admitted=False,
                 progress=0, message='', results=[], output_files=[],
-                input_files=[os.path.abspath(node['fieldValue']) for node in snapshot.get('nodes', [])
-                             if isinstance(node, dict) and isinstance(node.get('fieldValue'), str)
-                             and os.path.isfile(node['fieldValue'])],
+                input_files=list(dict.fromkeys(os.path.abspath(value) for node in snapshot.get('nodes', [])
+                             if isinstance(node, dict)
+                             for value in (node['fieldValue'] if isinstance(node.get('fieldValue'), list) else [node.get('fieldValue')])
+                             if isinstance(value, str) and os.path.isfile(value))),
                 origin=copy.deepcopy(snapshot.get('origin') or {}), snapshot=public_snapshot(snapshot),
                 created_at=time.time(), updated_at=time.time())
             order = self.queue.reserve_orders(1)[0]
@@ -542,7 +556,13 @@ class RhExecutionService(QtCore.QObject):
 
     def _submit_worker(self, run_id, order):
         snapshot = self._snapshots[run_id]
+        if snapshot.get('backend') == 'rh_llm':
+            from .rh_llm_execution import execute_llm
+            return execute_llm(self, run_id, order, snapshot)
         api = self.lifecycle._api()
+        if snapshot.get('backend') == 'rh_standard':
+            from .rh_model_runtime import StandardAdapter
+            api = StandardAdapter(api, snapshot)
         task_id = None
         post_attempted = False
         post_document = {}
@@ -560,6 +580,19 @@ class RhExecutionService(QtCore.QObject):
             original_nodes = copy.deepcopy(snapshot.get('nodes') or [])
             if any(not isinstance(node, dict) for node in original_nodes):
                 raise ValueError('应用参数包含无效节点')
+            if snapshot.get('backend') == 'rh_standard':
+                from .rh_model_runtime import validate_inputs
+                validate_inputs(snapshot, original_nodes)
+                expanded = []
+                for node in original_nodes:
+                    values = node.get('fieldValue')
+                    if node.get('_model_multiple'):
+                        from .rh_multi_inputs import values as array_values
+                        values = array_values(values)
+                    if isinstance(values, list):
+                        expanded.extend(dict(node, fieldValue=value) for value in values)
+                    else:expanded.append(node)
+                original_nodes = expanded
             # Upload IDs are account-scoped. Cache each credential separately,
             # preserving successful uploads across FIFO retry rounds.
             uploads, copied_inputs = {}, set()
@@ -602,7 +635,8 @@ class RhExecutionService(QtCore.QObject):
                         response = api.upload_file(value, api_key=key, base_url=snapshot['base_url'], timeout=120)
                         validate_response(response, 'Upload file', api_key=key)
                         data = response.get('data')
-                        token = (data.get('fileName') or data.get('filePath')) if isinstance(data, dict) else None
+                        token = (data.get('download_url') if snapshot.get('backend') == 'rh_standard'
+                                 else data.get('fileName') or data.get('filePath')) if isinstance(data, dict) else None
                         if not isinstance(token, str) or not token.strip():
                             raise ValueError('上传失败，未返回文件标识')
                         key_uploads[source] = token
@@ -647,6 +681,9 @@ class RhExecutionService(QtCore.QObject):
                         phase='submitting', attempt=post_count,
                         body=dict(webappId=snapshot['webapp_id'], nodeInfoList=copy.deepcopy(nodes)),
                         credential_ref=dict(site=snapshot['base_url'], key_id=api_key_id(key)))
+                    if snapshot.get('backend') == 'rh_standard':
+                        from .rh_model_runtime import request_description
+                        post_document.update(request_description(snapshot, nodes))
                     self.documents.patch('applications', run_id, {'post': post_document})
                     self.documents.flush('applications', run_id)
                     try:
@@ -700,7 +737,8 @@ class RhExecutionService(QtCore.QObject):
                         post_attempted = False
                         self.documents.patch('applications', run_id,
                                              {'post': dict(post_document, phase='rejected', response_code=response.get('code'))})
-                        failures.append(f'第 {key_index} 个 Key 拒绝提交 (code={response.get("code")})')
+                        failures.append(f'第 {key_index} 个 Key 拒绝提交 (code={response.get("model_error_code", response.get("code"))})'
+                                        + (': ' + str(response.get('msg', ''))[:300] if snapshot.get('backend') == 'rh_standard' else ''))
                     else:
                         self.documents.patch('applications', run_id, {'post': dict(post_document, phase='unknown')})
                         raise RunningHubResponseError('服务端未返回有效 taskId，提交结果无法确认')
@@ -728,6 +766,7 @@ class RhExecutionService(QtCore.QObject):
                 raise RunningHubResponseError('服务端未返回有效 taskId，无法确认提交结果')
             decode = copy.deepcopy(snapshot.get('decode_settings') or {})
             context = dict(webapp_id=snapshot['webapp_id'], app_name=snapshot.get('app_name', ''),
+                backend=snapshot.get('backend', 'rh_app'),
                 run_id=run_id, base_url=snapshot['base_url'], api_key=api_key, key_id=api_key_id(api_key),
                 output_dir=snapshot['output_dir'], decode_settings=decode,
                 origin=copy.deepcopy(snapshot.get('origin') or {}), submission_order=order,
@@ -854,6 +893,11 @@ class RhExecutionService(QtCore.QObject):
         context['decode_settings'] = frozen_decode_settings(
             context.get('decode_settings'),
             legacy_missing=bool(context.get('decode_token') and not context.get('decode_settings')))
+        from .rh_model_apps import supports_local_decode
+        context['backend'] = saved_request.get('backend') or context.get('backend', 'rh_app')
+        if not supports_local_decode(context):
+            context['decode_settings'] = frozen_decode_settings({'enabled': False})
+            context.pop('decode_token', None)
         if (context['decode_settings'].get('password_required') and
                 not context['decode_settings'].get('password')):
             context['decode_settings']['password'] = self.documents.secret('applications', run_id) or ''
@@ -863,6 +907,7 @@ class RhExecutionService(QtCore.QObject):
                 self._cancel_requests.add(run_id)
             if run_id not in self._records:
                 snapshot = dict(copy.deepcopy(saved_request),
+                    backend=saved_request.get('backend') or context.get('backend', 'rh_app'),
                     webapp_id=str(context['webapp_id']), app_name=context.get('app_name', ''),
                     base_url=context.get('base_url'), output_dir=context.get('output_dir'),
                     nodes=copy.deepcopy(saved_request.get('nodes') or []),
@@ -932,6 +977,9 @@ class RhExecutionService(QtCore.QObject):
                     'INTERRUPTED': '客户端会话已结束', 'CANCELING': '正在取消，自动重试并确认状态',
                     'CANCEL_FAILED': '取消尚未确认，可再次取消；保留任务并继续查询'}
         changes = dict(status=value, message=messages.get(value, value))
+        if value == 'CANCELED' and current.get('snapshot', {}).get('backend') == 'rh_standard':
+            changes.update(message='已停止本地任务；客户端尚未接入标准模型远端取消，云端任务可能继续处理',
+                           warning='仅停止本地跟踪，未确认云端取消')
         with self.lifecycle.lock:
             task_context = self.owner._rh_task_contexts.get(task_id, {})
             if task_context.get('cloud_success') or value in {'DOWNLOADING', 'DOWNLOAD_FAILED', 'WAITING_FOR_SECRET', 'SUCCESS'}:
@@ -959,7 +1007,8 @@ class RhExecutionService(QtCore.QObject):
             decoded_output_path, remember_decoded_output)
         from aetherloom_core.services.decoding import grc
         cancelled = lambda: self.lifecycle._cancelled(task_id)
-        decode = copy.deepcopy(context.get('decode_settings') or {})
+        from .rh_model_apps import supports_local_decode
+        decode = copy.deepcopy(context.get('decode_settings') or {}) if supports_local_decode(context) else {'enabled': False}
         token = context.get('decode_token')
         needs_decode = bool(decode.get('enabled') and token and
                             any(Path(path).suffix.lower() in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS for path in paths))
@@ -1067,9 +1116,11 @@ class RhExecutionService(QtCore.QObject):
                 self._snapshots.pop(run_id, None)
             self._condition.notify_all()
         if not record.get('task_id'):
-            self._publish(run_id, status='CANCELING' if post_inflight else 'CANCELED',
+            llm = record.get('snapshot', {}).get('backend') == 'rh_llm'
+            self._publish(run_id, status='CANCELING' if post_inflight and not llm else 'CANCELED',
                           cancel_requested=True,
-                          message='提交响应返回后自动取消' if post_inflight else '已取消本地等待任务')
+                          message='已停止本地接收；已发出的 LLM 请求可能仍在云端处理' if llm and post_inflight
+                          else '提交响应返回后自动取消' if post_inflight else '已取消本地等待任务')
         if pending is not None:
             # Canvas observers first stop dependent queued items, then this
             # cancellation can release the next shared FIFO position.

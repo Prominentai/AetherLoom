@@ -438,25 +438,12 @@ class WorkflowQueue(QtCore.QObject):
         return bool(self._cancelable.get(canvas_id, 0)) if canvas_id is not None else any(self._cancelable.values())
 
     def _hydrate(self, group):
-        prepared = copy.deepcopy(group.get('prepared', {}))
-        connection = getattr(self.owner, '_rh_connection_settings', None)
-        for node_id, options in prepared.items():
-            if options.get('model_node') or options.get('local_node'):
-                continue  # API/Agent credentials must never be replaced by RH keys.
-            if connection is not None:
-                credentials = connection.snapshot(options.get('base_url'))
-                options.update(api_key=credentials['api_key'], api_keys=credentials['api_keys'])
-            elif not options.get('api_key') and not options.get('api_keys'):
-                # Headless owners/tests can supply a non-widget credential reader.
-                nodes = {node['id']: node for node in group['snapshot']['nodes']}
-                try:
-                    fresh = self.engine.prepare_app(copy.deepcopy(nodes[node_id]), model.canonical_fields(nodes[node_id]))
-                    for key in ('api_key', 'api_keys'):
-                        if key in fresh:
-                            options[key] = copy.deepcopy(fresh[key])
-                except Exception as error:
-                    options.setdefault('_preparation_error', str(error))
-        return prepared
+        # Workflows are session-only and capture credentials when enqueued.
+        # Re-reading connections here would redirect waiting workflows and later
+        # batches to different accounts. Preserve even an empty ring/error;
+        # a newly configured connection applies only to a newly requested run.
+        # TaskId download recovery resolves its exact saved key in TaskLifecycle.
+        return copy.deepcopy(group.get('prepared', {}))
 
     def _document(self, canvas_id):
         if not self.store.path_for(canvas_id).is_file():

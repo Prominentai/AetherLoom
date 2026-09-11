@@ -107,6 +107,18 @@ def _run_states(document):
 
 def _visit_paths(document, transform, include_results=True):
     """Visit only file-bearing fields; never rewrite arbitrary prompt strings."""
+    media_fields = ('image', 'video', 'audio', 'file', 'archive', 'image_input', 'video_input', 'audio_input')
+    def media_value(value, field):
+        if field.get('_model_multiple'):
+            from aetherloom_core.rh_multi_inputs import values
+            if isinstance(value, list) or isinstance(value, str) and value.lstrip().startswith('['):
+                return [transform(path) for path in values(value)]
+        return transform(value) if isinstance(value, str) and value else value
+    def result_records(results):
+        for result in results or []:
+            yield result
+            if canvas_model.result_type(result) == 'batch':
+                yield from canvas_model.batch_items(result)
     def masks(value):
         if isinstance(value,list):
             for item in value:masks(item)
@@ -127,28 +139,26 @@ def _visit_paths(document, transform, include_results=True):
             if isinstance(params.get('files'), list):
                 params['files'] = [transform(path, required=True) for path in params['files']]
             for field in app_fields(node):
-                if field_type(field) not in ('image', 'video', 'audio', 'file'):
+                if field_type(field) not in media_fields:
                     continue
                 value = field.get('fieldValue')
-                if isinstance(value, str) and value:
-                    field['fieldValue'] = transform(value)
+                field['fieldValue'] = media_value(value, field)
                 key = '{}::{}'.format(field.get('nodeId', ''), field.get('fieldName', ''))
-                if isinstance(params.get(key), str) and params[key]:
-                    params[key] = transform(params[key])
+                if key in params:params[key] = media_value(params[key], field)
             if include_results:
-                for result in node.get('results') or []:
+                for result in result_records(node.get('results')):
                     if result.get('path'):
                         result['path'] = transform(result['path'], required=True)
     if include_results:
         for prepared in (document.get('run') or {}).get('prepared', {}).values():
             for field in prepared.get('nodes') or []:
-                if field_type(field) in ('image', 'video', 'audio', 'file') and isinstance(field.get('fieldValue'), str):
-                    field['fieldValue'] = transform(field['fieldValue'])
+                if field_type(field) in media_fields:
+                    field['fieldValue'] = media_value(field.get('fieldValue'), field)
             for key in ('input_dir', 'output_dir'):
                 if isinstance(prepared.get(key), str) and prepared[key]:
                     prepared[key] = transform(prepared[key], required=True)
         for unused, state, unused_current in _run_states(document):
-            for result in state.get('results') or []:
+            for result in result_records(state.get('results')):
                 if result.get('path'):
                     result['path'] = transform(result['path'], required=True)
             for item in state.get('items') or []:
@@ -156,13 +166,13 @@ def _visit_paths(document, transform, include_results=True):
                     if isinstance(item.get(key), list):
                         item[key] = [transform(path, required=True) for path in item[key]]
                 for field in (item.get('snapshot') or {}).get('nodes') or []:
-                    if field_type(field) in ('image', 'video', 'audio', 'file') and isinstance(field.get('fieldValue'), str):
-                        field['fieldValue'] = transform(field['fieldValue'])
+                    if field_type(field) in media_fields:
+                        field['fieldValue'] = media_value(field.get('fieldValue'), field)
                 for key in ('input_dir', 'output_dir'):
                     snapshot = item.get('snapshot') or {}
                     if isinstance(snapshot.get(key), str) and snapshot[key]:
                         snapshot[key] = transform(snapshot[key], required=True)
-                for result in item.get('results') or []:
+                for result in result_records(item.get('results')):
                     if result.get('path'):
                         result['path'] = transform(result['path'], required=True)
 

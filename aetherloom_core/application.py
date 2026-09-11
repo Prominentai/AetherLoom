@@ -21,6 +21,9 @@ def main():
     # Qt owns physical-to-logical pixel conversion; enable it before QApplication.
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+    # Preserve Windows fractional scaling (125%, 150%, 175%) on each monitor.
+    QtGui.QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+        QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationVersion(__version__)
 

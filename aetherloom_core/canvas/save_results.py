@@ -35,6 +35,12 @@ def save_results(results, directory, stop=None, overwrite=False, *, names=None):
     for index, result in enumerate(results):
         check()
         item = copy.deepcopy(result)
+        from . import model
+        if model.result_type(item) == 'batch':
+            if names is not None:raise ValueError('文件重命名不接受 Batch，请在列表转 Batch 前重命名')
+            item['items'] = save_results(model.batch_items(item), directory, stop, overwrite)
+            saved.append(item)
+            continue
         source = Path(item['path']) if item.get('path') else None
         if source and not source.is_file():raise FileNotFoundError('待保存的结果文件不存在：' + str(source))
         if overwrite and names is None and source and source.parent.resolve() == folder.resolve():

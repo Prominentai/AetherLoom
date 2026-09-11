@@ -5,6 +5,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from aetherloom_core.rh_ui import palette
 from aetherloom_core.autocomplete import completion_options
+from . import design
 
 
 def _completion_card(window):
@@ -65,13 +66,15 @@ def _header(frame, title, description, eyebrow):
         item = layout.takeAt(0)
         if item.widget() is not None:
             item.widget().deleteLater()
-    layout.setContentsMargins(22, 20, 22, 20)
-    layout.setSpacing(7)
-    for name, text in (('preferenceEyebrow', eyebrow), ('preferenceTitle', title),
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(4)
+    frame.setMinimumHeight(design.HEADER_HEIGHT)
+    for name, text in (('preferenceTitle', title),
                        ('preferenceDescription', description)):
         label = QtWidgets.QLabel(text)
         label.setObjectName(name)
         label.setWordWrap(True)
+        if name == 'preferenceTitle':design.title(label)
         layout.addWidget(label)
 
 
@@ -122,9 +125,9 @@ class ResponsivePreferences(QtCore.QObject):
 
     def update(self):
         width = self.scroll.viewport().width()
-        gutter = 16 if width < 720 else 28
+        gutter = 12 if width < design.COMPACT_WIDTH else design.PAGE_MARGIN
         gutter = max(gutter, (width - 1120) // 2)
-        self.layout.setContentsMargins(gutter, 24, gutter, 24)
+        self.layout.setContentsMargins(gutter, design.PAGE_MARGIN, gutter, design.PAGE_MARGIN)
         for row in self.rows:
             direction = QtWidgets.QBoxLayout.TopToBottom if width < 720 else QtWidgets.QBoxLayout.LeftToRight
             if row.direction() != direction:
@@ -154,8 +157,8 @@ def configure_settings(window, layout, column, hero):
     scroll = window.settings_page
     scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
     scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-    layout.setSpacing(18)
-    column.setSpacing(14)
+    layout.setSpacing(design.PAGE_GAP)
+    column.setSpacing(16)
     _header(hero, '设置中心', '管理文件位置、运行偏好与提示词模板。', '工作空间偏好')
     tabs = QtWidgets.QTabBar()
     tabs.setObjectName('preferenceTabs')
@@ -183,7 +186,7 @@ def configure_settings(window, layout, column, hero):
         while row.count():
             row.takeAt(0)
         field.setMinimumWidth(0)
-        field.setMinimumHeight(40)
+        field.setMinimumHeight(design.CONTROL)
         field.setToolTip(field.text())
         field.textChanged.connect(field.setToolTip)
         title = card.findChild(QtWidgets.QLabel, 'settingsCardTitle').text()
@@ -197,7 +200,7 @@ def configure_settings(window, layout, column, hero):
         actions_layout.addStretch(1)
         for button in (browse, open_button):
             button.setMinimumWidth(0)
-            button.setMinimumHeight(40)
+            button.setMinimumHeight(design.CONTROL)
             button.setAccessibleName(button.text() + '：' + title)
             button.setCursor(QtCore.Qt.PointingHandCursor)
             actions_layout.addWidget(button)
@@ -205,7 +208,7 @@ def configure_settings(window, layout, column, hero):
         row.addWidget(actions)
         folder_rows.append(row)
     for card in cards:
-        card.layout().setContentsMargins(20, 18, 20, 18)
+        card.layout().setContentsMargins(16, 16, 16, 16)
         card.layout().setSpacing(10)
     cards[3].findChild(QtWidgets.QLabel, 'settingsHint').setText('限制磁盘缩略图缓存占用；达到上限后自动清理较旧的缓存。')
     cards[4].findChild(QtWidgets.QLabel, 'settingsHint').setText('保留最近访问的 RH 应用页面，减少再次打开时的加载。')
@@ -301,8 +304,7 @@ def stylesheet(root, mode):
         {s} QWidget {{ background: transparent; color: {p['text']}; }}
         {s} QScrollArea {{ border: none; background: transparent; }}
         {s} QLabel {{ border: none; background: transparent; font-size: 13px; }}
-        {s} QFrame#preferenceHero {{ background: {p['surface']}; border: 1px solid {p['border']};
-            border-left: 3px solid {p['accent']}; border-radius: 12px; }}
+        {s} QFrame#preferenceHero {{ background: transparent; border: none; }}
         {s} QLabel#preferenceEyebrow {{ color: {p['accent']}; font-size: 12px; font-weight: 600; }}
         {s} QLabel#preferenceTitle {{ font-size: 26px; font-weight: 700; }}
         {s} QLabel#preferenceDescription, {s} QLabel#settingsHint, {s} QLabel#apiMuted {{ color: {p['muted']}; }}
@@ -312,12 +314,12 @@ def stylesheet(root, mode):
         {s} QLabel#settingsCardTitle {{ font-size: 16px; font-weight: 600; }}
         {s} QTabBar#preferenceTabs {{ background: {p['surface']}; border-radius: 9px; }}
         {s} QTabBar#preferenceTabs::tab {{ color: {p['muted']}; background: transparent;
-            border: none; border-radius: 6px; margin: 4px; padding: 10px 18px; font-size: 13px; }}
+            border: none; border-radius: 6px; margin: 2px; padding: 8px 14px; font-size: 13px; }}
         {s} QTabBar#preferenceTabs::tab:selected {{ background: {p['accent_soft']}; color: {p['accent']}; font-weight: 600; }}
         {s} QTabBar#preferenceTabs::tab:hover {{ color: {p['text']}; }}
         {s} QLineEdit, {s} QComboBox, {s} QSpinBox, {s} QTextEdit {{
             background: {p['input']}; color: {p['text']}; border: 1px solid {p['border']};
-            border-radius: 8px; padding: 8px 10px; min-height: 20px; font-size: 13px;
+            border-radius: 8px; padding: 5px 9px; min-height: 20px; font-size: 13px;
             selection-background-color: {p['accent']}; selection-color: white; }}
         {s} QLineEdit:focus, {s} QComboBox:focus, {s} QSpinBox:focus, {s} QTextEdit:focus {{ border-color: {p['accent']}; }}
         {s} QCheckBox {{ spacing: 9px; padding: 4px 0; font-size: 13px; }}
@@ -344,7 +346,7 @@ def stylesheet(root, mode):
         {s} QPushButton:disabled {{ color: {p['muted']}; }}
         {s} QPushButton#apiPrimaryButton {{ background: {p['accent']}; color: white; border-color: {p['accent']}; font-weight: 600; }}
         {s} QToolButton#apiCardToggle {{ border: none; background: transparent; text-align: left;
-            font-size: 16px; font-weight: 600; padding: 4px 0; color: {p['text']}; }}
+            font-size: 14px; font-weight: 600; padding: 4px 0; color: {p['text']}; }}
         {s} QToolButton#apiCardToggle:hover {{ color: {p['accent']}; }}
         {s} QToolButton#apiCardToggle:focus {{ color: {p['accent']}; }}
         {s} QWidget#apiKeyRow {{ background: {p['input']}; border: 1px solid {p['border']}; border-radius: 8px; }}

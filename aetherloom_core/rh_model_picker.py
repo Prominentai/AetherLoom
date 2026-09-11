@@ -2,7 +2,7 @@
 import re
 import threading
 
-from PyQt5 import QtCore, QtWidgets, sip
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 from .rh_connections import ensure_connections, open_connection_settings
 
@@ -27,6 +27,8 @@ def model_resource_type(field):
 def connection_owner(widget):
     current = widget
     while current is not None:
+        if getattr(current, '_canvas_owner', None) is not None:
+            return current._canvas_owner
         if hasattr(current, '_rh_connection_settings'):
             return current
         current = current.parentWidget()
@@ -104,40 +106,45 @@ class ModelPicker(QtWidgets.QDialog):
         self.settings, self.resource_type, self.current_value = settings, resource_type, str(current_value)
         self.generation, self.busy, self.page, self.start_page = 0, False, 0, 1
         self.has_next, self.total, self.loaded_filter, self.pending_search = False, 0, None, False
+        self.total_pages = 0
         self.cards, self.known_bases, self.known_tags = [], set(), {}
         self.selected_card = None
         self.thumbs = thumbnails(settings.owner)
         self.visible_timer = QtCore.QTimer(self); self.visible_timer.setInterval(160)
         self.visible_timer.timeout.connect(self._visible)
-        box = QtWidgets.QVBoxLayout(self);box.setContentsMargins(20, 18, 20, 16);box.setSpacing(12)
+        from .ui import design
+        box = QtWidgets.QVBoxLayout(self)
+        design.page_layout(self, box)
         header = QtWidgets.QHBoxLayout()
         title = QtWidgets.QLabel('RH 模型库' if library else '选择模型');title.setObjectName('rhModelHeading')
+        design.title(title)
         self.site = QtWidgets.QLabel();self.site.setObjectName('rhModelMuted');self.site.setWordWrap(True)
         connection = QtWidgets.QPushButton('连接设置');connection.setObjectName('rhModelSecondary')
         connection.clicked.connect(lambda: open_connection_settings(settings.owner))
-        header.addWidget(title);header.addWidget(self.site, 1);header.addWidget(connection);box.addLayout(header)
+        titles = QtWidgets.QVBoxLayout();titles.setSpacing(4)
+        titles.addWidget(title);titles.addWidget(self.site)
+        header.addLayout(titles, 1);header.addWidget(connection);box.addWidget(design.header(header))
         self.current_label = QtWidgets.QLabel('当前模型：' + self.current_value)
         self.current_label.setTextFormat(QtCore.Qt.PlainText);self.current_label.setObjectName('rhModelMuted')
         self.current_label.setWordWrap(True);self.current_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         self.current_label.setMaximumHeight(36);self.current_label.setToolTip(self.current_value)
         box.addWidget(self.current_label)
         self.current_label.setVisible(not library)
-        sources = QtWidgets.QHBoxLayout()
+        sources = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.LeftToRight);self.scope_row = sources
         self.sources = ModelTabs();self.sources.setObjectName('rhModelTags')
         self.sources.addTab('公共模型');self.sources.addTab('本地收藏');self.sources.addTab('我的上传')
         self.sources.setExpanding(False);self.sources.setDrawBase(False)
         sources.addWidget(self.sources, 1)
         box.addLayout(sources)
-        actions_row=QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.LeftToRight);self.scope_row=actions_row
-        self.scope_hint=QtWidgets.QLabel();self.scope_hint.setWordWrap(True);self.scope_hint.setObjectName('rhModelMuted')
-        actions_row.addWidget(self.scope_hint,1)
+        self.scope_hint=QtWidgets.QLabel(self);self.scope_hint.setWordWrap(True);self.scope_hint.setObjectName('rhModelMuted')
+        self.scope_hint.hide()
         self.create_button = QtWidgets.QPushButton('＋ 自建收藏');self.create_button.setObjectName('rhModelSecondary')
         self.create_button.clicked.connect(lambda:self.edit_favorite())
         self.import_button = QtWidgets.QPushButton('导入收藏');self.import_button.setObjectName('rhModelSecondary')
         self.import_button.clicked.connect(self.import_favorites)
         scope_buttons=QtWidgets.QWidget();scope_layout=QtWidgets.QHBoxLayout(scope_buttons);scope_layout.setContentsMargins(0,0,0,0)
         scope_layout.addWidget(self.import_button);scope_layout.addWidget(self.create_button)
-        actions_row.addWidget(scope_buttons);box.addLayout(actions_row)
+        sources.addWidget(scope_buttons)
         search_row = QtWidgets.QHBoxLayout()
         self.search = QtWidgets.QLineEdit();self.search.setPlaceholderText('搜索模型名称');self.search.setClearButtonEnabled(True)
         self.search.setMaxLength(100)
@@ -153,6 +160,7 @@ class ModelPicker(QtWidgets.QDialog):
         self.tags.setExpanding(False);self.tags.setUsesScrollButtons(True);self.tags.setDrawBase(False)
         self.tags.addTab('全部');self.tags.setTabData(0, None)
         self.tags.currentChanged.connect(self._tag_changed);box.addWidget(self.tags)
+        self.tags.hide()
         from .rh_model_dialogs import ModelDialog
         self.filter_panel = ModelDialog(self, '筛选模型', '按模型类型和基础模型缩小范围；基础模型支持多选。', (540, 650))
         self.filter_panel.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
@@ -199,12 +207,24 @@ class ModelPicker(QtWidgets.QDialog):
         self.scroll.verticalScrollBar().valueChanged.connect(self._scrolled)
         self.status = QtWidgets.QLabel();self.status.setTextFormat(QtCore.Qt.PlainText)
         self.status.setWordWrap(True);self.status.setObjectName('rhModelMuted');box.addWidget(self.status)
-        footer = QtWidgets.QHBoxLayout()
+        footer = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.LeftToRight);self.footer = footer
         self.page_label = QtWidgets.QLabel();self.page_label.setObjectName('rhModelMuted')
+        self.page_label.setWordWrap(True)
+        self.previous = QtWidgets.QPushButton('上一组');self.previous.setObjectName('rhModelSecondary')
+        self.previous.clicked.connect(lambda:self._go_page(self.page-1))
         self.next = QtWidgets.QPushButton('下一组');self.next.setObjectName('rhModelSecondary')
         self.next.clicked.connect(self._more)
+        self.page_input = QtWidgets.QLineEdit();self.page_input.setFixedWidth(66)
+        self.page_input.setAlignment(QtCore.Qt.AlignCenter);self.page_input.setAccessibleName('跳转页码')
+        self.page_input.setToolTip('输入页码后按 Enter，或点击跳转')
+        self.page_input.setValidator(QtGui.QIntValidator(1, 1, self.page_input))
+        self.page_input.returnPressed.connect(self._jump_page)
+        self.jump = QtWidgets.QPushButton('跳转');self.jump.setObjectName('rhModelSecondary')
+        self.jump.clicked.connect(self._jump_page)
+        navigation = QtWidgets.QHBoxLayout();navigation.setSpacing(6)
+        for widget in (self.previous,self.page_input,self.jump,self.next):navigation.addWidget(widget)
         cancel = QtWidgets.QPushButton('关闭');cancel.setObjectName('rhModelSecondary');cancel.clicked.connect(self.close)
-        footer.addWidget(self.page_label, 1);footer.addWidget(self.next);footer.addWidget(cancel)
+        footer.addWidget(self.page_label, 1);footer.addLayout(navigation);footer.addWidget(cancel)
         box.addLayout(footer)
         cancel.setVisible(not library)
         for button in self.findChildren(QtWidgets.QPushButton):button.setAutoDefault(False)
@@ -239,6 +259,8 @@ class ModelPicker(QtWidgets.QDialog):
         super().resizeEvent(event)
         if hasattr(self,'scope_row'):
             self.scope_row.setDirection(QtWidgets.QBoxLayout.TopToBottom if self.width()<640 else QtWidgets.QBoxLayout.LeftToRight)
+        if hasattr(self,'footer'):
+            self.footer.setDirection(QtWidgets.QBoxLayout.TopToBottom if self.width()<760 else QtWidgets.QBoxLayout.LeftToRight)
 
     def _filter(self):
         bases = [self.base_list.item(i).text() for i in range(self.base_list.count())
@@ -341,6 +363,7 @@ class ModelPicker(QtWidgets.QDialog):
         self.cards = []
         while self.grid.count():self.grid.takeAt(0)
         self.page, self.has_next, self.total, self.loaded_filter = 0, False, 0, None
+        self.total_pages = 0
         self.scroll.verticalScrollBar().setValue(0)
         self._buttons()
 
@@ -351,6 +374,7 @@ class ModelPicker(QtWidgets.QDialog):
         blockers = [QtCore.QSignalBlocker(w) for w in (self.base_list, self.tags, self.base)]
         self.base_list.clear();self.base.clear()
         while self.tags.count()>1:self.tags.removeTab(self.tags.count()-1)
+        self.tags.hide()
         self.tags.setCurrentIndex(0);del blockers
         self._bases_changed(self.settings.host);self.base_models.refresh(self.settings.host)
         uploading=self.destination()=='uploads'
@@ -377,9 +401,15 @@ class ModelPicker(QtWidgets.QDialog):
 
     def _buttons(self):
         loaded = self.loaded_filter is not None
-        self.next.setEnabled(not self._is_busy() and loaded and self.has_next)
+        ready = not self._is_busy() and loaded and self.loaded_filter == self._filter()
+        self.previous.setEnabled(ready and self.page > 1)
+        self.next.setEnabled(ready and self.has_next)
         self.next.setText('下一组')
-        self.page_label.setText(f'第 {self.page} 组 · {len(self.cards)} / {self.PAGE_SIZE} 个上限 · 共 {self.total} 个' if loaded else '')
+        self.page_input.setEnabled(ready and self.total_pages > 0)
+        self.jump.setEnabled(ready and self.total_pages > 0)
+        self.page_input.validator().setRange(1, max(1,self.total_pages))
+        self.page_input.setText(str(self.page) if loaded and self.total_pages else '')
+        self.page_label.setText(f'第 {self.page} / {self.total_pages} 页 · 共 {self.total} 个' if loaded and self.total_pages else '暂无结果' if loaded else '')
         count = len(self._filter()[1]) + (self._filter()[2] is not None) + bool(self.library and self.resource_type)
         self.filter_summary.setText('已选择 {} 个基础模型 · {}'.format(len(self._filter()[1]), self.resource_type or '全部模型类型'))
         self.filter_button.setText(f'筛选 · {count}' if count else '筛选')
@@ -393,6 +423,9 @@ class ModelPicker(QtWidgets.QDialog):
             if not append:self._clear();self.start_page = max(1,page)
             try:
                 result = self.store_for(self.destination()).page(self.settings.host,self.resource_type,query[0],query[1],query[2],max(1,page),self.PAGE_SIZE)
+                last = max(1,(result['total']+self.PAGE_SIZE-1)//self.PAGE_SIZE)
+                if page > last:
+                    result = self.store_for(self.destination()).page(self.settings.host,self.resource_type,query[0],query[1],query[2],last,self.PAGE_SIZE)
                 self._render_result(dict(result,filter=query))
             except Exception as error:self.status.setText('读取收藏失败：'+str(error));self._buttons()
             return
@@ -410,7 +443,8 @@ class ModelPicker(QtWidgets.QDialog):
             _queries.release();return
         self.generation += 1;generation = self.generation
         self.busy = True
-        if not append:self._clear();self.start_page = max(1, page)
+        if query != self.loaded_filter:self._clear()
+        self.start_page = max(1, page);self.content.setEnabled(False)
         self._buttons();self.status.setText('正在加载公共模型…')
         resource_type = self.resource_type
 
@@ -430,6 +464,7 @@ class ModelPicker(QtWidgets.QDialog):
                     pages.append(page_result)
                 result = dict(records=[record for item in pages for record in item['records']],
                     current=max(1,page),total=sum(item['total'] for item in pages),
+                    total_pages=max((max((item['total']+size-1)//size, page+1 if item['hasNext'] else 0) for item in pages),default=0),
                     hasNext=any(item['hasNext'] for item in pages),filter=query,append=False)
             except Exception as exc:
                 code = str(getattr(exc, 'code', ''))
@@ -447,12 +482,19 @@ class ModelPicker(QtWidgets.QDialog):
         if self.pending_search:
             self.pending_search = False;self.request(1);return
         if generation != self.generation:self._buttons();return
-        if error:self.status.setText(error);self._buttons();return
+        if error:
+            self.content.setEnabled(self.loaded_filter == self._filter())
+            self.status.setText(error);self._buttons();return
+        if result['current'] > max(1,result.get('total_pages',1)):
+            self.request(max(1,result['total_pages']));return
         self._render_result(result)
 
     def _render_result(self, result):
         from .rh_model_cards import ModelCard
+        self._clear()
         self.page, self.has_next, self.total = result['current'], result['hasNext'], result['total']
+        self.start_page = self.page
+        self.total_pages = result.get('total_pages', (self.total+self.PAGE_SIZE-1)//self.PAGE_SIZE)
         self.loaded_filter = result['filter'];self.content.setEnabled(True)
         ids = {str(c.record.get('id') or c.record.get('nodeModelName')) for c in self.cards}
         for record in result['records'][:self.PAGE_SIZE]:
@@ -484,12 +526,16 @@ class ModelPicker(QtWidgets.QDialog):
                     name = str(tag.get('name') or identity);self.known_tags[identity] = name
                     idx=self.tags.addTab(name);self.tags.setTabData(idx,identity)
         del blockers
+        self.tags.setVisible(self.tags.count() > 1)
 
     def _reflow(self):
         columns = max(1, min(5, (self.scroll.viewport().width()+14)//240))
         while self.grid.count():self.grid.takeAt(0)
         for col in range(5):self.grid.setColumnStretch(col, 1 if col<columns else 0)
-        for index, card in enumerate(self.cards):self.grid.addWidget(card, index//columns, index%columns)
+        height = max(260, min(320, self.scroll.viewport().height() - 4))
+        for index, card in enumerate(self.cards):
+            card.setFixedHeight(height)
+            self.grid.addWidget(card, index//columns, index%columns)
 
     def eventFilter(self, watched, event):
         if watched is self.scroll.viewport() and event.type()==QtCore.QEvent.Resize:
@@ -510,8 +556,15 @@ class ModelPicker(QtWidgets.QDialog):
         self.schedule_visible()
 
     def _more(self):
-        if not self._is_busy() and self.has_next:
-            self.request(self.page+1)
+        if self.has_next:self._go_page(self.page+1)
+
+    def _go_page(self, page):
+        if not self._is_busy() and self.loaded_filter == self._filter() and 1 <= page <= self.total_pages and page != self.page:
+            self.request(page)
+
+    def _jump_page(self):
+        if self.page_input.hasAcceptableInput():self._go_page(int(self.page_input.text()))
+        elif self.total_pages:self.status.setText(f'请输入 1～{self.total_pages} 范围内的页码。')
 
     def showEvent(self, event):
         super().showEvent(event);self.schedule_visible()

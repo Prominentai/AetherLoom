@@ -1,6 +1,7 @@
 """One theme for application menus, including Qt's built-in text menus."""
 
 from PyQt5 import QtCore, QtGui, QtWidgets
+from pathlib import Path
 
 
 def colors(mode):
@@ -15,6 +16,7 @@ def colors(mode):
 
 def stylesheet(mode, font=None):
     p = colors(mode)
+    check = (Path(__file__).resolve().parents[2] / 'icons' / 'ui-check.svg').as_posix()
     font_css = ''
     if font is not None:
         family = font.family().replace('\\', '\\\\').replace('"', '\\"')
@@ -23,11 +25,13 @@ def stylesheet(mode, font=None):
         font_css = f'font-family: "{family}"; font-size: {size}; font-weight: normal; font-style: normal;'
     return f'''
         QMenu {{ background: {p['background']}; color: {p['text']};
-            border: 1px solid {p['border']}; border-radius: 8px; padding: 6px; {font_css} }}
-        QMenu::item {{ padding: 6px 16px; border-radius: 6px; background: transparent; }}
+            border: 1px solid {p['border']}; border-radius: 8px; padding: 5px; {font_css} }}
+        QMenu::item {{ padding: 7px 24px 7px 28px; border-radius: 5px; background: transparent; }}
         QMenu::item:selected {{ background: {p['selected']}; color: {p['selected_text']}; }}
         QMenu::item:disabled {{ color: {p['disabled']}; }}
         QMenu::separator {{ height: 1px; background: {p['separator']}; margin: 4px 8px; }}
+        QMenu::indicator {{ width: 14px; height: 14px; margin-left: 6px; border: 1px solid transparent; border-radius: 3px; }}
+        QMenu::indicator:checked {{ background: #2265d8; image: url("{check}"); }}
     '''
 
 
@@ -57,6 +61,9 @@ class MenuTheme(QtCore.QObject):
             font = QtGui.QFont(self.owner.font())
             font.setBold(False)
             font.setItalic(False)
+            font.setPixelSize(13)
+            menu.setToolTipsVisible(True)
+            menu.setSeparatorsCollapsible(True)
             css = stylesheet(mode, font)
             if menu.font() != font:
                 menu.setFont(font)

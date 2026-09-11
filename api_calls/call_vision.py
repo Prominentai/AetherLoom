@@ -49,7 +49,7 @@ def call_vision(
     model: str,
     image_path: str,
     user_text: str,
-    timeout: int = 60,
+    timeout: int = 90,
     provider=None,
     max_tokens=None,
     web_search=None,

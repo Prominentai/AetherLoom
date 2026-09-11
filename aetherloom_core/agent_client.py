@@ -236,7 +236,9 @@ def model_names(provider, reference, category, timeout=30):
             if category not in ('vision', 'image_edit') or r['vision']]
 
 
-def complete(provider, reference, model, system, text, *, image=None, timeout=30, max_tokens=None, web_search=None):
+def complete(provider, reference, model, system, text, *, image=None, timeout=90, max_tokens=None, web_search=None):
+    from api_calls.provider_client import image_sources
+    images = image_sources(image)
     deadline = time.monotonic() + timeout
     from . import agent_search as search
     use_search = search.enabled(provider) if web_search is None else web_search is True
@@ -251,21 +253,19 @@ def complete(provider, reference, model, system, text, *, image=None, timeout=30
     elif provider == 'agent_grok' and image and re.search(r'code|embed', model, re.I):
         raise _fail('此 xAI 模型不支持视觉输入。', 'unsupported')
     content = [{'type': 'input_text', 'text': str(text)}]
-    if image:
-        mime, encoded = image
-        content.append({'type': 'input_image', 'image_url': f'data:{mime};base64,{encoded}'})
+    content.extend({'type': 'input_image', 'image_url': f'data:{mime};base64,{encoded}'} for mime, encoded in images)
     payload = dict(model=model, input=[dict(role='user', content=content)], instructions=str(system or ''),
                    stream=True, store=False)
     url = AGENTS[provider]['endpoint']
     if wire == 'claude':
         content = [dict(type='text', text=str(text))]
-        if image: content.insert(0, dict(type='image', source=dict(type='base64', media_type=mime, data=encoded)))
+        content = [dict(type='image', source=dict(type='base64', media_type=mime, data=encoded)) for mime, encoded in images] + content
         payload = dict(model=model, max_tokens=max_tokens or 4096, stream=True,
             system=[dict(type='text', text="You are Claude Code, Anthropic's official CLI for Claude.")] +
                    ([dict(type='text', text=str(system))] if system else []), messages=[dict(role='user', content=content)])
     elif wire == 'openai':
-        content = str(text) if not image else [dict(type='text', text=str(text)),
-                    dict(type='image_url', image_url=dict(url=f'data:{mime};base64,{encoded}'))]
+        content = str(text) if not images else [dict(type='text', text=str(text))] + [
+                    dict(type='image_url', image_url=dict(url=f'data:{mime};base64,{encoded}')) for mime, encoded in images]
         payload = dict(model=model, messages=([dict(role='system', content=str(system))] if system else []) +
                        [dict(role='user', content=content)], stream=False)
     elif provider == 'agent_copilot':
@@ -324,7 +324,7 @@ def _image_data(mime, encoded):
     return raw
 
 
-def edit_images(provider, reference, model, prompt, images, *, timeout=120,
+def edit_images(provider, reference, model, prompt, images, *, timeout=90,
                 system_prompt=None, merge_system_prompt=False):
     """Return verified (mime, bytes) results. Never turn a failed edit into generation."""
     if not supports(provider, 'image_edit'):
@@ -342,7 +342,7 @@ def edit_images(provider, reference, model, prompt, images, *, timeout=120,
                        system_prompt, merge_system_prompt)
 
 
-def generate_images(provider, reference, model, prompt, *, timeout=120,
+def generate_images(provider, reference, model, prompt, *, timeout=90,
                     system_prompt=None, merge_system_prompt=False):
     if not supports(provider, 'text2img'):
         raise _fail('图像生成 Agent 仅支持 Codex 和 xAI。', 'unsupported')

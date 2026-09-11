@@ -13,6 +13,8 @@ def bind_document(editor,text,identity,histories):
         document.setPlainText(str(text));histories[key]=document
     elif document.toPlainText()!=str(text):
         document.setPlainText(str(text))
+    font = QtGui.QFont('Microsoft YaHei UI');font.setPixelSize(13)
+    if document.defaultFont() != font:document.setDefaultFont(font)
     editor.setDocument(document)
     return document
 
@@ -37,13 +39,16 @@ class InlineText(QtWidgets.QWidget):
         layout=QtWidgets.QVBoxLayout(self);layout.setContentsMargins(3,3,3,3);layout.setSpacing(3)
         row=QtWidgets.QHBoxLayout();row.setContentsMargins(0,0,0,0)
         back,forward=QtWidgets.QToolButton(),QtWidgets.QToolButton()
-        back.setText('回退');forward.setText('前进');row.addWidget(back);row.addWidget(forward);row.addStretch()
+        for button,glyph,tip in ((back,'↶','上一条文本记录'),(forward,'↷','下一条文本记录')):
+            button.setText(glyph);button.setToolTip(tip);button.setFixedSize(26,24);button.setObjectName('canvasTextHistoryButton')
+        row.addWidget(back);row.addWidget(forward);row.addStretch()
         self.tools=QtWidgets.QToolButton();self.tools.setText('文本工具');self.tools.setPopupMode(self.tools.InstantPopup)
         menu=QtWidgets.QMenu(self.tools)
         for label,mode in [('翻译为中文','zh'),('翻译为英文','en'),('扩写','expand')]:
             menu.addAction(label,lambda unused=False,m=mode:self.transform(m))
         self.tools.setMenu(menu);row.addWidget(self.tools);layout.addLayout(row)
-        self.editor=CompletionTextEdit(self);self.editor.setAcceptRichText(False);self.editor.setMinimumSize(50,40)
+        self.editor=CompletionTextEdit(self);self.editor.setAcceptRichText(False);self.editor.setMinimumSize(50,80)
+        self.editor.setPlaceholderText('输入文本…');self.editor.setWordWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
         # Popup children of an embedded widget otherwise become a second
         # graphics proxy and steal the scene's keyboard focus on completion.
         popup=self.editor._popup
@@ -70,8 +75,10 @@ class InlineText(QtWidgets.QWidget):
         if getattr(self,'_colors',None)==colors:return
         self._colors=dict(colors)
         self.setStyleSheet('QWidget#canvasInlineText{background:'+colors['surface']+';color:'+colors['text']+';}'
-            'QTextEdit{background:'+colors['input']+';color:'+colors['text']+';border:1px solid '+colors['border']+';border-radius:5px;padding:4px;font-size:12px;}'
-            'QToolButton{color:'+colors['text']+';background:'+colors['surface']+';border:none;padding:3px;font-size:11px;}')
+            'QTextEdit{background:'+colors['input']+';color:'+colors['text']+';border:1px solid '+colors['border']+';border-radius:6px;padding:7px;font-family:"Microsoft YaHei UI";font-size:13px;}'
+            'QTextEdit:focus{border-color:'+colors['accent']+';}'
+            'QToolButton#canvasTextHistoryButton{font-size:16px;padding:0;}'
+            'QToolButton{color:'+colors['text']+';background:'+colors['surface']+';border:none;padding:3px;font-family:"Microsoft YaHei UI";font-size:11px;}')
 
     def transform(self,mode):
         text=self.editor.toPlainText()
@@ -95,6 +102,7 @@ class InlineText(QtWidgets.QWidget):
 
     @QtCore.pyqtSlot(object,str)
     def transformed(self,result,error):
+        self._job=None
         self.tools.setEnabled(True)
         if error:QtWidgets.QMessageBox.warning(self,'文本处理失败',error)
         elif isinstance(result,str):self.history.apply_result(result,'text_tool')
