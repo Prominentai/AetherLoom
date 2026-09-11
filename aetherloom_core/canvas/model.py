@@ -441,6 +441,44 @@ def connection_output_types(node, key='output'):
     return {port['type']}
 
 
+def port_containers(document):
+    """Resolve item / Batch transport separately from content names and colors."""
+    from collections import defaultdict, deque
+    nodes = {node['id']: node for node in document.get('nodes', [])}
+    incoming_edges, outgoing, degree = defaultdict(list), defaultdict(list), dict.fromkeys(nodes, 0)
+    for edge in document.get('edges', []):
+        if edge['source'] not in nodes or edge['target'] not in nodes:continue
+        incoming_edges[edge['target']].append(edge);outgoing[edge['source']].append(edge['target']);degree[edge['target']] += 1
+    ready = deque(key for key in nodes if not degree[key]);outputs = {}
+    unknown = frozenset({'item', 'batch'})
+    while ready:
+        identity = ready.popleft();node = nodes[identity];kind = node['kind']
+        streams = {edge['input']:outputs.get((edge['source'], edge.get('output', 'output')), unknown)
+                   for edge in incoming_edges[identity]}
+        inherited = set().union(*streams.values()) if streams else set(unknown)
+        if kind in ('rename', 'select', 'preview', 'batch_select', 'rebatch', 'list2batch', 'batch2list'):
+            inherited = set(streams.get('value', unknown))
+        selected = node.get('params', {}).get('type', 'any')
+        if node.get('bypass') and kind in collections.KINDS | {'rename', 'select', 'preview'}:
+            shapes = inherited
+        elif kind in ('list2batch', 'merge_batch', 'batch_select', 'rebatch'):
+            shapes = {'batch'}
+        elif kind == 'batch2list' or kind == 'rename':
+            shapes = {'item'}
+        elif kind == 'list_select':
+            if collections.current(node):shapes = inherited if selected == 'any' else {'batch'} if selected == 'batch' else {'item'}
+            else:shapes = inherited if node.get('params', {}).get('keep_batch', False) else {'item'}
+        elif kind == 'select':shapes = inherited if selected == 'any' else {'item'}
+        elif kind in ('merge_list', 'preview'):shapes = inherited
+        else:shapes = {'item'}
+        for port in output_ports(node, legacy=True):
+            outputs[(identity,port['key'])] = frozenset(shapes if port['key'] == 'output' else {'batch'} if port['key'] == 'batch' else {'item'})
+        for target in outgoing[identity]:
+            degree[target] -= 1
+            if not degree[target]:ready.append(target)
+    return outputs
+
+
 def port_colors(document):
     """Resolve content colors in O(nodes + edges); cardinality has no color."""
     from collections import defaultdict, deque
@@ -463,11 +501,13 @@ def port_colors(document):
         inherited = combine(upstream.values())
         if node['kind'] in ('rename', 'select', 'preview'):
             inherited = upstream.get('value', 'any')
-        if node['kind'] in ('select', 'list_select', 'batch_select'):
+        if not node.get('bypass') and node['kind'] in ('select', 'list_select', 'batch_select'):
             selected = node.get('params', {}).get('type', 'any')
-            if selected != 'any':inherited = selected
+            if selected not in ('any', 'batch'):inherited = selected
         for port in output_ports(node, legacy=True):
             kind = base(port['type'])
+            if node.get('bypass') and port['key'] == 'output' and node['kind'] in collections.KINDS | {'rename','select','preview'}:
+                kind = inherited
             if kind == 'any' and node['kind'] != 'app':
                 kind = inherited if node['kind'] in collections.KINDS | {'rename','select','preview'} else 'any'
             outputs[(identity,port['key'])] = kind if kind in PORT_TYPE_NAMES else 'any'
@@ -480,7 +520,7 @@ def port_colors(document):
 def output_types(node):
     kind = node.get('kind')
     if kind == 'app':
-        declared = str(node.get('app', {}).get('model_definition', {}).get('output_type') or '').lower()
+        declared = str((node.get('app', {}).get('model_definition') or {}).get('output_type') or '').strip().lower()
         declared = {'string': 'text', 'zip': 'archive', 'integer': 'int', 'double': 'float', 'bool': 'boolean'}.get(declared, declared)
         return {declared} if declared in PORT_TYPE_NAMES else {'any'}
     if kind in ('list2batch', 'merge_batch', 'batch_select', 'rebatch'):return {'batch'}
@@ -539,7 +579,8 @@ def validate_document(document):
         if identity in occupied:
             raise ValueError('同一输入端口只能连接一条线')
         occupied.add(identity)
-        if not any(types_compatible(t, port['type']) for t in connection_output_types(nodes[source], edge.get('output', 'output'))):
+        produced = connection_output_types(nodes[source], edge.get('output', 'output'))
+        if not nodes[source].get('bypass') and not any(types_compatible(t, port['type']) for t in produced):
             raise ValueError('连线两端的数据类型不兼容')
         if edge.get('mode', 'all') not in ('first', 'index', 'all'):
             raise ValueError('连线结果选择模式无效')
@@ -557,6 +598,22 @@ def validate_document(document):
                 ready.append(target)
     if len(order) != len(nodes):
         raise ValueError('画布不支持循环连接')
+    containers = port_containers(document)
+    unused, colors = port_colors(document)
+    for edge in document['edges']:
+        target = nodes[edge['target']]
+        if target.get('bypass'):continue
+        accepted = next(port['type'] for port in input_ports(target) if port['key'] == edge['input'])
+        key = (edge['source'], edge.get('output', 'output'))
+        shapes = containers.get(key, frozenset({'item', 'batch'}))
+        content = colors.get(key, 'any')
+        if shapes == {'batch'} and (accepted not in ('any', 'batch', 'image_input', 'video_input', 'audio_input', 'text_input')
+                                    or target['kind'] in ('filename', 'rename')):
+            raise ValueError('此输出传递 Batch；请先使用 Batch 转 List，再连接此输入。')
+        if accepted == 'batch' and shapes == {'item'}:
+            raise ValueError('此输入需要 Batch；请先使用 List 转 Batch。')
+        if accepted not in ('any', 'batch') and content != 'any' and not types_compatible(content, accepted):
+            raise ValueError('输出内容类型与输入不兼容：' + port_type_name(content) + ' → ' + port_type_name(accepted))
     return order
 
 
@@ -626,7 +683,7 @@ def connect(document, source, target, input, mode=None, indices=None, output=Non
     target_node = next((node for node in document['nodes'] if node['id'] == target), {})
     port = next((port for port in input_ports(target_node) if port['key'] == input), {})
     accepted = port.get('type', '')
-    if accepted.endswith('_input') and connection_output_types(source_node, output or 'output') == {'batch'}:
+    if not source_node.get('bypass') and accepted.endswith('_input') and connection_output_types(source_node, output or 'output') == {'batch'}:
         unused, output_colors = port_colors(document)
         content = output_colors.get((source, output or 'output'), 'any')
         if content != 'any' and not types_compatible(content, accepted):
@@ -688,7 +745,7 @@ def validate_indices(indices):
 
 
 def result_type(result):
-    kind = str(result.get('type') or result.get('kind') or result.get('fileType') or '').lower()
+    kind = str(result.get('_content_type') or result.get('type') or result.get('kind') or result.get('fileType') or '').lower()
     kind = {'integer': 'int', 'double': 'float', 'bool': 'boolean'}.get(kind, kind)
     if '/' in kind:
         kind = kind.split('/', 1)[0]
@@ -721,7 +778,9 @@ def result_type(result):
 
 def is_archive_result(result):
     """Recognize archives without treating every opaque downloaded file as one."""
-    kind = str(result.get('type') or result.get('kind') or result.get('fileType') or '').lower()
+    kind = str(result.get('_content_type') or result.get('type') or result.get('kind') or result.get('fileType') or '').lower()
+    if result.get('_content_type'):return kind == 'archive'
+    if kind.split('/', 1)[0] in MEDIA | VALUE_TYPES | {'text', 'batch'}:return False
     path = result.get('path') or result.get('file_path') or result.get('url') or ''
     suffix = Path(str(path).split('?', 1)[0]).suffix.lower()
     return kind in {'archive', 'zip', 'application/zip', 'application/x-7z-compressed',
@@ -1041,6 +1100,8 @@ def results_valid(results, signatures=None):
 def bypass_results(node, inputs):
     """Bypass one output to the first connected input of each compatible type."""
     keys=[port['key'] for port in input_ports(node) if port['key'] in inputs]
+    if node['kind'] in ('select', 'preview', 'rename'):
+        return copy.deepcopy(inputs.get('value', []))
     if node['kind'] in DYNAMIC_INPUT_KINDS:
         return copy.deepcopy([value for key in keys for value in inputs[key]])
     if node['kind'] in ('list2batch','batch2list','batch_select','rebatch','rename','select','preview','filename'):keys=['value'] if 'value' in inputs else []

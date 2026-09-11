@@ -170,6 +170,7 @@ class PortItem(QtWidgets.QGraphicsEllipseItem):
         super().__init__(-7, -7, 14, 14, node)
         self.node_item, self.key, self.output = node, key, output
         self.kind = kind
+        self.containers = frozenset({'batch'} if kind == 'batch' else {'item'})
         self.content_kind = kind[:-6] if kind.endswith('_input') else 'any' if kind == 'batch' else kind
         self.label = label
         self.connected = False
@@ -186,7 +187,8 @@ class PortItem(QtWidgets.QGraphicsEllipseItem):
         self.setBrush(color if self.output or connected else QtGui.QColor(colors['surface']))
         self.setPen(QtGui.QPen(color, 2))
         if self.output:
-            detail = ('每个 Batch 作为一组独立传递；多个 Batch 不会自动合并。' if self.kind == 'batch'
+            detail = ('每个 Batch 作为一组独立传递；多个 Batch 不会自动合并。' if self.containers == {'batch'}
+                      else '保留输入的 List / Batch 结构；不自动拆分或合并 Batch。' if 'batch' in self.containers
                       else '同类型结果组成 List，保持返回顺序；不会自动转为 Batch。')
             self.setToolTip(self.label + ' · 拖到输入端口或空白处添加下游节点\n' + detail)
         else:
@@ -909,10 +911,12 @@ class CanvasScene(QtWidgets.QGraphicsScene):
 
     def refresh_ports(self):
         input_colors, output_colors = model.port_colors(self._document)
+        containers = model.port_containers(self._document)
         connected = {(item.edge['target'], item.edge['input']) for item in self.edges.values()}
         for node_id, node in self.nodes.items():
             input_labels = {port['key']: port['label'] for port in model.input_ports(node.node)}
             for port in node.outputs.values():
+                port.containers = containers.get((node_id,port.key), frozenset({'item', 'batch'}))
                 port.content_kind = output_colors.get((node_id,port.key),'any')
                 port.label = model.port_type_name(port.content_kind)
                 port.refresh_connection()

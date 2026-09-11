@@ -43,6 +43,8 @@ def execute(node, prepared, batches, stop):
             # Preserve exact names for separate items; the save node owns the
             # final overwrite/suffix policy. Never rewrite an upstream file.
             item = save_results([source], str(temporary / str(len(results))), stop, names=[filename])[0]
+            item['_content_type'] = model.result_type(source)
+            item['type'] = item['kind'] = item['_content_type']
             item.pop('name', None)
             # Keep actual content type: changing the suffix does not transcode.
             item['index'] = len(results)

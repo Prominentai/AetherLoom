@@ -25,9 +25,13 @@ AetherLoom 是一款 Windows 桌面客户端，通过 API 调用云端模型与 
 
 ## 界面预览
 
-![AetherLoom 界面预览](https://github.com/user-attachments/assets/806a0280-a4a0-4070-8af5-87e064eb566b)
+![AetherLoom 0.2 画布界面](assets/readme/canvas-0.2.png)
+
+0.2 画布实机截图：节点库、就地参数编辑与结果预览（本地示例流程）。
 
 ## 开始使用
+
+RunningHub 注册：[我的邀请链接](https://www.runninghub.ai/?inviteCode=conlp00n)。
 
 1. 下载并启动客户端，在“连接设置”填写对应站点的 RunningHub API Key，或在“API 管理”配置模型连接。
 2. 添加 RH 应用、标准模型或 LLM，导入素材并调整参数；也可以在画布中连接节点。
