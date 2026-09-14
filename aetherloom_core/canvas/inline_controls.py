@@ -191,6 +191,8 @@ class InlineControls(QtWidgets.QScrollArea):
 
     def refresh(self):
         self.inspector.node = self.item.node
+        if hasattr(self.inspector, 'compare_view'):
+            self.inspector.compare_view.set_results(self.item.node.get('results', []))
         self._geometry_timer.start(0)
         if not self._changing and self.state() != self._state:
             self._refresh_timer.start(0)

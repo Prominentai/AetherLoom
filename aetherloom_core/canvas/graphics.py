@@ -27,7 +27,7 @@ KIND_NAMES.update(batch_select='BATCH SELECT', rebatch='REBATCH')
 STATUS_NAMES = {'IDLE': '就绪', 'READY': '就绪', 'WAITING': '等待上游',
                 'SKIPPED': '已跳过', 'INTERRUPTED': '会话已中断',
                 'PENDING': '等待上游',
-                'PREPARING': '准备输入',
+                'PREPARING': '准备输入', 'AWAITING_SELECTION': '等待选择',
                 'LOCAL_WAIT': '等待提交', 'SUBMITTING': '正在提交', 'QUEUED': '云端排队',
                 'RUNNING': '运行中', 'DOWNLOADING': '正在下载', 'DOWNLOAD_FAILED': '等待下载重试',
                 'SUCCESS': '已完成', 'FAILED': '失败', 'CANCELED': '已取消', 'BLOCKED': '已终止 · 上游不可用',
@@ -37,7 +37,7 @@ STATUS_NAMES = {'IDLE': '就绪', 'READY': '就绪', 'WAITING': '等待上游',
 
 
 RUNNING_STATES = frozenset({'RUNNING', 'DOWNLOADING', 'DECODING'})
-WAITING_STATES = frozenset({'PENDING', 'WAITING', 'PREPARING', 'SUBMITTING', 'LOCAL_WAIT', 'QUEUED',
+WAITING_STATES = frozenset({'AWAITING_SELECTION', 'PENDING', 'WAITING', 'PREPARING', 'SUBMITTING', 'LOCAL_WAIT', 'QUEUED',
                             'DOWNLOAD_FAILED', 'WAITING_FOR_KEY', 'WAITING_FOR_SECRET',
                             'POLL_TIMEOUT', 'CANCELING', 'CANCEL_FAILED', 'RETRYING'})
 
@@ -191,6 +191,10 @@ class PortItem(QtWidgets.QGraphicsEllipseItem):
                       else '保留输入的 List / Batch 结构；不自动拆分或合并 Batch。' if 'batch' in self.containers
                       else '同类型结果组成 List，保持返回顺序；不会自动转为 Batch。')
             self.setToolTip(self.label + ' · 拖到输入端口或空白处添加下游节点\n' + detail)
+            if self.node_item.node['kind']=='branch':
+                self.setToolTip(('条件为真' if self.key=='true' else '条件为假')+'\n'+self.toolTip())
+            if self.node_item.node['kind']=='image' and self.key=='mask':
+                self.setToolTip('绘制或导入遮罩后，从此端口输出独立 MASK；没有遮罩时不输出。\n'+self.toolTip())
         else:
             has_internal = self.node_item.node['kind'] in {'app'} | set(model.MODEL_KINDS) or (self.node_item.node['kind'] == 'rename' and self.key != 'value')
             if connected:
@@ -234,7 +238,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
             item.setPos(self.width, self.output_y(index))
             self.outputs[port['key']] = item
         for index, port in enumerate(self.outputs.values()):port.setPos(self.width, self.output_y(index))
-        self.output = self.outputs.get('output', next(iter(self.outputs.values())))
+        self.output = self.outputs.get('output', next(iter(self.outputs.values()), None))
         self.refresh_output_counts()
         self.setPos(float(node.get('x', 0)), float(node.get('y', 0)))
         self.refresh_bypass()
@@ -252,6 +256,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
 
     @classmethod
     def minimum_size(cls, node):
+        if node['kind'] == 'reroute':return 180, 110
         ports = max(len(input_ports(node)), len(model.output_ports(node)))
         # Inputs and outputs occupy independent columns in the same slot area.
         height = max(128, 96 + 22 * ports)
@@ -285,12 +290,14 @@ class NodeItem(QtWidgets.QGraphicsObject):
             return
         self.prepareGeometryChange()
         self.width, self.height = width, height
+        for (_,_,output),port in getattr(self,'group_ports',{}).items():port.setX(width if output else 0)
         for index, port in enumerate(self.outputs.values()):port.setPos(width, self.output_y(index))
         self.canvas_scene.update_edges(self.node['id'])
         self.layout_inline()
         self.update()
 
     def ensure_inline(self):
+        if self.node['kind'] in ('reroute','subgraph'):return
         if not hasattr(self.canvas_scene.parent(),'histories'):return
         if self.inline_proxy is None:
             from .inline_text import InlineText
@@ -378,6 +385,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
         return QtCore.QRectF(self.width + 10, max(94, 76 + 22 * (len(self.outputs) - 1)), 86, 27)
 
     def run_rect(self):
+        if self.node['kind'] in ('note','subgraph'):return QtCore.QRectF()
         return QtCore.QRectF(self.width - 32, 4, 26, 24)
 
     def progress_rect(self):
@@ -396,6 +404,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
         return preview_data.has_inputs(self.node)
 
     def result_count(self):
+        if self.node['kind'] == 'image_compare' and self.has_inline_form():return 0
         return preview_data.count(self.node, 'input' if self.input_preview() else 'results')
 
     def result_at(self, index):
@@ -500,7 +509,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
             painter.drawText(rect.adjusted(6, 0, -6, 0), QtCore.Qt.AlignTop, title)
             body = rect.adjusted(6, 22, -6, -23 if path else -6)
             thumb = None
-            if (kind in ('image', 'video') and path and index in self.canvas_scene.thumbnail_slots.get(self.node['id'], ())):
+            if (kind in ('image', 'video', 'mask') and path and index in self.canvas_scene.thumbnail_slots.get(self.node['id'], ())):
                 thumb = self.canvas_scene.thumbnails.get(path, kind)
             if thumb is not None and not thumb.isNull():
                 size = thumb.size().scaled(body.size().toSize(), QtCore.Qt.KeepAspectRatio)
@@ -526,6 +535,9 @@ class NodeItem(QtWidgets.QGraphicsObject):
         painter.restore()
 
     def paint(self, painter, option, widget=None):
+        if self.node['kind'] == 'subgraph':
+            from .subgraphs import paint
+            paint(self,painter);return
         p = self.canvas_scene.colors
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         selected = self.isSelected()
@@ -580,7 +592,8 @@ class NodeItem(QtWidgets.QGraphicsObject):
             painter.setPen(QtGui.QColor(p['accent']))
             triangle = QtGui.QPolygonF([QtCore.QPointF(self.width-22,10),
                                        QtCore.QPointF(self.width-22,22),QtCore.QPointF(self.width-13,16)])
-            painter.setBrush(QtGui.QColor(p['accent']));painter.drawPolygon(triangle)
+            if self.node['kind'] != 'note':
+                painter.setBrush(QtGui.QColor(p['accent']));painter.drawPolygon(triangle)
         font.setBold(False)
         font.setPixelSize(12)
         painter.setFont(font)
@@ -790,7 +803,11 @@ class EdgeItem(QtWidgets.QGraphicsPathItem):
         target = scene.nodes[edge['target']].ports.get(edge['input'])
         if target is None:
             return
-        start, end = scene.nodes[edge['source']].source_port(edge).scenePos(), target.scenePos()
+        aliases=getattr(scene,'group_aliases',{})
+        start_port=aliases.get((edge['source'],edge.get('output','output'),True)) or scene.nodes[edge['source']].source_port(edge)
+        target=aliases.get((edge['target'],edge['input'],False)) or target
+        if start_port is None:return
+        start, end = start_port.scenePos(), target.scenePos()
         path = connection_path(start, end)
         self.setPath(path)
         fraction = min(.2, 20 / max(1, path.length()))
@@ -891,6 +908,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
         self.setSceneRect(-20000, -20000, 40000, 40000)
 
     def set_document(self, doc):
+        self.group_aliases={};self.group_owners={}
         model.sync_dynamic_inputs(doc)
         self.cancel_resize()
         self.cancel_link()
@@ -924,6 +942,8 @@ class CanvasScene(QtWidgets.QGraphicsScene):
                 port.label = input_labels.get(key, port.label)
                 port.content_kind = input_colors.get((node_id,key),'any')
                 port.refresh_connection((node_id, key) in connected)
+        from .subgraphs import sync
+        sync(self)
 
     def sync_connections(self, doc):
         """Reconcile sockets and edges without destroying existing node widgets."""
@@ -955,7 +975,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
                     item.outputs[key] = PortItem(item, key, spec['label'], spec['type'], True)
                 item.outputs[key].kind = spec['type']
             item.outputs = {key: item.outputs[key] for key in desired_outputs}
-            item.output = item.outputs.get('output', next(iter(item.outputs.values())))
+            item.output = item.outputs.get('output', next(iter(item.outputs.values()), None))
             item.minimum_height = max(item.minimum_size(node)[1], 96 + 22 * len(item.outputs))
         for key, edge in desired_edges.items():
             if key not in self.edges:
@@ -990,8 +1010,10 @@ class CanvasScene(QtWidgets.QGraphicsScene):
             self._resizing_node.finish_resize(cancel=True)
 
     def update_edges(self, node_id):
+        member_ids=set(self.nodes[node_id].node.get('members',[])) if node_id in self.nodes else set()
+        member_ids.add(node_id)
         for item in self.edges.values():
-            if item.edge['source'] == node_id or item.edge['target'] == node_id:
+            if item.edge['source'] in member_ids or item.edge['target'] in member_ids:
                 item.update_path()
 
     def drawBackground(self, painter, rect):
@@ -1195,6 +1217,13 @@ class CanvasScene(QtWidgets.QGraphicsScene):
                            lambda:self.settings_requested.emit(selected[0]['id']))
             menu.addSeparator()
             if len(selected)>1:menu.addSection(f'已选中 {len(selected)} 个节点')
+            from .subgraphs import group_selected,toggle,unpack,export_group
+            menu.addAction('组合选中节点',lambda:group_selected(self.parent()))
+            if len(selected)==1 and selected[0]['kind']=='subgraph':
+                group=selected[0]
+                menu.addAction('展开 / 收起组合',lambda:toggle(self.parent(),group))
+                menu.addAction('解散组合',lambda:unpack(self.parent(),group))
+                menu.addAction('保存组合节点模板',lambda:export_group(self.parent(),group))
             for option in options(selected):
                 label=option['label']+('（部分开启）' if option['mixed'] else '')
                 if len(option['ids'])!=len(selected):label+=f" · {len(option['ids'])} 个适用"
@@ -1453,7 +1482,7 @@ class CanvasView(QtWidgets.QGraphicsView):
         candidates=[item for item in self.items(self.viewport().rect()) if isinstance(item,NodeItem)] if self.transform().m11()>=.42 else []
         ordered=sorted(candidates,key=lambda item:(item.scenePos()-center).manhattanLength())[:32]
         visible=set(ordered)
-        pending=[item for item in ordered if item.inline_proxy is None]
+        pending=[item for item in ordered if item.inline_proxy is None and item.node['kind'] not in ('reroute','subgraph')]
         for item in pending[:2]:item.ensure_inline()
         retained=[item for item in self.scene().nodes.values() if item.inline_proxy is not None]
         for item in retained:
@@ -1490,7 +1519,7 @@ class CanvasView(QtWidgets.QGraphicsView):
             self.scene().thumbnail_nodes = {item.node['id'] for item in visible}
             self.scene().thumbnail_slots = {
                 item.node['id']: {index for index, _ in item.result_layout()[0]
-                                  if model.result_type(item.result_at(index)) in ('image', 'video')}
+                                  if model.result_type(item.result_at(index)) in ('image', 'video', 'mask')}
                 for item in visible}
             for node_id, indices in self.scene().thumbnail_slots.items():
                 self.scene().thumbnail_slots[node_id] = set(sorted(indices)[:quota])

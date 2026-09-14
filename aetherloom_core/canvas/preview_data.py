@@ -2,7 +2,7 @@
 import os
 from . import model
 
-TYPE_NAMES = {'image': '图像', 'video': '视频', 'audio': '音频', 'text': '文本',
+TYPE_NAMES = {'mask': '遮罩', 'image': '图像', 'video': '视频', 'audio': '音频', 'text': '文本',
               'int': 'INT', 'float': 'FLOAT', 'boolean': '布尔', 'enum': '枚举', 'archive': '压缩文件', 'number': '数值', 'scalar': '数值', 'file': '文件', 'folder': '文件夹', 'batch': 'Batch'}
 
 

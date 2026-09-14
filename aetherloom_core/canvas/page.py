@@ -303,6 +303,9 @@ class CanvasPage(QtWidgets.QWidget):
         edit_menu.addAction('粘贴节点\tCtrl+V',self.paste_nodes)
         edit_menu.addAction('删除所选\tDelete',self.delete_selected)
         edit_menu.addAction('全选节点\tCtrl+A',self.select_all_nodes)
+        from .subgraphs import group_selected,import_group
+        edit_menu.addAction('组合选中节点',lambda:group_selected(self))
+        edit_menu.addAction('导入组合节点模板…',lambda:import_group(self))
         edit_menu.addSeparator()
         self.settings_action = edit_menu.addAction('打开所选设置', self._open_settings)
         self.settings_action.setShortcut(QtGui.QKeySequence('Alt+Return'))
@@ -775,7 +778,7 @@ class CanvasPage(QtWidgets.QWidget):
             accepted = next((port['type'] for port in model.input_ports(anchor_node) if port['key'] == anchor['input']), None)
             if accepted is None:
                 return choices
-        type_names = {'text': '文本', 'image': '图像', 'audio': '音频', 'video': '视频',
+        type_names = {'mask': '遮罩', 'text': '文本', 'image': '图像', 'audio': '音频', 'video': '视频',
                       'int': 'INT', 'float': 'FLOAT', 'boolean': '布尔', 'enum': '枚举', 'number': '数值', 'scalar': '枚举', 'file': '任意', 'any': '任意', 'archive': '压缩文件',
                       'batch': 'Batch', 'image_input': '图像', 'video_input': '视频', 'audio_input': '音频', 'text_input': '文本'}
         for group, value, title, prototype in prototypes:
@@ -1010,6 +1013,13 @@ class CanvasPage(QtWidgets.QWidget):
 
     def _move_nodes(self, positions):
         self._checkpoint()
+        for group in self.document['nodes']:
+            if group['id'] in positions and group['kind']=='subgraph':
+                dx,dy=positions[group['id']][0]-group.get('x',0),positions[group['id']][1]-group.get('y',0)
+                for member in self.document['nodes']:
+                    if member['id'] in group.get('members',[]) and member['id'] not in positions:
+                        positions[member['id']]=(member.get('x',0)+dx,member.get('y',0)+dy)
+                        if member['id'] in self.scene.nodes:self.scene.nodes[member['id']].setPos(*positions[member['id']])
         for node in self.document['nodes']:
             if node['id'] in positions:
                 node['x'], node['y'] = positions[node['id']]
@@ -1089,16 +1099,22 @@ class CanvasPage(QtWidgets.QWidget):
             except ValueError as error:
                 self._message(str(error))
                 return
-        if not (node['kind']=='text' and path=='params.text'):
-            self._checkpoint((node_id, path))
+        if not (node['kind'] in ('text', 'note', 'text_split') and path=='params.text'):
+            self._checkpoint(None if node['kind'] == 'text_template' and path == 'params.template' else (node_id, path))
         container[key] = copy.deepcopy(value)
+        if node['kind'] == 'text_template' and path == 'params.template':
+            from .utility_nodes import template_keys
+            valid = {'var:' + item for item in template_keys(value)}
+            self.document['edges'] = [edge for edge in self.document['edges']
+                                      if edge['target'] != node_id or edge['input'] in valid]
         if path == 'app.url':
             container['url'] = reference['url']
             container['base_url'] = reference['base_url']
             container.pop('url_error', None)
         if path != 'title':
             self._mark_stale(node_id)
-        self._edited(rebuild=path == 'params' and node['kind'] in model.collections.KINDS, select=node_id)
+        self._edited(rebuild=path == 'params' and node['kind'] in model.collections.KINDS,
+                     connections=node['kind'] == 'text_template' and path == 'params.template', select=node_id)
 
     def _edge_changed(self, edge_id, key, value):
         edge = next((edge for edge in self.document['edges'] if edge['id'] == edge_id), None)
@@ -1367,6 +1383,8 @@ class CanvasPage(QtWidgets.QWidget):
 
     def copy_nodes(self):
         ids = {item.node['id'] for item in self.scene.selectedItems() if isinstance(item, NodeItem)}
+        from .subgraphs import members
+        ids=members(self.document,ids)
         if ids:
             self._clipboard = copy.deepcopy({'nodes': [node for node in self.document['nodes'] if node['id'] in ids],
                                              'edges': [edge for edge in self.document['edges'] if edge['source'] in ids and edge['target'] in ids]})
@@ -1379,6 +1397,7 @@ class CanvasPage(QtWidgets.QWidget):
         graph = copy.deepcopy(self._clipboard)
         ids = {node['id']: uuid.uuid4().hex for node in graph['nodes']}
         for node in graph['nodes']:
+            if node['kind']=='subgraph':node['members']=[ids[key] for key in node.get('members',[]) if key in ids]
             node['id'] = ids[node['id']]
             node['x'] += 40
             node['y'] += 40
@@ -1395,6 +1414,8 @@ class CanvasPage(QtWidgets.QWidget):
 
     def delete_selected(self):
         node_ids = {item.node['id'] for item in self.scene.selectedItems() if isinstance(item, NodeItem)}
+        from .subgraphs import members
+        node_ids=members(self.document,node_ids)
         edge_ids = {item.edge['id'] for item in self.scene.selectedItems() if isinstance(item, EdgeItem)}
         if not node_ids and not edge_ids:
             return
@@ -1406,6 +1427,8 @@ class CanvasPage(QtWidgets.QWidget):
             if edge['id'] in edge_ids or edge['source'] in node_ids:
                 self._mark_stale(edge['target'])
         self.document['nodes'] = [node for node in self.document['nodes'] if node['id'] not in node_ids]
+        for group in self.document['nodes']:
+            if group['kind']=='subgraph':group['members']=[key for key in group.get('members',[]) if key not in node_ids]
         self.document['edges'] = [edge for edge in self.document['edges'] if edge['id'] not in edge_ids and edge['source'] not in node_ids and edge['target'] not in node_ids]
         self._edited(rebuild=True)
 
@@ -1417,7 +1440,7 @@ class CanvasPage(QtWidgets.QWidget):
         restored['run'] = copy.deepcopy(self.document.get('run', {}))
         for node in restored['nodes']:
             live=live_nodes.get(node['id'])
-            if node['kind']=='text' and live:
+            if node['kind'] in ('text', 'note', 'text_split') and live:
                 node.setdefault('params',{})['text']=live.get('params',{}).get('text','')
             if node['id'] in runtime:
                 for key in RUNTIME_FIELDS:

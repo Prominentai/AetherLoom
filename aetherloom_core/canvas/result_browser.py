@@ -30,7 +30,7 @@ class MediaPreview(QtWidgets.QWidget):
         painter.setBrush(background)
         painter.drawRoundedRect(rect, 8, 8)
         path, kind = data.path_of(self.value), data.kind_of(self.value)
-        pixmap = self.cache.get(path, kind) if path and kind in ('image', 'video') else None
+        pixmap = self.cache.get(path, kind) if path and kind in ('image', 'video', 'mask') else None
         if pixmap is not None and not pixmap.isNull():
             body = rect.adjusted(8, 8, -8, -8)
             size = pixmap.size().scaled(body.size().toSize(), QtCore.Qt.KeepAspectRatio)
@@ -44,8 +44,8 @@ class MediaPreview(QtWidgets.QWidget):
             painter.drawPixmap(target, pixmap, QtCore.QRectF(pixmap.rect()));painter.restore()
         else:
             text = ('文件已移动或删除' if path and not os.path.exists(path) else
-                    '无法生成预览\n可点击“打开所选”查看原文件' if kind in ('image', 'video') and self.cache.failed(path, kind) else
-                    '正在加载预览，无法预览时可打开原文件' if kind in ('image', 'video') else
+                    '无法生成预览\n可点击“打开所选”查看原文件' if kind in ('image', 'video', 'mask') and self.cache.failed(path, kind) else
+                    '正在加载预览，无法预览时可打开原文件' if kind in ('image', 'video', 'mask') else
                     '音频文件\n点击“打开所选”播放' if kind == 'audio' else
                     '运行时读取文件夹内符合格式的文件' if kind == 'folder' else '此文件可使用系统应用打开')
             painter.setPen(foreground)

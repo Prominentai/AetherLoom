@@ -12,7 +12,7 @@ from aetherloom_core.ui.widgets import CompletionTextEdit
 from .model import parameter_key, field_type, node_title
 from .model import MEDIA_SUFFIXES, MODEL_KINDS, MERGE_KINDS, RESULT_TYPES, ITEM_OUTPUT_TYPES
 from .media_inputs import accepts
-from . import collections
+from . import collections, utility_nodes
 
 
 FILE_FILTERS = {kind: label + ' (' + ' '.join('*' + suffix for suffix in sorted(MEDIA_SUFFIXES[kind])) + ')'
@@ -247,6 +247,9 @@ class Inspector(QtWidgets.QWidget):
             self.form.addStretch(1)
             self.form = root_form
             return
+        elif node['kind'] in utility_nodes.KINDS:
+            from .utility_editor import build
+            build(self, node)
         elif collections.current(node):
             from .collection_editor import build
             build(self, node)
@@ -762,6 +765,11 @@ class Inspector(QtWidgets.QWidget):
         files.files_changed.emit(files.paths())
 
     def _results(self, node):
+        if node['kind'] == 'image_compare':
+            from .image_compare import ImageCompare
+            self.compare_view = ImageCompare(self)
+            self.compare_view.set_results(node.get('results', []))
+            self.form.addWidget(self.compare_view, 1)
         from .result_browser import ResultBrowser
         from .graphics import ThumbnailCache
         title = QtWidgets.QLabel('最近结果')
@@ -804,6 +812,7 @@ class Inspector(QtWidgets.QWidget):
         update_buttons()
 
     def update_results(self, results):
+        if hasattr(self, 'compare_view'):self.compare_view.set_results(results)
         if self.results_list is None:
             return
         self.results_title.setText(f'最近结果 · {len(results)}' + (' 个 Batch' if results and isinstance(results[0], dict) and results[0].get('type') == 'batch' else ''))
@@ -846,6 +855,7 @@ class Inspector(QtWidgets.QWidget):
             self.message.emit(f'另存失败：{error}')
 
     def validate(self):
+        if hasattr(self,'group_editor') and not self.group_editor.validate():return False
         for editor in self.numeric:
             if editor.isEnabled() and not editor.commit():
                 from .node_form import FoldSection

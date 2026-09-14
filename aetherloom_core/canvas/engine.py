@@ -19,6 +19,7 @@ ACTIVE = frozenset({'SUBMITTING', 'LOCAL_WAIT', 'QUEUED', 'RUNNING', 'DOWNLOADIN
 RUNTIME_FIELDS = ('results', 'result_signatures', 'fingerprint', 'status', 'progress', 'node_progress',
                   'message', 'generation', 'cached', 'stale', '_restored_missing_results',
                   '_restored_positions_ambiguous', 'activated')
+RUNTIME_FIELDS += ('selection_token', 'selection_round')
 
 
 class MissingHistoricalInput(ValueError):
@@ -401,6 +402,7 @@ class CanvasEngine(QtCore.QObject):
                 raise ValueError('排队快照与画布标识不一致')
             order = model.validate_document(source)
             scope = model.ancestors(source, target) if target else set(order)
+            scope -= {node['id'] for node in source['nodes'] if node['kind'] in ('note','subgraph')}
             count = model.normalize_batch_count(1 if target else
                 source.get('batch_count', 1) if batch_count is None else batch_count)
             graph = {key: copy.deepcopy(source.get(key)) for key in ('version', 'id', 'name', 'nodes', 'edges', 'view')}
@@ -683,6 +685,7 @@ class CanvasEngine(QtCore.QObject):
                             return
                         states = self._document_locked(canvas_id)['run']['nodes']
                         states_copy = {node_id: {'status': state.get('status'),
+                            'conditional_skip':state.get('conditional_skip',False),
                             'items': [{'task_id': item.get('task_id'), 'status': item.get('status')}
                                       for item in state.get('items', [])]} for node_id, state in states.items()}
                     for node_id, future in list(futures.items()):
@@ -703,22 +706,35 @@ class CanvasEngine(QtCore.QObject):
                     launched = False
                     for node_id in order:
                         state = states_copy[node_id]
+                        if state.get('status') == 'AWAITING_SELECTION' and stop.is_set():
+                            self._set_state(canvas_id,node_id,status='CANCELED',message='已取消人工选择')
+                            continue
                         if state.get('status') != 'PENDING' or node_id in futures:
                             continue
                         if stop.is_set():
                             self._set_state(canvas_id, node_id, status='CANCELED', message='已停止')
                             continue
                         parents = [states_copy[parent] for parent in dependencies[node_id]]
+                        with self._condition:
+                            live_states = self._document_locked(canvas_id)['run']['nodes']
+                            unselected = any(nodes[e['source']]['kind']=='branch'
+                                and live_states[e['source']].get('status')=='SUCCESS'
+                                and not any(r.get('_branch_port')==e.get('output','true') for r in live_states[e['source']].get('results',[]))
+                                for e in model.execution_incoming(graph,node_id))
+                        if unselected:
+                            self._set_state(canvas_id,node_id,status='SKIPPED',conditional_skip=True,message='条件未选中此分支')
+                            continue
                         items = state.get('items') or []
                         submitted = bool(items) and all(item.get('task_id') or item.get('status') in TERMINAL for item in items)
                         if not submitted and any(parent.get('status') in TERMINAL - {'SUCCESS'} for parent in parents):
                             skipped = any(parent.get('status') == 'SKIPPED' for parent in parents)
-                            message = '历史输入结果缺失，已跳过本分支' if skipped else '上游未成功，已停止后续提交'
+                            conditional = skipped and all(parent.get('conditional_skip') for parent in parents if parent.get('status')=='SKIPPED')
+                            message = '条件未选中此分支' if conditional else '历史输入结果缺失，已跳过本分支' if skipped else '上游未成功，已停止后续提交'
                             if self._fail_unsubmitted_items(canvas_id, node_id, message, status='SKIPPED' if skipped else 'FAILED'):
                                 futures[node_id] = pool.submit(self._worker_call, self._wait_app, round_id, canvas_id, node_id, stop)
                                 launched = True
                             else:
-                                self._set_state(canvas_id, node_id, status='SKIPPED' if skipped else 'BLOCKED', message=message)
+                                self._set_state(canvas_id, node_id, status='SKIPPED' if skipped else 'BLOCKED', conditional_skip=conditional, message=message)
                         elif submitted or all(parent.get('status') == 'SUCCESS' for parent in parents):
                             self._set_state(canvas_id, node_id, status='PREPARING', activated=True, progress=0, message='正在准备输入')
                             futures[node_id] = pool.submit(self._worker_call, self._execute_node, round_id, canvas_id, round_id, graph,
@@ -740,7 +756,8 @@ class CanvasEngine(QtCore.QObject):
                             if run.get('has_failure') and run.get('batch_index', 0) + 1 < run.get('batch_count', 1):
                                 run['message'] = '本批存在失败，已停止后续画布批次；独立分支已处理完毕'
                             if 'SKIPPED' in statuses:
-                                run['message'] = '部分历史结果缺失，已跳过对应分支'
+                                run['message'] = ('条件未选中的分支已跳过' if all(s.get('conditional_skip') for s in run['nodes'].values() if s.get('status')=='SKIPPED')
+                                                  else '部分历史结果缺失，已跳过对应分支')
                             self._publish_locked(self._document_locked(canvas_id))
                             break
                         if stop.is_set() and not futures:
@@ -807,6 +824,15 @@ class CanvasEngine(QtCore.QObject):
 
     def _execute_node(self, canvas_id, round_id, graph, node, prepared, force, stop):
         node_id, kind = node['id'], node['kind']
+        if kind == 'manual_select':
+            with self._condition:
+                state=copy.deepcopy(self._document_locked(canvas_id)['run']['nodes'][node_id])
+            if state.get('choice_indices') is not None:
+                if stop.is_set():
+                    from .save_results import SaveCanceled
+                    raise SaveCanceled('选择已取消')
+                self._finish_node(canvas_id,node_id,[state['results'][i] for i in state['choice_indices']],state['choice_digest'])
+                return
         with self._condition:
             if self._document_locked(canvas_id)['run']['nodes'][node_id].get('_halt_status'):
                 return
@@ -867,7 +893,7 @@ class CanvasEngine(QtCore.QObject):
             raise
         with self._condition:
             cached = copy.deepcopy(self._document_locked(canvas_id)['run'].get('cache', {}).get(node_id) or node)
-        if ((kind not in {'app'} | set(model.MODEL_KINDS) or node.get('filter_repeats', False)) and not force
+        if (kind != 'manual_select' and (kind not in {'app'} | set(model.MODEL_KINDS) or node.get('filter_repeats', False)) and not force
                 and not cached.get('bypassed') and not cached.get('_restored_missing_results')
                 and digest == cached.get('fingerprint')
                 and model.results_valid(cached.get('results', []), cached.get('result_signatures'))):
@@ -888,6 +914,29 @@ class CanvasEngine(QtCore.QObject):
             from .model_nodes import execute, _check_stop
             results = execute(node, prepared, batches, stop, temporary=self.temporary)
             _check_stop(stop)
+        elif kind == 'manual_select':
+            from .run_outputs import capture
+            values=inputs.get('value') or []
+            if not values:raise ValueError('请连接候选结果')
+            values=capture(self.temporary,round_id,node,values)
+            self._set_state(canvas_id,node_id,status='AWAITING_SELECTION',results=values,
+                selection_token=uuid.uuid4().hex,selection_round=round_id,choice_digest=digest,
+                message='等待选择结果；打开节点设置确认后放行下游')
+            return
+        elif kind == 'branch':
+            from .advanced_nodes import scalar,typed
+            results=[]
+            for batch in batches:
+                if 'value' not in batch:raise ValueError('请连接分支内容')
+                condition=typed(scalar(batch['condition']),'boolean')['value'] if 'condition' in batch else node['params'].get('condition',True)
+                result=copy.deepcopy(batch['value']);result['_branch_port']='true' if condition else 'false'
+                results.append(result)
+        elif kind in model.utility_nodes.KINDS:
+            if kind == 'reroute':
+                results = copy.deepcopy(inputs.get('value') or [])
+                if not results:raise ValueError('请连接上游内容')
+            else:
+                results = model.utility_nodes.execute(node, self.temporary.directory(round_id,node_id), batches, stop)
         elif kind in ('filename', 'rename'):
             from .file_nodes import execute
             options = {'temporary_dir': str(self.temporary.directory(round_id,node_id))}
@@ -965,6 +1014,20 @@ class CanvasEngine(QtCore.QObject):
             self._execute_app(canvas_id, round_id, node, prepared, batches, digest, stop)
             return
         self._finish_node(canvas_id, node_id, results, digest)
+
+    def choose_results(self,canvas_id,node_id,round_id,token,indices):
+        """Commit a selection once; file checks and copying run in the worker."""
+        with self._condition:
+            document=self._documents.get(canvas_id) or {};run=document.get('run') or {}
+            active=self._active.get(canvas_id)
+            state=run.get('nodes',{}).get(node_id) or {}
+            if (not active or active['stop'].is_set() or run.get('id')!=round_id
+                or state.get('status')!='AWAITING_SELECTION' or state.get('selection_token')!=token):
+                raise ValueError('此选择请求已过期或已取消，请重新打开当前任务')
+            if (not indices or len(indices)!=len(set(indices)) or any(type(i) is not int or not 0<=i<len(state.get('results',[])) for i in indices)):
+                raise ValueError('请选择至少一个有效结果')
+            state.update(choice_indices=list(indices),status='PENDING')
+            self._condition.notify_all()
 
     def _execute_app(self, canvas_id, round_id, node, prepared, batches, digest, stop):
         node_id = node['id']

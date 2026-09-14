@@ -42,7 +42,7 @@ def capture(files, run_id, node, results):
                 result['path']=str(target)
         # Auxiliary edit assets belong to the same retained run as the output.
         # Move their references too when reusing a node in the next run.
-        for key in ('paint_temp_path','composite_path'):
+        for key in ('paint_temp_path','composite_path') + (('mask_path',) if result.get('_processed_mask') else ()):
             original=result.get(key)
             if not original:continue
             digest=model.file_hash(original)
