@@ -3,7 +3,7 @@ import math
 import os
 from collections import OrderedDict
 
-from .input_requirements import display_issue
+from .input_requirements import display_issue, display_missing_ports
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from aetherloom_core.rh_ui import palette
@@ -187,7 +187,9 @@ class PortItem(QtWidgets.QGraphicsEllipseItem):
         self.connected = bool(connected)
         colors = self.node_item.canvas_scene.colors
         color = QtGui.QColor(kind_color(self.content_kind,colors))
-        if not self.output and self.key in (self.node_item.node.get('_input_missing_ports', []) + self.node_item.node.get('_runtime_missing_ports', [])):color = QtGui.QColor(colors['danger'])
+        node = self.node_item.node
+        active = node_is_active(node) and node.get('status') in RUNNING_STATES | WAITING_STATES
+        if not self.output and not active and self.key in display_missing_ports(node):color = QtGui.QColor(colors['danger'])
         self.setBrush(color if self.output or connected else QtGui.QColor(colors['surface']))
         self.setPen(QtGui.QPen(color, 2))
         if self.output:
@@ -259,9 +261,11 @@ class NodeItem(QtWidgets.QGraphicsObject):
         hint = ('已忽略：执行时跳过此节点，按现有旁路规则传递输入。\n'
                 '右键取消“忽略节点”可恢复；正在执行的快照不受修改影响。\n' if ignored else '')
         issue = getattr(self, 'dependency_issue', None)
-        self.setToolTip(hint + (issue['detail'] if issue else str(display_issue(self.node) or self.node.get('error') or self.node.get('message') or ''))
+        run_hint = ('运行暂不可用：' + self.run_block_reason() + '；' if self.run_block_reason() else
+                    '标题右侧 ▶ 运行此节点；' if not self.run_rect().isEmpty() else '')
+        self.setToolTip(hint + (issue['detail'] if issue else str(display_issue(self.node) or self.node.get('_input_issue') or self.node.get('error') or self.node.get('message') or ''))
                         + '\n当前节点进度\n' + progress_text(self.node.get('node_progress'))
-                        + '\n标题右侧 ▶ 运行此节点；双击标题、右键或 Alt+Enter 打开完整设置。'
+                        + '\n' + run_hint + '双击标题、右键或 Alt+Enter 打开完整设置。'
                         + '\n双击结果查看预览，拖动右下角调整大小。')
 
     @classmethod
@@ -444,8 +448,14 @@ class NodeItem(QtWidgets.QGraphicsObject):
         return QtCore.QRectF(self.width + 10, max(94, 76 + 22 * (len(self.outputs) - 1)), 86, 27)
 
     def run_rect(self):
-        if self.node['kind'] in ('note','subgraph') or (getattr(self, 'dependency_issue', None) and not node_is_active(self.node)):return QtCore.QRectF()
+        if self.node['kind'] in ('note','subgraph'):return QtCore.QRectF()
         return QtCore.QRectF(self.width - 32, 4, 26, 24)
+
+    def run_block_reason(self):
+        issue = getattr(self, 'dependency_issue', None)
+        if issue:return issue['detail']
+        active = node_is_active(self.node) and self.node.get('status') in RUNNING_STATES | WAITING_STATES
+        return '' if active else display_issue(self.node)
 
     def progress_rect(self):
         return QtCore.QRectF(self.run_rect().center().x() - 12, 4, 24, 24)
@@ -664,18 +674,18 @@ class NodeItem(QtWidgets.QGraphicsObject):
             current = current_node_percent(self.node.get('status'), self.node.get('node_progress'))
             draw_circular_progress(painter, self.progress_rect(), current,
                                    self.node.get('status'), p, stroke=2)
-        else:
-            painter.setBrush(QtGui.QColor(p['accent_soft']))
+        elif not self.run_rect().isEmpty():
+            blocked = bool(self.run_block_reason())
+            painter.setBrush(QtGui.QColor(p['input'] if blocked else p['accent_soft']))
             painter.setPen(QtCore.Qt.NoPen)
             painter.drawRoundedRect(self.run_rect(), 5, 5)
             font.setBold(False)
             font.setPixelSize(11)
             painter.setFont(font)
-            painter.setPen(QtGui.QColor(p['accent']))
+            painter.setPen(QtGui.QColor(p['muted'] if blocked else p['accent']))
             triangle = QtGui.QPolygonF([QtCore.QPointF(self.width-22,10),
                                        QtCore.QPointF(self.width-22,22),QtCore.QPointF(self.width-13,16)])
-            if self.node['kind'] != 'note' and not issue:
-                painter.setBrush(QtGui.QColor(p['accent']));painter.drawPolygon(triangle)
+            painter.setBrush(QtGui.QColor(p['muted'] if blocked else p['accent']));painter.drawPolygon(triangle)
         font.setBold(False)
         font.setPixelSize(12)
         painter.setFont(font)
@@ -740,6 +750,8 @@ class NodeItem(QtWidgets.QGraphicsObject):
         if issue and not active:
             color = issue_color
             label = issue['label']
+        elif not ignored and status in ('IDLE', 'READY') and self.node.get('_input_issue'):
+            label = '待设置输入'
         if ignored and not state_color and not issue:
             color = accent
             label = '已忽略 · 旁路传递'
@@ -800,7 +812,8 @@ class NodeItem(QtWidgets.QGraphicsObject):
             return
         if (event.button() == QtCore.Qt.LeftButton and not self.shows_progress()
                 and self.run_rect().contains(event.pos())):
-            self.canvas_scene.run_requested.emit(self.node['id'], False)
+            if not self.run_block_reason():
+                self.canvas_scene.run_requested.emit(self.node['id'], False)
             event.accept()
             return
         if event.button() == QtCore.Qt.LeftButton and (model.supports_local_decode(self.node) and self.node.get('decode_settings', {}).get('enabled')) and self.decode_rect().contains(event.pos()):
@@ -1003,6 +1016,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
         model.sync_dynamic_inputs(doc)
         self.cancel_resize()
         self.cancel_link()
+        self._sync_text_documents(doc)
         self.clear()
         self._document = doc
         self.nodes, self.edges = {}, {}
@@ -1077,7 +1091,17 @@ class CanvasScene(QtWidgets.QGraphicsScene):
         for item in self.nodes.values():item.layout_inline()
         for edge in self.edges.values():edge.update_path()
 
+    def _sync_text_documents(self, doc):
+        page = self.parent()
+        if not hasattr(page, 'histories'):return
+        from .inline_text import sync_documents
+        epoch = (doc['id'], getattr(page, '_document_epoch', None))
+        reset = epoch != getattr(self, '_text_document_epoch', epoch)
+        self._text_document_epoch = epoch
+        sync_documents(page.histories, doc, reset=reset)
+
     def refresh_nodes(self, doc):
+        self._sync_text_documents(doc)
         self._document = doc
         for node in doc.get('nodes', []):
             item = self.nodes.get(node['id'])

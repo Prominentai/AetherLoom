@@ -41,10 +41,14 @@ def build(panel, node):
             if node['kind'] == 'text_template':
                 # Apply explicitly so partially typed braces never remove cables.
                 apply = QtWidgets.QPushButton('应用模板 / 更新输入端口', panel)
-                def commit(e=editor):
+                def commit(_checked=False, e=editor):
                     try:utility_nodes.template_keys(e.toPlainText())
                     except ValueError as error:panel.message.emit(str(error));return
                     panel.changed.emit('params.template', e.toPlainText())
+                    # The shared document is now the applied baseline. A later
+                    # Inspector must retain any new draft typed after this Apply.
+                    from .inline_text import sync_document
+                    sync_document(e.document(), e.toPlainText())
                 apply.clicked.connect(commit);panel.form.addWidget(apply)
                 editor.setToolTip('使用 {主题} 等占位符。编辑完成后点击应用；{{ 和 }} 表示字面括号。')
             else:editor.textChanged.connect(lambda k=key,e=editor:panel.changed.emit('params.'+k,e.toPlainText()))

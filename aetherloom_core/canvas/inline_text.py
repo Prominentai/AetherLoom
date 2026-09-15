@@ -1,8 +1,42 @@
 """Shared session text documents for the inspector and in-node editor."""
 import copy
-from PyQt5 import QtCore,QtGui,QtWidgets
+import weakref
+from PyQt5 import QtCore,QtGui,QtWidgets,sip
 from aetherloom_core.ui.widgets import CompletionTextEdit
 from aetherloom_core.prompt_history import PromptHistory
+
+
+def sync_document(document, text, *, reset=False):
+    """Update from saved parameters, without mistaking an active draft for stale text."""
+    text = str(text)
+    if not reset and text == getattr(document, '_canvas_source_text', None):return
+    document._canvas_source_text = text
+    if not reset and document.toPlainText() == text:return
+    # Existing views must repaint, but a model/undo refresh is not another edit.
+    blockers = [QtCore.QSignalBlocker(editor) for editor in getattr(document, '_canvas_editors', ())
+                if not sip.isdeleted(editor)]
+    try:
+        document.setPlainText(text)
+    finally:
+        blockers.clear()
+
+
+def sync_documents(histories, canvas, *, reset=False):
+    """Reconcile cached text with actual parameters on canvas refresh or reopening."""
+    from . import model, utility_nodes
+    nodes = {node['id']: node for node in canvas.get('nodes', [])}
+    for identity, document in list(histories.items()):
+        if (not isinstance(identity, tuple) or len(identity) != 4
+                or identity[:2] != ('text_document', canvas['id'])
+                or not isinstance(document, QtGui.QTextDocument)):
+            continue
+        node = nodes.get(identity[2])
+        if node is None:continue
+        key = identity[3]
+        defaults = utility_nodes.defaults(node['kind']) if node['kind'] in utility_nodes.SCHEMAS else {}
+        if node['kind'] == 'app':
+            defaults = {model.parameter_key(field): field.get('fieldValue', '') for field in model.app_fields(node)}
+        sync_document(document, node.get('params', {}).get(key, defaults.get(key, '')), reset=reset)
 
 
 def bind_document(editor,text,identity,histories):
@@ -10,12 +44,13 @@ def bind_document(editor,text,identity,histories):
     document=histories.get(key)
     if document is None:
         document=QtGui.QTextDocument(QtWidgets.QApplication.instance())
-        document.setPlainText(str(text));histories[key]=document
-    elif document.toPlainText()!=str(text):
-        document.setPlainText(str(text))
+        document._canvas_editors = weakref.WeakSet()
+        histories[key]=document
+    sync_document(document, text)
     font = QtGui.QFont('Microsoft YaHei UI');font.setPixelSize(13)
     if document.defaultFont() != font:document.setDefaultFont(font)
     editor.setDocument(document)
+    document._canvas_editors.add(editor)
     return document
 
 

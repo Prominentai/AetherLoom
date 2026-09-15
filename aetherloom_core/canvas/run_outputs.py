@@ -59,6 +59,8 @@ def capture(files, run_id, node, results):
                     os.replace(part,target)
                 finally:part.unlink(missing_ok=True)
             result['archive_path']=str(target)
+            # saved_path / _saved_targets describe independent user exports;
+            # moving the cache must never replace those destinations.
             if node['kind'] not in model.MEDIA or result.get('source_path'):
                 result.setdefault('_file_identity',os.path.normcase(os.path.abspath(source)) if source else 'text:'+digest)
                 result['path']=str(target)

@@ -59,6 +59,7 @@ class CanvasEngine(QtCore.QObject):
         self._active = {}
         self._closing = threading.Event()
         self._last_view_notification = {}
+        self._view_revision = 0
         self._view_canvas = None
         self._unsubscribe = service.subscribe(self._on_record)
         previous_password_lookup = getattr(service, 'restore_password', None)
@@ -116,7 +117,10 @@ class CanvasEngine(QtCore.QObject):
                 save or force_notify or document.get('run', {}).get('status') in TERMINAL
                 or now - self._last_view_notification.get(document['id'], 0) >= 0.1):
             self._last_view_notification[document['id']] = now
-            self.changed.emit(copy.deepcopy(document))
+            self._view_revision += 1
+            update = copy.deepcopy(document)
+            update['_view_revision'] = self._view_revision
+            self.changed.emit(update)
         self._condition.notify_all()
         return True
 
@@ -188,6 +192,18 @@ class CanvasEngine(QtCore.QObject):
                 return copy.deepcopy(self._document_locked(canvas_id))
         # Explicit callers may reopen an evicted, finished canvas on demand.
         return self.attach(self.store.load(canvas_id))
+
+    def view_document(self, canvas_id):
+        """Refresh an attached editor and fence older queued notifications.
+
+        The sequence belongs only to this view copy, never to the document or
+        its persisted snapshot. Viewing cannot attach or resume another canvas.
+        """
+        with self._condition:
+            update = copy.deepcopy(self._document_locked(canvas_id))
+            self._view_revision += 1
+            update['_view_revision'] = self._view_revision
+            return update
 
     def set_view_canvas(self, canvas_id):
         """Only the selected editor needs the complete graph notification."""
@@ -571,7 +587,7 @@ class CanvasEngine(QtCore.QObject):
         run = document['run']
         run['has_failure'] = True
         descendants, pending = set(), [node_id]
-        edges = run.get('snapshot', {}).get('edges', [])
+        edges = model.execution_edges(run.get('snapshot') or {'nodes': [], 'edges': []})
         while pending:
             current = pending.pop()
             if current in descendants:
@@ -887,7 +903,7 @@ class CanvasEngine(QtCore.QObject):
                     raise MissingRuntimeInput(f'{label}：上游没有匹配结果，已跳过本分支', edge['input']) from error
                 raise
         if node.get('bypass'):
-            results=model.bypass_results(node,inputs)
+            results=model.bypass_results(node,inputs,connected=[edge['input'] for edge in edges])
             from .run_outputs import capture
             results=capture(self.temporary,round_id,node,results)
             self._set_state(canvas_id,node_id,status='SUCCESS',bypassed=True,cached=False,activated=False,
@@ -934,7 +950,13 @@ class CanvasEngine(QtCore.QObject):
                 try:model.select_results(cached['results'],edge,accepted)
                 except ValueError:compatible=False;break
             if compatible:
-                self._finish_node(canvas_id, node_id, cached['results'], digest, cached=True)
+                results = cached['results']
+                if kind == 'preview' and node.get('params', {}).get('save_enabled', False):
+                    from .save_results import save_node_results
+                    results = save_node_results(results, node['params']['save_directory'].strip(), stop,
+                                                overwrite=node.get('params', {}).get('overwrite', False),
+                                                previous=cached['results'], cached=True)
+                self._finish_node(canvas_id, node_id, results, digest, cached=True)
                 return
         if kind != 'app':
             self._set_state(canvas_id, node_id, status='RUNNING', activated=True, message='正在执行')
@@ -1023,9 +1045,10 @@ class CanvasEngine(QtCore.QObject):
             if not results:
                 raise ValueError('请连接上游结果')
             if kind == 'preview' and node.get('params', {}).get('save_enabled', False):
-                from .save_results import save_results
-                results = save_results(results, node['params']['save_directory'].strip(), stop,
-                                       overwrite=node.get('params', {}).get('overwrite', False))
+                from .save_results import save_node_results
+                results = save_node_results(results, node['params']['save_directory'].strip(), stop,
+                                            overwrite=node.get('params', {}).get('overwrite', False),
+                                            previous=None if force else cached.get('results'))
             if kind == 'select':
                 params = node.get('params', {})
                 if params.get('indices') and any(states[edge['source']].get('_restored_positions_ambiguous') for edge in edges):
@@ -1218,6 +1241,10 @@ class CanvasEngine(QtCore.QObject):
             for result in results:
                 result.pop('_restored_positions', None)
         signatures = [model.result_signature(result) for result in results]
+        if cached and node['kind'] == 'preview' and node.get('params', {}).get('save_enabled', False):
+            with self._condition:
+                state = self._document_locked(canvas_id)['run'].setdefault('cache', {}).setdefault(node_id, {})
+                state.update(results=copy.deepcopy(results), result_signatures=copy.deepcopy(signatures), fingerprint=digest)
         self._set_state(canvas_id, node_id, status='SUCCESS', bypassed=False, progress=100, message='复用已有结果' if cached else '已完成',
                         results=results, result_signatures=signatures, fingerprint=digest, cached=cached)
 

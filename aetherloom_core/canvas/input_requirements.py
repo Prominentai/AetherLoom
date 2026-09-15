@@ -92,16 +92,33 @@ def plan(document, target=None):
 
 
 def display_issue(node):
-    return node.get('_input_issue') or node.get('_runtime_input_issue') or ''
+    """Only an explicit run or execution may promote an input hint to an error."""
+    if node.get('bypass'):return ''
+    if node.get('_input_issue_confirmed') and node.get('_input_issue'):
+        return node['_input_issue']
+    if node.get('stale') or node.get('_ui_stale'):return ''
+    return node.get('_runtime_input_issue') or ''
 
 
-def refresh(page):
+def display_missing_ports(node):
+    if not display_issue(node):return []
+    key = '_input_missing_ports' if node.get('_input_issue_confirmed') and node.get('_input_issue') else '_runtime_missing_ports'
+    return node.get(key) or []
+
+
+def refresh(page, *, validated=None):
     """View-only diagnostics; editing a running graph never changes its plan."""
     issues = inspect(page.document)
     for node in page.document['nodes']:
         details = issues.get(node['id'], [])
-        node['_input_issue'] = '；'.join(issue['message'] for issue in details)
-        node['_input_missing_ports'] = [key for issue in details for key in issue['ports']]
+        message = '；'.join(issue['message'] for issue in details)
+        ports = [key for issue in details for key in issue['ports']]
+        if (message, ports) != (node.get('_input_issue', ''), node.get('_input_missing_ports', [])):
+            node.pop('_input_issue_confirmed', None)
+        node['_input_issue'] = message
+        node['_input_missing_ports'] = ports
+        if validated is not None and node['id'] in validated:
+            node['_input_issue_confirmed'] = bool(details)
         item = page.scene.nodes.get(node['id'])
         if item is not None:
             item.refresh_bypass()

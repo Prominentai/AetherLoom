@@ -23,6 +23,7 @@ from .controls import CanvasStatus
 
 RUNTIME_FIELDS = ('results', 'result_signatures', 'fingerprint', 'status', 'progress', 'node_progress', 'message', 'error', 'generation', 'cached', 'stale', 'activated', 'bypassed', '_restored_missing_results', '_restored_positions_ambiguous')
 RUNTIME_FIELDS += ('_runtime_input_issue', '_runtime_missing_ports')
+INPUT_HINT_FIELDS = ('_input_issue', '_input_missing_ports', '_input_issue_confirmed')
 
 
 class _BatchCountSpinBox(QtWidgets.QSpinBox):
@@ -907,7 +908,8 @@ class CanvasPage(QtWidgets.QWidget):
         self._updating, self._dirty = False, False
         attached = self.engine.attach(doc)
         if attached:
-            self.document = attached
+            self.document = self.engine.view_document(doc['id'])
+            self._last_runtime_revision = self.document.pop('_view_revision')
             self.scene.refresh_nodes(self.document)
         self._sync_actions()
         self._refresh_missing_apps()
@@ -1006,7 +1008,7 @@ class CanvasPage(QtWidgets.QWidget):
         result = {key: copy.deepcopy(value) for key, value in self.document.items() if key != 'run'}
         result['run'] = {}
         for node in result['nodes']:
-            for key in RUNTIME_FIELDS:
+            for key in RUNTIME_FIELDS + INPUT_HINT_FIELDS:
                 node.pop(key, None)
         return result
 
@@ -1497,6 +1499,11 @@ class CanvasPage(QtWidgets.QWidget):
         restored['run'] = copy.deepcopy(self.document.get('run', {}))
         for node in restored['nodes']:
             live=live_nodes.get(node['id'])
+            # Revalidate against current hints; Undo must not replay old errors.
+            for key in INPUT_HINT_FIELDS:
+                node.pop(key, None)
+                if live and key in live:
+                    node[key] = copy.deepcopy(live[key])
             if node['kind'] in ('text', 'note', 'text_split') and live:
                 node.setdefault('params',{})['text']=live.get('params',{}).get('text','')
             if node['id'] in runtime:
@@ -1509,7 +1516,7 @@ class CanvasPage(QtWidgets.QWidget):
             for key in RUNTIME_FIELDS:
                 if key in state:
                     node[key] = copy.deepcopy(state[key])
-        ignored = set(RUNTIME_FIELDS) | {'input_keys'}
+        ignored = set(RUNTIME_FIELDS + INPUT_HINT_FIELDS) | {'input_keys'}
         def settings(node):return {key: value for key, value in node.items() if key not in ignored}
         connections_only = (set(live_nodes) == {node['id'] for node in restored['nodes']}
                             and all(settings(node) == settings(live_nodes[node['id']]) for node in restored['nodes']))
@@ -1582,8 +1589,9 @@ class CanvasPage(QtWidgets.QWidget):
             self.document['view'] = self.view.view_state()
             model.normalize_app_urls(self.document)
             self.engine.save_document(self.document, explicit=not automatic)
-            current = self.engine.document(canvas_id)
+            current = self.engine.view_document(canvas_id)
             if current is not None:
+                self._last_runtime_revision = current.pop('_view_revision')
                 self.document = current
                 self.scene.refresh_nodes(self.document)
             self._persisted_ids.add(canvas_id)
@@ -1777,7 +1785,7 @@ class CanvasPage(QtWidgets.QWidget):
             scope = input_plan['scope']
         except ValueError as error:
             self._message(f'无法运行：{error}');return
-        refresh(self)
+        refresh(self, validated=input_plan['requested'])
         if not scope:
             self.save(automatic=True)
             self._message('本次没有输入完整的执行分支；已标出缺少输入的节点，保留上次预览。')
@@ -1823,20 +1831,35 @@ class CanvasPage(QtWidgets.QWidget):
     def _runtime_changed(self, update):
         if update.get('id') != self.document['id'] or self._closed or update.get('id') in self._deleted_ids:
             return
+        revision = update.get('_view_revision')
+        if revision is not None:
+            if revision <= getattr(self, '_last_runtime_revision', -1):
+                return
+            self._last_runtime_revision = revision
+        # Worker notifications describe the configuration at publication time.
+        # A queued completion may arrive after an edit (including an upstream
+        # edit); it may refresh old results, but must not validate the new draft.
+        edited_nodes = model.changed_execution_nodes(self.document, update)
         self.document['run'] = copy.deepcopy(update.get('run', {}))
         nodes = {node['id']: node for node in update.get('nodes', [])}
         result_changed = False
         for node in self.document['nodes']:
             incoming = nodes.get(node['id'])
             if incoming:
-                if incoming.get('status') in ('SUCCESS', 'REUSED') and not incoming.get('stale'):
+                edited = node['id'] in edited_nodes
+                if not edited and incoming.get('status') in ('SUCCESS', 'REUSED') and not incoming.get('stale'):
                     node.pop('_ui_stale', None)
                 changed = node.get('results') != incoming.get('results')
                 result_changed |= changed
                 for key in RUNTIME_FIELDS:
                     if key == 'results' and not changed:continue
+                    if edited and key in ('stale', '_runtime_input_issue', '_runtime_missing_ports'):
+                        continue
                     if key in incoming:
                         node[key] = copy.deepcopy(incoming[key])
+                if edited:
+                    node.update(stale=True, _ui_stale=True,
+                                _runtime_input_issue='', _runtime_missing_ports=[])
                 if changed:
                     available, signatures, missing = model.available_results(node.get('results', []), node.get('result_signatures'))
                     node['results'] = available
@@ -1946,7 +1969,7 @@ class CanvasPage(QtWidgets.QWidget):
         super().showEvent(event)
         self.engine.set_view_canvas(self.document['id'])
         try:
-            current = self.engine.document(self.document['id'])
+            current = self.engine.view_document(self.document['id'])
         except (KeyError, RuntimeError):
             current = None
         if current is not None:

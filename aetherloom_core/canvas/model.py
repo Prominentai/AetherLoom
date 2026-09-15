@@ -53,7 +53,7 @@ RUNTIME_FIELDS = frozenset({'results', 'result_signatures', 'fingerprint', 'stat
                             'message', 'error', 'generation', 'cached', 'stale', 'activated', 'bypassed', 'selection_token', 'selection_round',
                             '_restored_missing_results', '_restored_positions_ambiguous'})
 RUNTIME_FIELDS |= {'_ui_unknown_inputs', '_ui_unknown_outputs'}
-RUNTIME_FIELDS |= {'_input_issue', '_input_missing_ports', '_ui_stale'}
+RUNTIME_FIELDS |= {'_input_issue', '_input_missing_ports', '_input_issue_confirmed', '_ui_stale'}
 RUNTIME_FIELDS |= {'_runtime_input_issue', '_runtime_missing_ports'}
 
 
@@ -751,15 +751,49 @@ def incoming(document, node_id):
     return [edge for edge in document['edges'] if edge['target'] == node_id]
 
 
+def bypass_input_routes(node, connected):
+    """Resolve bypass dependencies and result filters before upstream execution.
+
+    Ordinary nodes keep the first connected input for each compatible content
+    type. An ANY input claims its possible types too: empty runtime results must
+    not unexpectedly activate a different upstream branch. Collection mergers
+    retain their ordered concatenation, and transparent value sockets preserve
+    List / Batch contents without conversion.
+    """
+    connected = set(connected)
+    ports = [port for port in input_ports(node) if port['key'] in connected]
+    kind = node['kind']
+    if kind in DYNAMIC_INPUT_KINDS:
+        return [(port['key'], None) for port in ports]
+    if kind in ('select', 'preview', 'rename', 'text_join', 'branch') or kind in collections.KINDS:
+        return [('value', None)] if 'value' in connected else []
+    if kind == 'filename':ports = [port for port in ports if port['key'] == 'value']
+    if kind == 'edit_model':ports = [port for port in ports if port['key'] == 'image']
+    produced = output_types(node)
+    content_types = set(ITEM_OUTPUT_TYPES) - {'batch'}
+    claimed, routes = set(), []
+    for port in ports:
+        eligible = {content for content in content_types
+                    if types_compatible(content, port['type'])
+                    and any(types_compatible(content, output) for output in produced)}
+        # A text Batch and an image Batch are different content routes; the
+        # first prompt socket must not claim the image socket's whole Batch.
+        eligible.update('batch:' + content for content in content_types | {'any'}
+                        if (port['type'] in ('any', 'batch') or port['type'] == content + '_input')
+                        and (produced & {'any', 'batch'} or kind == 'edit_model' and content == 'image'))
+        eligible -= claimed
+        if eligible:
+            routes.append((port['key'], frozenset(eligible)))
+            claimed.update(eligible)
+    return routes
+
+
 def execution_edges(document):
-    allowed={}
-    for node in document['nodes']:
-        if not node.get('bypass'):continue
-        if node['kind'] in DYNAMIC_INPUT_KINDS:keys={port['key'] for port in input_ports(node)}
-        elif node['kind'] in ('list2batch','batch2list','batch_select','rebatch','rename','filename','select','preview','text_join','branch'):keys={'value'}
-        elif node['kind'] == 'edit_model':keys={'image'}
-        else:keys={port['key'] for port in input_ports(node) if any(types_compatible(port['type'],kind) for kind in output_types(node))}
-        allowed[node['id']]=keys
+    connected = {}
+    for edge in document['edges']:
+        connected.setdefault(edge['target'], set()).add(edge['input'])
+    allowed = {node['id']: {key for key, _ in bypass_input_routes(node, connected.get(node['id'], set()))}
+               for node in document['nodes'] if node.get('bypass')}
     return [edge for edge in document['edges'] if edge['target'] not in allowed or edge['input'] in allowed[edge['target']]]
 
 
@@ -1238,23 +1272,19 @@ def results_valid(results, signatures=None):
         return False
 
 
-def bypass_results(node, inputs):
-    if node['kind']=='branch':
-        return [dict(copy.deepcopy(value),_branch_port=port) for port in ('true','false') for value in inputs.get('value',[])]
-    """Bypass one output to the first connected input of each compatible type."""
-    keys=[port['key'] for port in input_ports(node) if port['key'] in inputs]
-    if node['kind'] in ('select', 'preview', 'rename', 'text_join'):
-        return copy.deepcopy(inputs.get('value', []))
-    if node['kind'] in DYNAMIC_INPUT_KINDS:
-        return copy.deepcopy([value for key in keys for value in inputs[key]])
-    if node['kind'] in ('list2batch','batch2list','batch_select','rebatch','rename','select','preview','filename'):keys=['value'] if 'value' in inputs else []
-    result=[];claimed=set();produced=output_types(node)
-    for key in keys:
-        values=inputs[key]
-        kinds={result_type(value) for value in values}
-        eligible={kind for kind in kinds if kind not in claimed and (node['kind'] in collections.KINDS or node['kind'] == 'edit_model' and kind == 'batch' or any(types_compatible(kind,p) for p in produced))}
-        result.extend(copy.deepcopy(value) for value in values if result_type(value) in eligible)
-        claimed.update(eligible)
+def bypass_results(node, inputs, *, connected=None):
+    """Forward exactly the routes selected by dependency planning."""
+    routes = bypass_input_routes(node, inputs if connected is None else connected)
+    def content_route(value):
+        kind = result_type(value)
+        if kind != 'batch':return kind
+        contents = {result_type(item) for item in batch_items(value)}
+        return 'batch:' + (next(iter(contents)) if len(contents) == 1 else 'any')
+    result = [copy.deepcopy(value) for key, eligible in routes for value in inputs.get(key, [])
+              if eligible is None or content_route(value) in eligible]
+    if node['kind'] == 'branch':
+        return [dict(copy.deepcopy(value), _branch_port=port)
+                for port in ('true', 'false') for value in result]
     return result
 
 
