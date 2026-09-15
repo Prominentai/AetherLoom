@@ -462,7 +462,9 @@ class RhExecutionService(QtCore.QObject):
                 raise ValueError('运行标识已存在，不能重复提交')
             self._input_leases[run_id] = self.temporary.retain(
                 value for node in snapshot.get('nodes',[]) if isinstance(node,dict)
-                for value in (node.get('fieldValue') if isinstance(node.get('fieldValue'), list) else [node.get('fieldValue', '')]))
+                for value in ((node.get('fieldValue') if isinstance(node.get('fieldValue'), list) else [node.get('fieldValue', '')])
+                              + [(node.get('_mask') or {}).get('path', '')]
+                              + [mask.get('path', '') for mask in node.get('_canvas_masks', {}).values()]))
             self._snapshots[run_id] = snapshot
             self._records[run_id] = dict(
                 run_id=run_id, task_id=None, webapp_id=webapp_id,
@@ -596,11 +598,13 @@ class RhExecutionService(QtCore.QObject):
             # Upload IDs are account-scoped. Cache each credential separately,
             # preserving successful uploads across FIFO retry rounds.
             uploads, copied_inputs = {}, set()
-            from .mask_assets import matches, materialize
+            from .mask_assets import matches, materialize, asset_reference
             # Mask settings belong to this immutable submission, never live widgets.
             for node in original_nodes:
                 mask = node.pop('_mask',None)
                 source = node.get('fieldValue','')
+                attached = node.pop('_canvas_masks', {})
+                if isinstance(source, str):mask = attached.get(source) or mask
                 if mask and matches(mask,source):
                     if self._stopped(run_id):raise SubmissionCancelled()
                     folder = self.temporary.directory('app-' + run_id)
@@ -609,8 +613,10 @@ class RhExecutionService(QtCore.QObject):
                         snapshot.get('input_dir') or str(self.temporary.project / 'input'),folder,assets=assets)
                     for frozen in snapshot['nodes']:
                         if frozen.get('nodeId') == node.get('nodeId') and frozen.get('fieldName') == node.get('fieldName'):
-                            frozen['_mask']['path'] = mask_path
-                            if assets.get('paint_path'):frozen['_mask']['paint_path']=assets['paint_path']
+                            saved = asset_reference(mask, mask_path)
+                            if assets.get('paint_path'):saved['paint_path']=assets['paint_path']
+                            if source in frozen.get('_canvas_masks', {}):frozen['_canvas_masks'][source] = saved
+                            else:frozen['_mask'] = saved
             self._publish(run_id, snapshot=public_snapshot(snapshot))
             self.documents.patch('applications', run_id, {'request':public_snapshot(snapshot)})
 

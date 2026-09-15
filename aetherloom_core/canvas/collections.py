@@ -128,7 +128,8 @@ def execute(node, inputs):
     else:raise ValueError('未知 List / Batch 节点')
     if not output:raise ValueError('没有符合内容类型的结果')
     output = copy.deepcopy(output)
+    model.assign_collection_lineages(output, identity)
     for index, value in enumerate(output):
-        value.update(index=index, lineage=dict(model.lineage(value), **{identity: str(index)}))
+        value.update(index=index)
         value.pop('_restored_positions', None)
     return output

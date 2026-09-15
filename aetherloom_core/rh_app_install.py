@@ -2,40 +2,13 @@
 import json
 import os
 from pathlib import Path
-import re
 import tempfile
 import threading
-from urllib.parse import urlsplit
 
 from PyQt5 import QtCore
 
 from aetherloom_core.paths import current_dir
-
-
-def application_reference(reference):
-    """Only send local credentials to a known RunningHub website."""
-    raw = str(reference.get('url') or '').strip()
-    wid = str(reference.get('webapp_id') or reference.get('webappId') or '').strip()
-    if raw:
-        parsed = urlsplit(raw if '://' in raw else 'https://' + raw)
-        host = (parsed.hostname or '').lower()
-        if (parsed.scheme != 'https' or parsed.username or parsed.password
-                or parsed.port not in (None, 443)
-                or host not in ('runninghub.cn', 'www.runninghub.cn',
-                                'runninghub.ai', 'www.runninghub.ai')):
-            raise ValueError('应用地址必须是 RunningHub 官方网站的 HTTPS 地址')
-        match = re.fullmatch(r'/(?:webapp|ai-detail)/(\d+)/?', parsed.path)
-        if not match or (wid and wid != match.group(1)):
-            raise ValueError('应用地址与应用 ID 不一致或地址格式无效')
-        wid = match.group(1)
-        host = host if host.startswith('www.') else 'www.' + host
-    else:
-        host = 'www.runninghub.cn'
-    if not wid.isdigit():
-        raise ValueError('应用缺少有效的 ID')
-    base = 'https://' + host
-    return dict(webapp_id=wid, url=base + '/webapp/' + wid, base_url=base,
-                name=str(reference.get('name') or reference.get('title') or ''))
+from .rh_app_reference import application_reference
 
 
 def _atomic_write(path, data):
@@ -56,11 +29,12 @@ class AppInstallJob(QtCore.QObject):
     progress = QtCore.pyqtSignal(int, int, dict, str)
     finished = QtCore.pyqtSignal(dict)
 
-    def __init__(self, references, keyrings, root, lock, parent=None):
+    def __init__(self, references, keyrings, root, lock, parent=None, *, default_base='https://www.runninghub.cn'):
         super().__init__(parent)
         self.references = list(references)
         self.keyrings = {host: list(keys) for host, keys in keyrings.items()}
         self.root, self.lock = Path(root), lock
+        self.default_base = default_base
 
     def start(self):
         threading.Thread(target=self._run, name='rh-install-apps', daemon=True).start()
@@ -71,11 +45,20 @@ class AppInstallJob(QtCore.QObject):
         report = dict(added=[], existing=[], failed=[], total=0)
         seen, references = set(), []
         for raw in self.references:
+            if isinstance(raw, (str, int)) and not isinstance(raw, bool):raw = {'url': str(raw)}
             try:
-                ref = application_reference(raw)
+                if not isinstance(raw, dict):raise ValueError('应用引用格式无效')
+                if raw.get('backend') in ('rh_standard', 'rh_llm'):
+                    from .rh_model_apps import application_from_canvas
+                    application = application_from_canvas(raw)
+                    ref = dict(webapp_id=application['webappId'], base_url=application['base_url'], url='',
+                               name=application['title'], backend=application['backend'], application=application)
+                else:
+                    ref = application_reference(raw, default_base=self.default_base)
             except (ValueError, TypeError) as exc:
-                report['failed'].append(dict(webapp_id=str(raw.get('webapp_id') or ''),
-                                             url=str(raw.get('url') or ''), error=str(exc)))
+                value = raw if isinstance(raw, dict) else {}
+                report['failed'].append(dict(webapp_id=str(value.get('webapp_id') or ''),
+                                             url=str(value.get('url') or ''), error=str(exc)))
                 continue
             # RH_apps uses a single directory per webapp ID, as does the App page.
             if ref['webapp_id'] not in seen:
@@ -94,6 +77,12 @@ class AppInstallJob(QtCore.QObject):
                         if not isinstance(installed, dict) or not isinstance(installed.get('nodeInfoList'), list):
                             raise ValueError('本地应用定义损坏，请在 RH 应用页重新添加')
                         report['existing'].append(wid)
+                    elif ref.get('application') is not None:
+                        # Model cards are declarative local definitions. Restore
+                        # the original ID/site; no account lookup or cloud task.
+                        from .rh_model_apps import install
+                        install(self.root, ref['application'])
+                        report['added'].append(wid)
                     else:
                         keys = self.keyrings.get(base, [])
                         if not keys:
@@ -141,8 +130,9 @@ def install_apps(owner, references, on_progress=None, on_finished=None):
     settings = ensure_connections(owner)
     if not hasattr(owner, '_rh_app_install_lock'):
         owner._rh_app_install_lock = threading.Lock()
-    job = AppInstallJob(references, settings.snapshot()['site_keyrings'], Path(current_dir) / 'RH_apps',
-                        owner._rh_app_install_lock, owner)
+    connection = settings.snapshot()
+    job = AppInstallJob(references, connection['site_keyrings'], Path(current_dir) / 'RH_apps',
+                        owner._rh_app_install_lock, owner, default_base=connection['base_url'])
     if on_progress is not None:
         job.progress.connect(on_progress)
 

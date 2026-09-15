@@ -5,10 +5,12 @@ _DARK={'app':'#93a4ff','image':'#68c9ac','video':'#d895cc','audio':'#dfb87e',
        'text':'#83b6f6','select':'#b5a0ee','preview':'#82c7dc',
        'number':'#b5a0ee','scalar':'#dfb87e','file':'#82c7dc','any':'#9baec4'}
 _DARK['mask']='#81c784'
+_DARK['bounding']='#e5b476'
 _LIGHT={'app':'#656ac8','image':'#26876d','video':'#a35895','audio':'#9d732f',
         'text':'#387cbc','select':'#8564b7','preview':'#267f98',
         'number':'#8564b7','scalar':'#9d732f','file':'#267f98','any':'#718398'}
 _LIGHT['mask']='#388e3c'
+_LIGHT['bounding']='#9c671c'
 _DARK.update(llm_model='#9eafff', vision_model='#75cbd2', image_model='#d9a1ee', edit_model='#efb68d')
 _LIGHT.update(llm_model='#6868bd', vision_model='#297f89', image_model='#9956b0', edit_model='#a06a39')
 _DARK.update(filename='#a6c9a2', rename='#e4bf80')
@@ -58,7 +60,7 @@ def bypass_colors(colors):
 
 
 def draw_kind_icon(painter, rect, kind, color):
-    kind = {'image_resize':'image', 'image_crop':'image', 'image_pad':'image', 'image_compare':'preview',
+    kind = {'image_resize':'image', 'image_crop':'image', 'image_crop_mask':'image', 'image_paste_bounding':'image', 'image_pad':'image', 'image_compare':'preview',
             'media_info':'int', 'text_template':'text', 'text_split':'text', 'text_join':'text',
             'note':'text', 'reroute':'select'}.get(kind, kind)
     kind = {'llm_model': 'text', 'vision_model': 'preview', 'image_model': 'image', 'edit_model': 'image', 'filename': 'text', 'rename': 'text'}.get(kind, kind)

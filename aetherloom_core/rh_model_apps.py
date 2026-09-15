@@ -179,6 +179,32 @@ def llm_application(model_name, name='', base_url='https://www.runninghub.cn'):
         nodeInfoList=fields_for(definition), description='RH LLM · 每次运行独立对话；图像输入仅适用于支持视觉的模型。')
 
 
+def application_from_canvas(reference):
+    """Restore a local model card from the saved definition, without HTTP or keys."""
+    kind = backend(reference)
+    if kind not in ('rh_standard', 'rh_llm'):raise ValueError('不是 RH 模型节点')
+    identity = str(reference.get('webapp_id') or '')
+    prefix = 'standard' if kind == 'rh_standard' else 'llm'
+    if not re.fullmatch(prefix + r'_[a-f0-9]{32}', identity):raise ValueError('模型类型与应用标识不一致')
+    definition = copy.deepcopy(reference.get('model_definition'))
+    if not isinstance(definition, dict):raise ValueError('画布未保存模型定义，请重新添加对应模型节点')
+    if kind == 'rh_standard':
+        validate_catalog([definition])
+    else:
+        if not isinstance(definition.get('model'), str) or not definition['model'].strip():
+            raise ValueError('画布未保存 LLM 模型名称，请重新添加对应节点')
+        validate_catalog([dict(definition, endpoint='llm', display_name=definition['model'], output_type='string')])
+    nodes = copy.deepcopy(reference.get('nodes'))
+    if not nodes:
+        nodes = fields_for(definition)
+    if not isinstance(nodes, list) or not all(isinstance(n, dict) and n.get('nodeId') is not None
+            and isinstance(n.get('fieldName'), str) and n['fieldName'] for n in nodes):
+        raise ValueError('画布保存的模型输入定义无效')
+    return dict(schema_version=1, webappId=identity, title=str(reference.get('name') or identity),
+                backend=kind, base_url=official_site(reference.get('base_url')),
+                model_definition=definition, nodeInfoList=nodes)
+
+
 def install(root, application):
     from .rh_app_install import _atomic_write
     identity = str(application['webappId'])

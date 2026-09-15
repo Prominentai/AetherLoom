@@ -1,5 +1,6 @@
 """RunningHub app cards and a shared, virtualized task queue presentation."""
 import math
+import re
 import time
 import weakref
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -16,6 +17,15 @@ LABELS = {'QUEUED': '云端排队', 'RUNNING': '运行中', 'DOWNLOADING': '下�
           'REMOVED': '已移除', 'LOCAL_WAIT': '等待提交', 'SUBMITTING': '准备 / 提交中',
           'UNKNOWN': '提交结果未知', 'PAUSED': '已暂停', 'INTERRUPTED': '会话已中断'}
 ACTIVE_UI = ACTIVE_STATUSES | {'LOCAL_WAIT', 'SUBMITTING'}
+TASK_GROUPS = (
+    ('运行', {'RUNNING'}), ('等候', {'QUEUED', 'LOCAL_WAIT'}), ('提交', {'SUBMITTING'}),
+    ('下载', {'DOWNLOADING'}), ('重试', {'DOWNLOAD_FAILED', 'POLL_TIMEOUT'}),
+    ('取消中', {'CANCELING'}), ('待处理', {'CANCEL_FAILED', 'WAITING_FOR_KEY', 'WAITING_FOR_SECRET'}),
+)
+
+
+def task_counts(statuses):
+    return tuple((label, sum(status in values for status in statuses)) for label, values in TASK_GROUPS)
 
 
 def status_color(p, status):
@@ -34,21 +44,118 @@ class AppCard(QtWidgets.QPushButton):
     def __init__(self, title, dashboard, parent=None):
         super().__init__(title, parent)
         self.dashboard = dashboard
-        self._full_title = title
         self._favorite = False
         self._task_status = None
         self._task_count = 0
+        self._task_counts = ()
         self._progress = None
+        self._title_lines_cache = None
+        self._full_title = title
         self._cover = QtGui.QPixmap()
         self._cover_path = None
         self.setCursor(QtCore.Qt.PointingHandCursor)
-        self.setMinimumSize(160, 174)
+        self.setMinimumSize(160, 196)
         self.setMouseTracking(True)
+        self.favorite_button = QtWidgets.QToolButton(self)
+        self.favorite_button.setText('♡')
+        self.favorite_button.setCheckable(True)
+        self.favorite_button.clicked.connect(lambda: dashboard.toggle_favorite(self))
+        self.menu_button = QtWidgets.QToolButton(self)
+        self.menu_button.setText('⋯')
+        self.menu_button.setToolTip('应用菜单')
+        self.menu_button.setAccessibleName('应用菜单')
+        self.menu_button.clicked.connect(self._open_menu)
+        for button in (self.favorite_button, self.menu_button):
+            button.setFixedSize(28, 28)
+            button.setCursor(QtCore.Qt.PointingHandCursor)
+            button.hide()
+        self._rh_set_fav(False)
+        self.apply_theme()
         dashboard.cards.add(self)
+
+    @property
+    def _full_title(self):
+        return self._title_value
+
+    @_full_title.setter
+    def _full_title(self, value):
+        self._title_value = str(value or '待命名')
+        self._title_lines_cache = None
+        self.setAccessibleName(self._title_value)
+        self._update_description()
+        self.update()
+
+    def _state_text(self):
+        groups = ['%s %d' % (label, count) for label, count in self._task_counts if count]
+        return ' · '.join(groups) if groups else LABELS.get(self._task_status, self._task_status or '准备就绪')
+
+    def _update_description(self):
+        state = self._state_text()
+        detail = progress_text(self._progress) if self._progress else ''
+        self.setAccessibleDescription(state)
+        self.setToolTip('\n'.join(value for value in (self._full_title, state, detail) if value))
 
     def _rh_set_fav(self, on):
         self._favorite = bool(on)
+        self.favorite_button.setChecked(self._favorite)
+        self.favorite_button.setText('♥' if on else '♡')
+        self.favorite_button.setToolTip('取消收藏' if on else '收藏应用')
+        self.favorite_button.setAccessibleName(self.favorite_button.toolTip())
         self.update()
+
+    def apply_theme(self):
+        p = palette(getattr(self.dashboard.owner, '_theme_mode', 'dark'))
+        css = f'''QToolButton {{ background: {p['surface']}; color: {p['muted']};
+            border: 1px solid {p['border']}; border-radius: 8px; padding: 0; font-size: 19px; }}
+            QToolButton:hover, QToolButton:focus {{ color: {p['accent']}; border-color: {p['accent']}; }}
+            QToolButton:pressed {{ background: {p['accent_soft']}; }}
+            QToolButton:checked {{ color: {p['danger']}; }}'''
+        self.favorite_button.setStyleSheet(css)
+        self.menu_button.setStyleSheet(css)
+        self.update()
+
+    def _open_menu(self):
+        self.customContextMenuRequested.emit(self.menu_button.geometry().bottomLeft())
+
+    def _place_actions(self):
+        visible = bool(getattr(self, '_wid', None))
+        self.favorite_button.move(14, 14)
+        self.menu_button.move(self.width() - 42, 14)
+        for button in (self.favorite_button, self.menu_button):
+            button.setVisible(visible)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_actions()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._place_actions()
+
+    def _title_lines(self, width, font):
+        key = (self._full_title, width, font.toString())
+        if self._title_lines_cache is None or self._title_lines_cache[0] != key:
+            title = re.sub(r'\s+', ' ', self._full_title).strip()
+            layout = QtGui.QTextLayout(title, font)
+            option = QtGui.QTextOption()
+            option.setWrapMode(QtGui.QTextOption.WrapAtWordBoundaryOrAnywhere)
+            layout.setTextOption(option)
+            layout.beginLayout()
+            first = layout.createLine()
+            if first.isValid():
+                first.setLineWidth(width)
+                end = first.textLength()
+            else:
+                end = 0
+            layout.endLayout()
+            # QTextLayout indexes UTF-16; do not split Python strings using its offsets.
+            encoded = title.encode('utf-16-le')
+            lines = [encoded[:end * 2].decode('utf-16-le')]
+            rest = encoded[end * 2:].decode('utf-16-le').strip()
+            if rest:
+                lines.append(QtGui.QFontMetrics(font).elidedText(rest, QtCore.Qt.ElideRight, width))
+            self._title_lines_cache = key, lines
+        return self._title_lines_cache[1]
 
     def setIcon(self, icon):
         super().setIcon(icon)
@@ -64,11 +171,12 @@ class AppCard(QtWidgets.QPushButton):
             self._cover = icon.pixmap(400, 260)
         self.update()
 
-    def set_task_state(self, status, count, progress=None):
-        state = (status, count, progress)
-        if state != (self._task_status, self._task_count, self._progress):
-            self._task_status, self._task_count, self._progress = state
-            self.setAccessibleDescription(LABELS.get(status, status or '准备就绪') + f' · {count} 项活动任务')
+    def set_task_state(self, status, count, progress=None, counts=()):
+        state = (status, count, progress, counts)
+        if state != (self._task_status, self._task_count, self._progress, self._task_counts):
+            self._task_status, self._task_count, self._progress = state[:3]
+            self._task_counts = counts
+            self._update_description()
             self.update()
 
     def paintEvent(self, event):
@@ -85,8 +193,7 @@ class AppCard(QtWidgets.QPushButton):
         painter.setPen(QtGui.QPen(QtGui.QColor(border), 1.5))
         painter.setBrush(QtGui.QColor(p['hover'] if self.isDown() or self.underMouse() else p['surface']))
         painter.drawRoundedRect(rect, 12, 12)
-        is_add = not getattr(self, '_wid', None)
-        cover = rect.adjusted(8, 8, -8, -62)
+        cover = rect.adjusted(8, 8, -8, -84)
         clip = QtGui.QPainterPath()
         clip.addRoundedRect(cover, 8, 8)
         painter.save()
@@ -108,34 +215,35 @@ class AppCard(QtWidgets.QPushButton):
             painter.drawPixmap(cover, self._cover, source)
         else:
             painter.setPen(QtGui.QColor(p['accent']))
-            font = QtGui.QFont('Microsoft YaHei', 28)
+            font = QtGui.QFont(self.font())
+            font.setPixelSize(28)
+            font.setBold(True)
             painter.setFont(font)
-            mark = {'rh_standard': 'S', 'rh_llm': 'LLM'}.get(getattr(self, '_rh_backend', 'rh_app'), 'A')
-            painter.drawText(cover, QtCore.Qt.AlignCenter, '+' if is_add else mark)
+            words = re.findall(r'[^\W_]+', self._full_title, re.UNICODE)
+            mark = (words[0][:2] if words else 'RH').upper()
+            painter.drawText(cover.adjusted(0, 14, 0, -12), QtCore.Qt.AlignCenter, mark)
+            font.setPixelSize(11)
+            font.setBold(False)
+            painter.setFont(font)
+            painter.setPen(QtGui.QColor(p['muted']))
+            kind = {'rh_standard': '标准模型', 'rh_llm': 'LLM'}.get(getattr(self, '_rh_backend', 'rh_app'), '应用')
+            painter.drawText(cover.adjusted(0, cover.height() / 2 + 24, 0, 0), QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop, kind)
         painter.restore()
         font = QtGui.QFont('Microsoft YaHei')
         font.setPixelSize(13)
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QtGui.QColor(p['text']))
-        title = getattr(self, '_add_title', '添加应用') if is_add else str(self._full_title or self.text()).replace('\n', ' ')
-        painter.drawText(QtCore.QRectF(14, self.height() - 54, self.width() - 28, 22),
-                         QtCore.Qt.AlignVCenter, painter.fontMetrics().elidedText(title, QtCore.Qt.ElideRight, self.width() - 28))
+        for index, text in enumerate(self._title_lines(self.width() - 28, font)):
+            painter.drawText(QtCore.QRectF(14, self.height() - 76 + index * 20, self.width() - 28, 20),
+                             QtCore.Qt.AlignVCenter, text)
         font.setPixelSize(11)
         font.setBold(False)
         painter.setFont(font)
         painter.setPen(QtGui.QColor(accent if self._task_status else p['muted']))
-        state = LABELS.get(self._task_status, self._task_status or '准备就绪')
-        if active:
-            state += ' · %d 项' % self._task_count
-        if self._progress and not self._progress.get('stale') and self._progress.get('percent') is not None:
-            state += ' · 节点 %.0f%%' % self._progress['percent']
-        painter.drawText(QtCore.QRectF(14, self.height() - 29, self.width() - 28, 18),
-                         QtCore.Qt.AlignVCenter, getattr(self, '_add_hint', '导入工作流，开始创作') if is_add else
-                         painter.fontMetrics().elidedText(state, QtCore.Qt.ElideRight, self.width() - 28))
-        if self._favorite:
-            painter.setPen(QtGui.QColor('#f079a1'))
-            painter.drawText(QtCore.QRectF(14, 12, 24, 24), QtCore.Qt.AlignCenter, '♥')
+        state_width = self.width() - (53 if active else 28)
+        painter.drawText(QtCore.QRectF(14, self.height() - 28, state_width, 18), QtCore.Qt.AlignVCenter,
+                         painter.fontMetrics().elidedText(self._state_text(), QtCore.Qt.ElideRight, state_width))
         if active and self._task_status in ('RUNNING', 'DOWNLOADING'):
             phase = self.dashboard.phase
             alpha = int(100 + 100 * (0.5 + 0.5 * math.sin(phase * 2 * math.pi)))
@@ -144,7 +252,7 @@ class AppCard(QtWidgets.QPushButton):
             painter.setPen(QtGui.QPen(color, 2.5))
             painter.setBrush(QtCore.Qt.NoBrush)
             painter.drawRoundedRect(rect, 12, 12)
-            ring = QtCore.QRectF(self.width() - 35, 16, 17, 17)
+            ring = QtCore.QRectF(self.width() - 31, self.height() - 27, 15, 15)
             painter.drawArc(ring, int(-phase * 360 * 16), 100 * 16)
 
     def _paint_add(self, painter, rect, p):
@@ -237,7 +345,6 @@ class TaskDelegate(QtWidgets.QStyledItemDelegate):
         row = index.data(QtCore.Qt.UserRole)
         if row is None:
             return
-        # The owner is shared by the embedded list and the detached dialog.
         p = palette(getattr(self.parent()._dashboard.owner, '_theme_mode', 'dark'))
         painter.save()
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
@@ -270,7 +377,7 @@ class TaskDelegate(QtWidgets.QStyledItemDelegate):
 
 
 class TaskPanel(QtWidgets.QWidget):
-    def __init__(self, dashboard, detached=False):
+    def __init__(self, dashboard):
         super().__init__()
         self.dashboard = dashboard
         self.setObjectName('rhQueuePanel')
@@ -281,10 +388,6 @@ class TaskPanel(QtWidgets.QWidget):
         title = QtWidgets.QLabel('任务队列')
         title.setObjectName('rhSectionTitle')
         header.addWidget(title, 1)
-        if not detached:
-            expand = QtWidgets.QPushButton('独立窗口')
-            expand.clicked.connect(dashboard.open_queue)
-            header.addWidget(expand)
         layout.addLayout(header)
         self.summary = QtWidgets.QLabel()
         self.summary.setObjectName('rhMuted')
@@ -410,12 +513,7 @@ class Dashboard(QtCore.QObject):
     def watch_grid(self, scroll, reflow):
         self._grid_viewport = scroll.viewport()
         self._grid_viewport.installEventFilter(self)
-        def fit():
-            panel = self.owner._rh_task_panel
-            vertical = panel.parentWidget().layout().direction() == QtWidgets.QBoxLayout.TopToBottom
-            panel.setMaximumWidth(16777215 if vertical else 380)
-            reflow()
-        self.reflow_timer.timeout.connect(fit)
+        self.reflow_timer.timeout.connect(reflow)
         scroll.verticalScrollBar().valueChanged.connect(lambda _: self.refresh())
         self.reflow_timer.start(0)
 
@@ -453,7 +551,10 @@ class Dashboard(QtCore.QObject):
         header.addWidget(toggle)
         queue = QtWidgets.QPushButton('任务队列')
         queue.setObjectName('rhPrimaryButton')
+        queue.setCursor(QtCore.Qt.PointingHandCursor)
+        queue.setToolTip('打开任务队列，查看运行进度与等候任务')
         queue.clicked.connect(self.open_queue)
+        self.queue_button = queue
         header.addWidget(queue)
         layout.insertWidget(0, hero)
         layout.insertWidget(1, connection)
@@ -479,6 +580,18 @@ class Dashboard(QtCore.QObject):
         button._thumb_path = path
         button._cover_path = None
         button.setIcon(QtGui.QIcon(path))
+
+    def toggle_favorite(self, card):
+        wid = str(getattr(card, '_wid', '') or '')
+        if not wid:
+            return
+        favorites = self.owner.rh_favorites = set(getattr(self.owner, 'rh_favorites', ()) or ())
+        if wid in favorites:
+            favorites.discard(wid)
+        else:
+            favorites.add(wid)
+        card._rh_set_fav(wid in favorites)
+        self.owner._save_settings()
 
     def refresh(self):
         if getattr(self.owner, '_closing', False):
@@ -547,11 +660,14 @@ class Dashboard(QtCore.QObject):
                              note=str(notes.get(tid) or ''), progress=progress))
         rows.sort(key=lambda row: row['status'] not in ACTIVE_UI)
         positions = [(panel, (panel.view.currentIndex().data(QtCore.Qt.UserRole) or {}).get('key'),
-                      panel.view.verticalScrollBar().value()) for panel in self.panels]
+                      panel.view.verticalScrollBar().value()) for panel in self.panels
+                     if not sip.isdeleted(panel) and panel.isVisible()]
         self.model.replace(rows)
+        active_count = sum(row['status'] in ACTIVE_UI for row in rows)
         if hasattr(self, 'subtitle'):
-            active_count = sum(row['status'] in ACTIVE_UI for row in rows)
             self.subtitle.setText(f'{len(buttons)} 个应用 · {active_count} 项任务进行中')
+        if hasattr(self, 'queue_button'):
+            self.queue_button.setText(f'任务队列 · {active_count}' if active_count else '任务队列')
         for panel, key, scroll in positions:
             panel.refresh_summary()
             if key is not None:
@@ -576,7 +692,7 @@ class Dashboard(QtCore.QObject):
             # A single task's node percent must not masquerade as an app-wide
             # percentage when several tasks run concurrently.
             progress = running_progress.get(str(wid)) if len(active) == 1 else None
-            button.set_task_state(state, len(active), progress)
+            button.set_task_state(state, len(active), progress, task_counts(active))
         if self.visible_active_cards() and not self.animation.isActive():
             self.animation.start()
         elif not self.visible_active_cards():
@@ -588,23 +704,58 @@ class Dashboard(QtCore.QObject):
         css += f'QWidget#rhQueuePanel {{ background: {p["input"]}; border: 1px solid {p["border"]}; border-radius: 12px; }}'
         self.owner.runninghub_page.setObjectName('rhDashboard')
         self.owner.runninghub_page.setStyleSheet(css)
-        if self.dialog is not None:
-            self.dialog.setStyleSheet(css.replace('#rhDashboard', '#rhQueueWindow'))
+        if self.dialog is not None and not sip.isdeleted(self.dialog):
+            self.dialog.setStyleSheet(self.queue_stylesheet())
         for card in self.cards:
             if not sip.isdeleted(card):
-                card.update()
+                card.apply_theme()
+
+    def queue_stylesheet(self):
+        mode = getattr(self.owner, '_theme_mode', 'dark')
+        p = palette(mode)
+        return app_stylesheet(mode).replace('#rhAppPage', '#rhQueueWindow') + f'''
+            QDialog#rhQueueWindow {{ background: {p['canvas']}; }}
+            QWidget#rhQueuePanel {{ background: {p['canvas']}; border: none; }}
+            QDialog#rhQueueWindow QPushButton#rhQueueCancelAll {{ color: {p['danger']}; }}
+        '''
 
     def open_queue(self):
-        if self.dialog is None:
+        if self.dialog is None or sip.isdeleted(self.dialog):
             self.dialog = QtWidgets.QDialog(self.owner)
             self.dialog.setObjectName('rhQueueWindow')
-            self.dialog.setWindowTitle('任务队列 · AetherLoom')
+            self.dialog.setWindowTitle('RH 任务队列')
+            self.dialog.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
+            self.dialog.setModal(False)
+            self.dialog.setMinimumSize(360, 360)
+            self.dialog._theme_source = self.queue_stylesheet
             layout = QtWidgets.QVBoxLayout(self.dialog)
-            layout.addWidget(TaskPanel(self, detached=True))
+            layout.setContentsMargins(8, 8, 8, 16)
+            layout.setSpacing(12)
+            panel = TaskPanel(self)
+            self.dialog.panel = panel
+            layout.addWidget(panel, 1)
+            actions = QtWidgets.QHBoxLayout()
+            actions.setContentsMargins(12, 0, 12, 0)
+            cancel_all = self.cancel_all_button
+            cancel_all.setObjectName('rhQueueCancelAll')
+            cancel_all.setAutoDefault(False)
+            cancel_all.setDefault(False)
+            cancel_all.setToolTip('取消所有应用任务，以及画布的运行、等候任务和后续批次')
+            actions.addWidget(cancel_all)
+            cancel_all.show()
+            actions.addStretch(1)
+            close = QtWidgets.QPushButton('关闭')
+            close.setAutoDefault(False)
+            close.setCursor(QtCore.Qt.PointingHandCursor)
+            close.clicked.connect(self.dialog.reject)
+            actions.addWidget(close)
+            layout.addLayout(actions)
             screen = self.owner.screen().availableGeometry()
-            self.dialog.resize(min(520, screen.width() - 40), min(700, screen.height() - 60))
-            self.apply_theme()
-        self.refresh()
+            self.dialog.resize(min(520, screen.width() - 40), min(580, screen.height() - 60))
+            self.dialog.setStyleSheet(self.queue_stylesheet())
+        if self.dialog.isMinimized():
+            self.dialog.showNormal()
         self.dialog.show()
+        self.refresh()
         self.dialog.raise_()
         self.dialog.activateWindow()

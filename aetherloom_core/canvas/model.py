@@ -8,7 +8,6 @@ import os
 import re
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit
 from . import collections, utility_nodes
 
 
@@ -53,6 +52,13 @@ TITLES.update({kind: schema[0] for kind, schema in utility_nodes.SCHEMAS.items()
 RUNTIME_FIELDS = frozenset({'results', 'result_signatures', 'fingerprint', 'status', 'progress', 'node_progress',
                             'message', 'error', 'generation', 'cached', 'stale', 'activated', 'bypassed', 'selection_token', 'selection_round',
                             '_restored_missing_results', '_restored_positions_ambiguous'})
+RUNTIME_FIELDS |= {'_ui_unknown_inputs', '_ui_unknown_outputs'}
+RUNTIME_FIELDS |= {'_input_issue', '_input_missing_ports', '_ui_stale'}
+RUNTIME_FIELDS |= {'_runtime_input_issue', '_runtime_missing_ports'}
+
+
+def unknown_node(node):
+    return isinstance(node, dict) and isinstance(node.get('kind'), str) and node['kind'] not in KINDS
 
 
 def normalize_batch_count(value=1):
@@ -71,25 +77,12 @@ def app_reference(app):
         if not re.fullmatch(r'(?:standard|llm)_[a-f0-9]{32}', wid):raise ValueError('模型应用标识无效')
         return dict(webapp_id=wid, url='', base_url=official_site(app.get('base_url') or 'https://www.runninghub.cn'),
                     name=str(app.get('name') or app.get('title') or wid))
-    raw = str(app.get('url') or '').strip()
-    if not raw:
-        if app.get('url_error'):
-            raise ValueError(error)
-        raw = str(app.get('base_url') or 'https://www.runninghub.cn').rstrip('/') + '/webapp/' + wid
-    try:
-        parsed = urlsplit(raw if '://' in raw else 'https://' + raw)
-        host = (parsed.hostname or '').lower()
-        match = re.fullmatch(r'/(?:webapp|ai-detail)/(\d+)/?', parsed.path)
-        if (parsed.scheme != 'https' or parsed.username or parsed.password or parsed.port not in (None, 443)
-                or host not in ('runninghub.cn', 'www.runninghub.cn', 'runninghub.ai', 'www.runninghub.ai')
-                or not match or (wid and wid != match.group(1))):
-            raise ValueError(error)
-    except (ValueError, TypeError):
-        raise ValueError(error) from None
-    wid = match.group(1)
-    base = 'https://' + (host if host.startswith('www.') else 'www.' + host)
-    return {'webapp_id': wid, 'url': base + '/webapp/' + wid, 'base_url': base,
-            'name': str(app.get('name') or app.get('title') or wid)}
+    if not str(app.get('url') or '').strip() and app.get('url_error'):
+        raise ValueError(error)
+    from aetherloom_core.rh_app_reference import application_reference
+    reference = application_reference(app)
+    reference['name'] = reference['name'] or reference['webapp_id']
+    return reference
 
 
 def supports_local_decode(node):
@@ -287,6 +280,14 @@ def sync_dynamic_inputs(document):
     Replace changed node dictionaries instead of mutating them: connection
     previews validate shallow graph copies which share the editor's nodes.
     """
+    unknown = {n.get('id'): {'inputs': [], 'outputs': []} for n in document['nodes'] if unknown_node(n)}
+    for edge in document['edges']:
+        if not isinstance(edge, dict):continue
+        for identity, direction, key in ((edge.get('target'), 'inputs', edge.get('input')),
+                                         (edge.get('source'), 'outputs', edge.get('output', 'output'))):
+            if identity in unknown:
+                if not isinstance(key, str) or not key:raise ValueError('未知节点的连线端口标识无效')
+                if key not in unknown[identity][direction]:unknown[identity][direction].append(key)
     connected = {n['id']: set() for n in document['nodes']
                  if isinstance(n, dict) and n.get('kind') in DYNAMIC_INPUT_KINDS and n.get('id')}
     for edge in document['edges']:
@@ -298,6 +299,9 @@ def sync_dynamic_inputs(document):
         connected[edge['target']].add(key)
     nodes = []
     for node in document['nodes']:
+        if unknown_node(node):
+            ports = unknown[node.get('id')]
+            node = dict(node, _ui_unknown_inputs=ports['inputs'], _ui_unknown_outputs=ports['outputs'])
         if isinstance(node, dict) and node.get('id') in connected:
             keys = sorted(connected[node['id']], key=lambda key: int(key[6:]))
             spare = 'input_' + str(int(keys[-1][6:]) + 1 if keys else 1)
@@ -331,6 +335,13 @@ def app_input_labels(node):
 
 
 def input_ports(node):
+    from .input_requirements import decorate
+    return decorate(node, _input_ports(node))
+
+
+def _input_ports(node):
+    if unknown_node(node):
+        return [dict(key=key,label=key,type='any') for key in node.get('_ui_unknown_inputs', [])]
     if node.get('kind') in utility_nodes.KINDS:return utility_nodes.inputs(node)
     if node.get('kind') in ('batch_select', 'rebatch'):
         return [{'key': 'value', 'label': '内容',
@@ -362,11 +373,13 @@ def input_ports(node):
 
 RESULT_TYPES = {'image': '图像', 'video': '视频', 'audio': '音频', 'text': '文本', 'file': '其他内容'}
 RESULT_TYPES['mask'] = '遮罩'
+RESULT_TYPES['bounding'] = 'Bounding'
 ITEM_OUTPUT_TYPES = dict(RESULT_TYPES, int='INT', float='FLOAT', boolean='布尔', enum='枚举', archive='压缩文件', number='数值（旧版）', scalar='其他值（旧版）', batch='Batch')
 PORT_TYPE_NAMES = {'image': '图像', 'video': '视频', 'audio': '音频', 'text': '文本',
                    'any': '任意', 'archive': '压缩文件', 'int': 'INT', 'float': 'FLOAT',
                    'number': '数值', 'boolean': '布尔', 'enum': '枚举'}
 PORT_TYPE_NAMES['mask'] = '遮罩'
+PORT_TYPE_NAMES['bounding'] = 'Bounding'
 
 
 def port_type_name(kind):
@@ -433,9 +446,13 @@ def result_groups(results):
 
 
 def output_ports(node, legacy=False):
+    if unknown_node(node):
+        return [dict(key=key,type='any',label='任意') for key in node.get('_ui_unknown_outputs', [])]
     if node.get('kind') in ('note','subgraph'):return []
-    if node.get('kind') == 'image':
+    if node.get('kind') in ('image', 'image_split_alpha'):
         return [dict(key='output',type='image',label='图像'),dict(key='mask',type='mask',label='遮罩')]
+    if node.get('kind') == 'image_crop_mask':
+        return [dict(key=kind,type=kind,label=port_type_name(kind)) for kind in ('image','bounding','mask')]
     if node.get('kind') == 'branch':
         return [dict(key=key,type='any',label='任意') for key in ('true','false')]
     if node.get('kind') == 'video_frames':
@@ -536,6 +553,7 @@ def port_colors(document):
 
 def output_types(node):
     kind = node.get('kind')
+    if kind == 'image_crop_mask':return {'image','bounding','mask'}
     if kind in ('note','subgraph'):return set()
     if kind in utility_nodes.KINDS:return {utility_nodes.output_type(node)}
     if kind == 'app':
@@ -645,7 +663,8 @@ def validate_document(document):
 
 
 def validate_node(node):
-    if (not isinstance(node, dict) or node.get('kind') not in KINDS
+    if (not isinstance(node, dict) or not isinstance(node.get('kind'), str) or not node['kind'].strip()
+            or len(node['kind']) > 256
             or not isinstance(node.get('id'), str) or not node['id']):
         raise ValueError('画布包含无效节点')
     if not isinstance(node.get('params', {}), dict) or not isinstance(node.get('decode_settings', {}), dict):
@@ -768,6 +787,43 @@ def ancestors(document, target):
     return found
 
 
+def output_targets(document):
+    outputs = {'app', 'preview', 'mask_preview', 'image_compare', 'manual_select'} | set(MODEL_KINDS)
+    return [node['id'] for node in document['nodes'] if node['kind'] in outputs and not node.get('bypass')]
+
+
+def execution_scope(document, target=None):
+    """Output-driven full runs; explicit runs may target any executable node."""
+    if target is None:
+        target = output_targets(document)
+        if not target:
+            raise ValueError('没有可运行的输出节点。请连接预览 / 保存节点，或单独运行所需节点。')
+    scope = ancestors(document, target) - {node['id'] for node in document['nodes'] if node['kind'] in ('note', 'subgraph')}
+    if not scope:raise ValueError('所选范围没有可执行节点')
+    return scope
+
+
+def changed_execution_nodes(document, previous):
+    """Configuration/connection changes invalidate only their downstream branch."""
+    keys = ('kind', 'params', 'app', 'decode_settings', 'model_config', 'bypass', 'input_keys')
+    old = {node['id']: node for node in previous.get('nodes', [])}
+    old_inputs, inputs, outgoing = {}, {}, {}
+    for source, index in ((previous, old_inputs), (document, inputs)):
+        for edge in execution_edges(source):
+            index.setdefault(edge['target'], {})[edge['input']] = {
+                key: value for key, value in edge.items() if key != 'id'}
+    for edge in execution_edges(document):outgoing.setdefault(edge['source'], []).append(edge['target'])
+    pending = [node['id'] for node in document['nodes']
+               if node['id'] not in old or any(node.get(key) != old[node['id']].get(key) for key in keys)
+               or inputs.get(node['id'], {}) != old_inputs.get(node['id'], {})]
+    changed = set()
+    while pending:
+        node_id = pending.pop()
+        if node_id in changed:continue
+        changed.add(node_id);pending.extend(outgoing.get(node_id, []))
+    return changed
+
+
 def validate_indices(indices):
     if not isinstance(indices, list) or any(isinstance(i, bool) or not isinstance(i, int)
                                           or i < 1 for i in indices):
@@ -791,7 +847,7 @@ def result_type(result):
             except InvalidOperation:pass
         if kind == 'scalar' and isinstance(value, str):return 'enum'
     if kind == 'file' and is_archive_result(result):return 'archive'
-    if kind in MEDIA | VALUE_TYPES | {'text', 'file', 'batch', 'archive', 'mask'}:
+    if kind in MEDIA | VALUE_TYPES | {'text', 'file', 'batch', 'archive', 'mask', 'bounding'}:
         return kind
     if 'text' in result:
         return 'text'
@@ -810,7 +866,7 @@ def is_archive_result(result):
     """Recognize archives without treating every opaque downloaded file as one."""
     kind = str(result.get('_content_type') or result.get('type') or result.get('kind') or result.get('fileType') or '').lower()
     if result.get('_content_type'):return kind == 'archive'
-    if kind.split('/', 1)[0] in MEDIA | VALUE_TYPES | {'text', 'batch', 'mask'}:return False
+    if kind.split('/', 1)[0] in MEDIA | VALUE_TYPES | {'text', 'batch', 'mask', 'bounding'}:return False
     path = result.get('path') or result.get('file_path') or result.get('url') or ''
     suffix = Path(str(path).split('?', 1)[0]).suffix.lower()
     return kind in {'archive', 'zip', 'application/zip', 'application/x-7z-compressed',
@@ -869,6 +925,7 @@ def unpack_batches(results, node_id):
             value.update(index=len(output), lineage=origins)
             value.pop('_restored_positions', None)
             output.append(value)
+    assign_collection_lineages(output, node_id)
     return output
 
 
@@ -880,7 +937,7 @@ def available_results(results, signatures=None):
     """
     available, kept_signatures = [], [] if isinstance(signatures, list) and len(signatures) == len(results) else None
     missing, readable, positions = False, {}, []
-    accepted_types = ('any', 'image', 'image_input', 'video_input', 'audio_input', 'text_input', 'batch', 'video', 'audio', 'text', 'file', 'number', 'scalar', 'int', 'float', 'boolean', 'enum', 'archive', 'mask')
+    accepted_types = ('any', 'image', 'image_input', 'video_input', 'audio_input', 'text_input', 'batch', 'video', 'audio', 'text', 'file', 'number', 'scalar', 'int', 'float', 'boolean', 'enum', 'archive', 'mask', 'bounding')
     counters = dict.fromkeys(accepted_types, 0)
     for index, value in enumerate(results):
         try:
@@ -948,13 +1005,21 @@ def snapshot_result_references(document):
     return result
 
 
+class NoMatchingInput(ValueError):
+    """A valid connection/filter supplied no usable items for this branch."""
+
+
 def select_results(results, edge=None, accepted='any', *, strict=False):
     edge = edge or {}
     output = edge.get('output', 'output')
     if output == 'mask':
+        def mask_origin(result):
+            return bounding_group(result) or tuple(sorted(lineage(result).items()))
+        explicit_masks = {mask_origin(r) for r in results if result_type(r) == 'mask' and lineage(r)}
         results = [dict(type='mask',path=r['mask_path'],lineage=copy.deepcopy(r.get('lineage',{})),
                         index=r.get('index',i),_file_identity=r['mask_path'])
-                   if result_type(r)=='image' and r.get('mask_path') else r
+                   if result_type(r)=='image' and r.get('mask_path')
+                   and mask_origin(r) not in explicit_masks else r
                    for i,r in enumerate(results)]
     if output != 'output' and output not in ITEM_OUTPUT_TYPES and output not in ('true','false'):
         raise ValueError('无效的输出列表类型')
@@ -965,7 +1030,7 @@ def select_results(results, edge=None, accepted='any', *, strict=False):
     if not matches:
         if accepted not in ('any', 'batch', 'image_input', 'video_input', 'audio_input', 'text_input') and any(result_type(r) == 'batch' for r in results):
             raise ValueError('此输入不接收 Batch；请先连接“Batch 转 List”，再逐项运行。')
-        raise ValueError('上游没有符合输入类型的结果')
+        raise NoMatchingInput('上游没有符合输入类型的结果')
     mode = edge.get('mode', 'all')
     if mode == 'all':
         return matches
@@ -1029,6 +1094,7 @@ def select_list_items(node, inputs):
                     value.pop('_restored_positions', None)
                     output.append(value)
     if not output:raise ValueError('没有可选的列表项，请检查输入连接和内容类型')
+    assign_collection_lineages(output, node['id'])
     return output
 
 
@@ -1075,6 +1141,43 @@ def pair_inputs(inputs):
 def lineage(result):
     value = result.get('lineage', {})
     return {key: item for key, item in value.items() if isinstance(key, str) and isinstance(item, str)} if isinstance(value, dict) else {}
+
+
+def bounding_group(result):
+    """Stable crop origins remain present through ordinary result transforms."""
+    return tuple(sorted((key, value) for key, value in lineage(result).items()
+                        if key.startswith('__bounding_group__:')))
+
+
+def collection_lineages(results, node_id):
+    """Give a crop's distinct typed companions the same collection origin.
+
+    Repeated items of one type stay separate and keep the existing ambiguous
+    pairing errors. Results without the explicit crop marker are unchanged.
+    """
+    origins = [dict(lineage(value), **{node_id: str(index)}) for index, value in enumerate(results)]
+    groups = {}
+    for index, value in enumerate(results):
+        marker = bounding_group(value)
+        if marker and result_type(value) in ('image', 'bounding', 'mask'):
+            groups.setdefault(marker, []).append(index)
+    for indices in groups.values():
+        if len({result_type(results[index]) for index in indices}) != len(indices):continue
+        for index in indices:origins[index][node_id] = str(indices[0])
+    return origins
+
+
+def assign_collection_lineages(results, node_id):
+    """Assign collection axes, retaining marked companion axes inside a Batch."""
+    members = [member for value in results for member in
+               (batch_items(value) if result_type(value) == 'batch' else [value])]
+    # Member origins override type-specific outer Batch origins when unpacked.
+    # Include ordinary items in this pass so mixed List/Batch streams align too.
+    for member, origins in zip(members, collection_lineages(members, node_id)):
+        if bounding_group(member):member['lineage'] = origins
+    for index, value in enumerate(results):
+        if result_type(value) != 'batch' and bounding_group(value):continue
+        value['lineage'] = dict(lineage(value), **{node_id: str(index)})
 
 
 def result_lineage(batch, node_id, index):
@@ -1284,6 +1387,8 @@ def fingerprint(node, inputs, edges=()):
                'edges': [{key: edge.get(key) for key in ('source', 'input', 'mode', 'indices') + (('output',) if edge.get('output') not in (None, 'output') else ())}
                          for edge in edges]}
     if node['kind'] == 'rename':payload['intermediate_copy_version'] = 1
+    if node['kind'] in ('image', 'image_resize', 'image_crop', 'image_pad'):
+        payload['mask_semantics_version'] = 2
     if any(r.get('path') for values in inputs.values() for r in values):
         # Pass-through nodes must not return an old path just because a renamed
         # or replaced file has identical bytes. Consumers receive the new file.

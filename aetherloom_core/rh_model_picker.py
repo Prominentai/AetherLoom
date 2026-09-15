@@ -106,6 +106,10 @@ class ModelPicker(QtWidgets.QDialog):
         self.settings, self.resource_type, self.current_value = settings, resource_type, str(current_value)
         self.generation, self.busy, self.page, self.start_page = 0, False, 0, 1
         self.has_next, self.total, self.loaded_filter, self.pending_search = False, 0, None, False
+        self.pending_page, self._needs_refresh = 1, False
+        self.connection_timer = QtCore.QTimer(self)
+        self.connection_timer.setSingleShot(True);self.connection_timer.setInterval(150)
+        self.connection_timer.timeout.connect(self.refresh)
         self.total_pages = 0
         self.cards, self.known_bases, self.known_tags = [], set(), {}
         self.selected_card = None
@@ -121,9 +125,12 @@ class ModelPicker(QtWidgets.QDialog):
         self.site = QtWidgets.QLabel();self.site.setObjectName('rhModelMuted');self.site.setWordWrap(True)
         connection = QtWidgets.QPushButton('连接设置');connection.setObjectName('rhModelSecondary')
         connection.clicked.connect(lambda: open_connection_settings(settings.owner))
+        self.refresh_button = QtWidgets.QPushButton('刷新');self.refresh_button.setObjectName('rhModelSecondary')
+        self.refresh_button.setToolTip('使用最新连接设置重新读取当前页，保留搜索和筛选条件')
+        self.refresh_button.clicked.connect(self.refresh)
         titles = QtWidgets.QVBoxLayout();titles.setSpacing(4)
         titles.addWidget(title);titles.addWidget(self.site)
-        header.addLayout(titles, 1);header.addWidget(connection);box.addWidget(design.header(header))
+        header.addLayout(titles, 1);header.addWidget(self.refresh_button);header.addWidget(connection);box.addWidget(design.header(header))
         self.current_label = QtWidgets.QLabel('当前模型：' + self.current_value)
         self.current_label.setTextFormat(QtCore.Qt.PlainText);self.current_label.setObjectName('rhModelMuted')
         self.current_label.setWordWrap(True);self.current_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
@@ -304,7 +311,15 @@ class ModelPicker(QtWidgets.QDialog):
 
     def _settings_changed(self):
         self._connection_changed()
-        if self.sources.currentIndex() != 0:self.request(1)
+        self._needs_refresh = True
+        if self.isVisible():self.connection_timer.start()
+
+    def refresh(self):
+        self.connection_timer.stop();self._needs_refresh = False
+        page = max(1, self.page) if self.loaded_filter == self._filter() else 1
+        self.generation += 1  # A manual retry also supersedes an in-flight query.
+        self.base_models.refresh(self.settings.host, force=True)
+        self.request(page)
 
     def _favorites_changed(self):
         if self.sources.currentIndex() == 1:
@@ -400,6 +415,7 @@ class ModelPicker(QtWidgets.QDialog):
         self._filters_changed();self.request(1)
 
     def _buttons(self):
+        self.refresh_button.setText('刷新中…' if self._is_busy() else '刷新')
         loaded = self.loaded_filter is not None
         ready = not self._is_busy() and loaded and self.loaded_filter == self._filter()
         self.previous.setEnabled(ready and self.page > 1)
@@ -430,9 +446,14 @@ class ModelPicker(QtWidgets.QDialog):
             except Exception as error:self.status.setText('读取收藏失败：'+str(error));self._buttons()
             return
         if self.busy:
-            if not append:self.pending_search = True
+            if not append:
+                self.pending_search = True;self.pending_page = max(1, page)
+                self.status.setText('已安排刷新，正在等待当前查询结束…')
             return
         connection = self.settings.snapshot()
+        # snapshot() may synchronously commit an unfocused API Key editor and
+        # emit changed. This request already uses that new connection.
+        self.connection_timer.stop();self._needs_refresh = False
         key, host = connection['api_key'], connection['base_url']
         if not key:
             self.status.setText('请先在连接设置中添加当前站点的 API Key。');return
@@ -469,7 +490,7 @@ class ModelPicker(QtWidgets.QDialog):
             except Exception as exc:
                 code = str(getattr(exc, 'code', ''))
                 detail = '（错误码 '+code+'）' if re.fullmatch(r'\d{1,6}', code) else ''
-                error = '查询失败'+detail+'，可点击搜索重新查询。'
+                error = '查询失败'+detail+'，可点击刷新重新查询。'
             finally:_queries.release()
             try:self.finished_query.emit(generation, result, error)
             except RuntimeError:pass
@@ -480,7 +501,7 @@ class ModelPicker(QtWidgets.QDialog):
     def _finished(self, generation, result, error):
         self.busy = False
         if self.pending_search:
-            self.pending_search = False;self.request(1);return
+            self.pending_search = False;self.request(self.pending_page);return
         if generation != self.generation:self._buttons();return
         if error:
             self.content.setEnabled(self.loaded_filter == self._filter())
@@ -568,8 +589,11 @@ class ModelPicker(QtWidgets.QDialog):
 
     def showEvent(self, event):
         super().showEvent(event);self.schedule_visible()
+        if self._needs_refresh:self.connection_timer.start()
 
     def hideEvent(self, event):
+        if self.connection_timer.isActive():
+            self.connection_timer.stop();self._needs_refresh = True
         self.visible_timer.stop()
         self.filter_button.setChecked(False)
         for card in self.cards:card.set_visible_image(False)

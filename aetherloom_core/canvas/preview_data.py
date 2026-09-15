@@ -1,9 +1,59 @@
 """Presentation-only result access; never changes execution references."""
 import os
+from bisect import bisect_right
+from array import array
 from . import model
 
-TYPE_NAMES = {'mask': '遮罩', 'image': '图像', 'video': '视频', 'audio': '音频', 'text': '文本',
+TYPE_NAMES = {'bounding': 'Bounding', 'mask': '遮罩', 'image': '图像', 'video': '视频', 'audio': '音频', 'text': '文本',
               'int': 'INT', 'float': 'FLOAT', 'boolean': '布尔', 'enum': '枚举', 'archive': '压缩文件', 'number': '数值', 'scalar': '数值', 'file': '文件', 'folder': '文件夹', 'batch': 'Batch'}
+
+
+class ResultIndex:
+    """Index the presentation of Batch members once, without copying media data."""
+    def __init__(self, results):
+        self.source = results
+        self.source_length = len(results)
+        self.ends, self.groups = [], []
+        self.total = self.batch_count = 0
+        self._types = None
+        for value in results:
+            value = value_record(value)
+            if kind_of(value) == 'batch':
+                self.batch_count += 1
+                try:members = model.batch_items(value)
+                except ValueError:
+                    members = [dict(type='file', _preview_error='Batch 结果格式无效，请重新运行此节点')]
+                self.groups.append((members, self.batch_count))
+                self.total += len(members)
+            else:
+                self.groups.append((value, 0));self.total += 1
+            self.ends.append(self.total)
+
+    def matches(self, results):
+        return self.source is results and self.source_length == len(results)
+
+    def item(self, index):
+        if not 0 <= index < self.total:raise IndexError(index)
+        group = bisect_right(self.ends, index)
+        value, batch = self.groups[group]
+        if not batch:return value
+        offset = index - (self.ends[group-1] if group else 0)
+        return dict(value[offset], _batch_label=f'Batch {batch} · {offset+1}/{len(value)}')
+
+    def type_indices(self):
+        if self._types is None:
+            self._types = {}
+            index = 0
+            for value, batch in self.groups:
+                for member in value if batch else (value,):
+                    self._types.setdefault(kind_of(member), array('I')).append(index)
+                    index += 1
+        return self._types
+
+
+def can_open(value):
+    path = path_of(value)
+    return bool(path and os.path.exists(path) or any(key in value for key in ('text', 'value')))
 
 
 def value_record(value):

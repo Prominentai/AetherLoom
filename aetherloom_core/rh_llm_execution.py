@@ -24,21 +24,33 @@ def execute_llm(service, run_id, order, snapshot):
     try:
         nodes = copy.deepcopy(snapshot.get('nodes') or [])
         validate_inputs(snapshot, nodes)
-        from .mask_assets import matches, materialize
+        from .mask_assets import matches, materialize, asset_reference
         for node in nodes:
             mask, source = node.get('_mask'), node.get('fieldValue', '')
-            if mask and isinstance(source, str) and matches(mask, source):
+            attached = node.pop('_canvas_masks', {})
+            sources = source if isinstance(source, list) else [source]
+            processed = []
+            for source in sources:
+                selected = attached.get(source) if isinstance(source, str) else None
+                selected = selected or mask
+                if not selected or not isinstance(source, str) or not matches(selected, source):
+                    processed.append(source)
+                    continue
                 check()
                 folder = service.temporary.directory('app-' + run_id)
                 with service._condition:
                     service._input_leases.setdefault(run_id, set()).update(service.temporary.retain([folder]))
                 assets = {}
-                node['fieldValue'], mask_path = materialize(source, mask,
+                path, mask_path = materialize(source, selected,
                     snapshot.get('input_dir') or str(service.temporary.project / 'input'), folder, assets=assets)
+                processed.append(path)
                 for frozen in snapshot['nodes']:
                     if frozen.get('nodeId') == node.get('nodeId') and frozen.get('fieldName') == node.get('fieldName'):
-                        frozen['_mask']['path'] = mask_path
-                        if assets.get('paint_path'):frozen['_mask']['paint_path'] = assets['paint_path']
+                        saved = asset_reference(selected, mask_path)
+                        if assets.get('paint_path'):saved['paint_path'] = assets['paint_path']
+                        if source in frozen.get('_canvas_masks', {}):frozen['_canvas_masks'][source] = saved
+                        else:frozen['_mask'] = saved
+            node['fieldValue'] = processed if isinstance(node.get('fieldValue'), list) else processed[0]
         from .rh_execution import public_snapshot
         service._publish(run_id, snapshot=public_snapshot(snapshot))
         service.documents.patch('applications', run_id, {'request': public_snapshot(snapshot)})

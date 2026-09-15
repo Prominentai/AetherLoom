@@ -139,7 +139,8 @@ def sync(scene):
 
 def paint(item,painter):
  p=item.canvas_scene.colors;body=QtCore.QRectF(0,0,item.width,item.height)
- painter.setBrush(QtGui.QColor(p['surface']));painter.setPen(QtGui.QPen(QtGui.QColor(p['accent'] if item.isSelected() else p['border']),2))
+ issue=getattr(item,'dependency_issue',None)
+ painter.setBrush(QtGui.QColor(p['surface']));painter.setPen(QtGui.QPen(QtGui.QColor(p[issue['severity']] if issue else p['accent'] if item.isSelected() else p['border']),2))
  painter.drawRoundedRect(body,8,8);painter.setPen(QtGui.QColor(p['text']))
  font=QtGui.QFont('Microsoft YaHei UI');font.setPixelSize(14);font.setBold(True);painter.setFont(font)
  painter.drawText(QtCore.QRectF(14,8,item.width-28,24),QtCore.Qt.AlignVCenter,model.node_title(item.node))
@@ -150,4 +151,5 @@ def paint(item,painter):
   rect=QtCore.QRectF(item.width/2 if output else 12,alias.pos().y()-10,item.width/2-24,20)
   painter.drawText(rect,QtCore.Qt.AlignRight|QtCore.Qt.AlignVCenter if output else QtCore.Qt.AlignLeft|QtCore.Qt.AlignVCenter,
                    painter.fontMetrics().elidedText(label,QtCore.Qt.ElideRight,int(rect.width())))
- painter.drawText(QtCore.QRectF(14,item.height-27,item.width-28,20),QtCore.Qt.AlignVCenter,'双击配置 · 右键展开 / 解散')
+ if issue:painter.setPen(QtGui.QColor(p[issue['severity']]))
+ painter.drawText(QtCore.QRectF(14,item.height-27,item.width-28,20),QtCore.Qt.AlignVCenter,issue['label'] if issue else '双击配置 · 右键展开 / 解散')

@@ -1,4 +1,4 @@
-"""Immutable mask settings, binary durable assets and disposable RH transport."""
+"""ComfyUI-style RGBA mask assets, soft MASK values and RH upload images."""
 import base64
 import hashlib
 import io
@@ -16,24 +16,43 @@ def binary(image):
 
 
 def import_mask(path, size, channel='auto'):
+    if Path(path).stat().st_size > MAX_BYTES:raise ValueError('遮罩文件超过 32 MB')
     with Image.open(path) as source:
         if source.width * source.height > MAX_PIXELS:raise ValueError('遮罩超过 3200 万像素')
+        has_alpha = 'A' in source.getbands() or 'transparency' in source.info
         image = ImageOps.exif_transpose(source).convert('RGBA')
         alpha = image.getchannel('A')
-        if channel == 'alpha' or (channel == 'auto' and alpha.getextrema()[0] < 255):
+        if channel == 'alpha' or (channel == 'auto' and has_alpha):
             mask = ImageOps.invert(alpha)
         elif channel in ('red', 'green', 'blue'):
             mask = image.getchannel({'red':'R', 'green':'G', 'blue':'B'}[channel])
         else:mask = image.convert('RGB').convert('L')
-        # Resize on oriented image coordinates. NEAREST preserves binary edges.
-        return binary(mask.resize(size, Image.Resampling.NEAREST) if mask.size != size else mask)
+        return resize_mask(mask, size)
 
 
-def draft(image, source):
+def resize_mask(image, size):
+    if min(size) < 1 or size[0] * size[1] > MAX_PIXELS:raise ValueError('遮罩目标尺寸无效或超过像素限制')
+    mask = image.convert('L')
+    return mask.resize(size, Image.Resampling.BILINEAR) if mask.size != size else mask
+
+
+def image_mask(image):
+    """MASK is inverse alpha; an opaque image has an empty, same-size mask."""
+    return ImageOps.invert(image.convert('RGBA').getchannel('A'))
+
+
+def draft(image, source, *, rgb=None):
+    if rgb is None:
+        with Image.open(source) as original:
+            if original.width * original.height > MAX_PIXELS:raise ValueError('图像超过 3200 万像素')
+            rgb = ImageOps.exif_transpose(original).convert('RGB')
+    asset = rgb.convert('RGBA')
+    asset.putalpha(ImageOps.invert(resize_mask(image, asset.size)))
     stream = io.BytesIO()
-    binary(image).save(stream, format='PNG')
+    asset.save(stream, format='PNG')
     data = stream.getvalue()
-    return {'version': 1, 'source': os.path.abspath(source), 'width': image.width, 'height': image.height,
+    if len(data) > MAX_BYTES:raise ValueError('遮罩图像数据超过 32 MB，请先缩小图像')
+    return {'version': 2, 'encoding': 'rgba-alpha', 'source': os.path.abspath(source), 'width': asset.width, 'height': asset.height,
             'sha256': hashlib.sha256(data).hexdigest(), 'png': base64.b64encode(data).decode('ascii')}
 
 
@@ -46,19 +65,23 @@ def read(config, size=None):
     encoded = config.get('png', '')
     if len(encoded) > MAX_BYTES * 2:raise ValueError('遮罩数据过大')
     data = base64.b64decode(encoded, validate=True) if encoded else None
+    if data is not None and len(data) > MAX_BYTES:raise ValueError('遮罩数据过大')
     if config.get('path'):
         try:
             path=Path(config['path'])
             if path.stat().st_size<=MAX_BYTES:
                 saved=path.read_bytes()
-                if hashlib.sha256(saved).hexdigest()==config.get('sha256'):data=saved
+                if not config.get('sha256') or hashlib.sha256(saved).hexdigest()==config['sha256']:data=saved
+                elif data is None:raise ValueError('遮罩内容校验失败')
+            elif data is None:raise ValueError('遮罩文件超过 32 MB')
         except OSError:pass
     if data is not None and config.get('sha256') and hashlib.sha256(data).hexdigest() != config['sha256']:
         raise ValueError('遮罩内容校验失败')
-    with Image.open(io.BytesIO(data) if data is not None else config['path']) as image:
+    if data is None:raise FileNotFoundError('遮罩文件不存在，且没有可恢复的编辑数据')
+    with Image.open(io.BytesIO(data)) as image:
         if image.width * image.height > MAX_PIXELS:raise ValueError('遮罩超过 3200 万像素')
-        result = binary(image)
-    if size and result.size != size:result = result.resize(size, Image.Resampling.NEAREST)
+        result = image_mask(image) if config.get('encoding') == 'rgba-alpha' else image.convert('L')
+    if size and result.size != size:result = resize_mask(result, size)
     return result
 
 
@@ -121,13 +144,17 @@ def store_asset(image,directory):
 
 
 def materialize(source, config, input_dir, temporary_dir, *, assets=None):
-    """Return transport PNG and its separate, persistent white-selected mask."""
+    """Return RH RGBA upload image and a persistent RGB+inverse-MASK PNG."""
     with Image.open(source) as image:
         if image.width * image.height > MAX_PIXELS:raise ValueError('图像超过 3200 万像素')
         rgb = ImageOps.exif_transpose(image).convert('RGB')
     orientation=int(config.get('orientation',0))
     if not 0<=orientation<=7:raise ValueError('图像方向设置无效')
     if orientation:rgb=rgb.transpose(Image.Transpose(orientation-1))
+    mask = read(config, rgb.size)
+    base = rgb.convert('RGBA')
+    base.putalpha(ImageOps.invert(mask))
+    mask_path = store_asset(base, Path(input_dir) / 'masks')
     paint=read_paint(config,rgb.size)
     if paint is not None:
         paint_path=store_asset(paint,Path(input_dir)/'paintings')
@@ -136,14 +163,45 @@ def materialize(source, config, input_dir, temporary_dir, *, assets=None):
         composite_path=store_asset(composite,Path(temporary_dir)/'composites')
         rgb=composite.convert('RGB')
         if assets is not None:assets.update(paint_path=paint_path,paint_temp_path=paint_temp_path,composite_path=composite_path)
-    mask = read(config, rgb.size)
-    buffer = io.BytesIO();mask.save(buffer, format='PNG')
-    identity = hashlib.sha256(buffer.getvalue()).hexdigest()
-    mask_path = Path(input_dir) / 'masks' / (identity + '.png')
-    # Atomic replacement also repairs a manually damaged mask file.
-    try:unchanged=hashlib.sha256(mask_path.read_bytes()).hexdigest()==identity
-    except OSError:unchanged=False
-    if not unchanged:atomic_png(mask, mask_path)
     rgb.putalpha(ImageOps.invert(mask.convert('L')))
     transport = Path(temporary_dir) / uuid.uuid4().hex[:12] / (Path(source).stem[:80] + '.png')
     return atomic_png(rgb, transport), str(mask_path)
+
+
+def input_image(source, config, input_dir, temporary_dir):
+    """Canvas IMAGE and MASK are separate; only editing assets are durable."""
+    assets = {}
+    path = source
+    if config:
+        path, mask_asset = materialize(source, config, input_dir, temporary_dir, assets=assets)
+        assets['mask_asset_path'] = mask_asset
+    with Image.open(path) as original:
+        if original.width * original.height > MAX_PIXELS:raise ValueError('图像超过 3200 万像素')
+        if getattr(original, 'n_frames', 1) > 1:
+            if config:raise ValueError('请先导出静态图像帧再编辑遮罩')
+            # Preserve animated inputs; one same-size empty mask accompanies the file.
+            mask = Image.new('L', original.size, 0)
+            rgb = None
+        else:
+            image = ImageOps.exif_transpose(original)
+            mask = image_mask(image)
+            rgb = image.convert('RGB') if config or 'A' in image.getbands() or 'transparency' in image.info else None
+    directory = Path(temporary_dir) / 'image_input'
+    if rgb is not None:
+        path = atomic_png(rgb, directory / (Path(source).stem[:80] + '.png'))
+        assets['source_path'] = source
+    mask_path = atomic_png(mask, directory / (Path(source).stem[:80] + '_mask.png'))
+    assets.update(mask_path=mask_path, _processed_mask=True, _mask_nonempty=mask.getbbox() is not None)
+    return path, assets
+
+
+def frozen_mask_reference(source, path):
+    """A gray runtime MASK can be carried into an immutable RH submission."""
+    return {'version': 1, 'source': os.path.abspath(source), 'path': path,
+            'sha256': hashlib.sha256(Path(path).read_bytes()).hexdigest()}
+
+
+def asset_reference(config, path):
+    data = Path(path).read_bytes()
+    return dict(config, version=2, encoding='rgba-alpha', path=path,
+                sha256=hashlib.sha256(data).hexdigest(), png=base64.b64encode(data).decode('ascii'))

@@ -111,6 +111,10 @@ class LocalPreviewDialog(QtWidgets.QDialog):
         self.next_button.setToolTip('下一个可见文件（→）')
         self.next_button.clicked.connect(lambda: self.navigate(1))
         footer.addWidget(self.next_button)
+        self.play_button = QtWidgets.QPushButton('▶ 播放视频')
+        self.play_button.hide()
+        self.play_button.clicked.connect(self.play_current)
+        footer.addWidget(self.play_button)
         self.open_button = QtWidgets.QPushButton('系统打开')
         self.open_button.clicked.connect(self.open_current)
         footer.addWidget(self.open_button)
@@ -126,7 +130,7 @@ class LocalPreviewDialog(QtWidgets.QDialog):
             shortcut.setContext(QtCore.Qt.WindowShortcut)
             shortcut.activated.connect(action)
             self._shortcuts.append(shortcut)
-        for button in (self.previous_button, self.next_button, self.open_button):
+        for button in (self.previous_button, self.next_button, self.play_button, self.open_button):
             button.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
             button.setMinimumHeight(34)
             button.setAutoDefault(False)
@@ -172,12 +176,16 @@ class LocalPreviewDialog(QtWidgets.QDialog):
             self._show_current()
 
     def _show_current(self):
+        from aetherloom_core.video_preview import close_video
+        close_video(self)
         self._pending_request = None
         for job in self._jobs.values():
             job.cancelled.set()
         self._load_token += 1
         self._image = QtGui.QImage()
         self.current_path = self.files[self.index] if 0 <= self.index < len(self.files) else ''
+        self.play_button.setVisible(os.path.splitext(self.current_path)[1].lower() in VIDEO_EXTENSIONS)
+        self.play_button.setEnabled(os.path.isfile(self.current_path))
         self.filename_label.setText(os.path.basename(self.current_path) or '没有可预览的文件')
         self.filename_label.setToolTip(self.current_path)
         self.counter_label.setText(f'{self.index + 1} / {len(self.files)}' if self.files else '0 / 0')
@@ -236,6 +244,15 @@ class LocalPreviewDialog(QtWidgets.QDialog):
     def open_current(self):
         if self.current_path and self._opener is not None:
             self._opener(self.current_path)
+
+    def play_current(self):
+        from aetherloom_core.video_preview import open_video
+        open_video(self.current_path, self)
+
+    def hideEvent(self, event):
+        from aetherloom_core.video_preview import close_video
+        close_video(self)
+        super().hideEvent(event)
 
     def closeEvent(self, event):
         self._closed = True

@@ -40,8 +40,8 @@ class BaseModels(QtCore.QObject):
 
     def options(self, site):return self.values.get(site) or list(FALLBACK)
 
-    def refresh(self, site):
-        if site not in SITES or site in self.pending or time.monotonic()-self.checked.get(site,-10000)<3600:return
+    def refresh(self, site, *, force=False):
+        if site not in SITES or site in self.pending or not force and time.monotonic()-self.checked.get(site,-10000)<3600:return
         self.pending.add(site)
         def work():
             try:values=read_base_models(site)

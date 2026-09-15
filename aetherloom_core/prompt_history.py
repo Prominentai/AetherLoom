@@ -26,7 +26,7 @@ class PromptHistory(QtCore.QObject):
         editor.textChanged.connect(self.update_buttons)
         back_button.clicked.connect(self.back)
         forward_button.clicked.connect(self.forward)
-        back_button.setToolTip('回退到上一个运行、翻译或扩写文本（本次会话）')
+        back_button.setToolTip('回退到上一个运行、翻译、扩写或润色文本（本次会话）')
         forward_button.setToolTip('前进到下一个文本快照（本次会话）')
         self.update_buttons()
 

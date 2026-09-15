@@ -60,6 +60,8 @@ class InlineControls(QtWidgets.QScrollArea):
                               self.page.histories, parent=self.viewport(), model_owner=self._canvas_owner,
                               embedded=True)
             self.inspector = panel
+            if hasattr(panel, 'compare_view'):
+                panel.compare_view.surface.setToolTip('拖动分隔线对比；滚轮缩放画布，双击恢复对比视图。')
             panel.layout().setContentsMargins(2, 2, 2, 2)
             panel.layout().setSpacing(5)
             from .model import MODEL_KINDS
@@ -182,7 +184,9 @@ class InlineControls(QtWidgets.QScrollArea):
         if self.inspector.layout() is not None:
             height = max(self.inspector.sizeHint().height(),
                          self.inspector.heightForWidth(self.viewport().width())) + 4
-            minimum = self.item.body_rect().top() + height + 29 + (228 if self.item.result_count() else 0)
+            self.item.form_content_height = height
+            reserve = 308 if self.item.node['kind'] in ('preview', 'mask_preview') else 228
+            minimum = self.item.body_rect().top() + height + 29 + (reserve if self.item.result_count() else 0)
             if abs(getattr(self.item, 'form_minimum_height', 0) - minimum) > 1:
                 self.item.form_minimum_height = minimum
                 size = [self.item.width, self.item.height] if self.item._resize_start is not None else self.item.node.get('size')
@@ -191,12 +195,14 @@ class InlineControls(QtWidgets.QScrollArea):
 
     def refresh(self):
         self.inspector.node = self.item.node
+        if hasattr(self.inspector, 'refresh_input_preview'):self.inspector.refresh_input_preview()
         if hasattr(self.inspector, 'compare_view'):
             self.inspector.compare_view.set_results(self.item.node.get('results', []))
         self._geometry_timer.start(0)
         if not self._changing and self.state() != self._state:
             self._refresh_timer.start(0)
         colors = self.item.canvas_scene.colors
+        if hasattr(self.inspector, 'input_preview'):self.inspector.input_preview.set_colors(colors)
         self._theme_mode = getattr(self._canvas_owner, '_theme_mode', 'dark')
         if getattr(self, '_colors', None) == colors:return
         self._colors = dict(colors)

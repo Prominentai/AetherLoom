@@ -252,8 +252,8 @@ def _execute(node, directory, batches, stop):
                         source_size = original.size
                         if original.getexif().get(274) in (5,6,7,8):source_size = source_size[::-1]
                     if mask.size != source_size:
-                        resized = mask.resize(source_size, Image.Resampling.NEAREST);mask.close();mask = resized
-                    if kind == 'image_resize':changed = mask.resize(output_size, Image.Resampling.NEAREST)
+                        resized = mask.resize(source_size, Image.Resampling.BILINEAR);mask.close();mask = resized
+                    if kind == 'image_resize':changed = mask.resize(output_size, Image.Resampling.BILINEAR)
                     elif kind == 'image_crop':changed = mask.crop((x,y,x+width,y+height))
                     else:
                         changed = Image.new('L',output_size,0)

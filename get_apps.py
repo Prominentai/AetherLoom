@@ -1,10 +1,8 @@
 import os
-import re
 import json
 import logging
 import argparse
 from typing import List, Dict, Optional
-from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -166,28 +164,10 @@ def scrape_runninghub_detail(page_url: str,
     Returns a dict with the API response `data` payload. Unless api_base is
     supplied explicitly, use the same website as the application page.
     """
-    page_url = (page_url or '').strip()
-    if '://' not in page_url:
-        page_url = 'https://' + page_url
-    try:
-        page = urlsplit(page_url)
-        page_origin = site_base_url(urlunsplit((page.scheme, page.netloc, '', '', '')))
-    except ValueError:
-        raise ValueError('Application page URL must contain a valid HTTP(S) website') from None
-    api_base = site_base_url(api_base) if api_base is not None else page_origin
-    # Query and fragment fields are not needed for the detail request.
-    page_url = page_origin + page.path
-    # Try multiple patterns to extract ID
-    patterns = [r"ai-detail/(\d+)", r"/webapp/(\d+)", r"/(\d{15,})"]
-    current_id = None
-    for p in patterns:
-        m = re.search(p, page.path)
-        if m:
-            current_id = m.group(1)
-            break
-
-    if not current_id:
-        raise ValueError("Could not extract webapp ID from application page URL")
+    from aetherloom_core.rh_app_reference import application_reference, official_origin
+    reference = application_reference(page_url, default_base=api_base or 'https://www.runninghub.cn')
+    current_id, page_url = reference['webapp_id'], reference['url']
+    api_base = official_origin(api_base) if api_base is not None else reference['base_url']
 
     owns_session = session is None
     if owns_session:

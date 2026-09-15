@@ -1,5 +1,6 @@
 """Compact home page and bounded, asynchronous repository README updates."""
 import base64
+import hashlib
 import html
 import json
 import os
@@ -27,7 +28,7 @@ REFRESH_AGE = 3600
 def _atomic_write(path, text):
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', newline='', dir=path.parent,
                                          prefix=path.name + '.', suffix='.tmp', delete=False) as stream:
             temporary = stream.name
             stream.write(text)
@@ -55,7 +56,7 @@ def _valid_markdown(text):
     return text
 
 
-def display_markdown(text):
+def _display_prose(text):
     """Keep screenshots as links: no remote/full-size media load on the GUI thread."""
     text = re.sub(r'<svg\b[\s\S]*?</svg\s*>', '', text, flags=re.I)
     text = re.sub(r'<(?:script|style)\b[\s\S]*?</(?:script|style)\s*>', '', text, flags=re.I)
@@ -75,8 +76,37 @@ def display_markdown(text):
     text = re.sub(r'!\[([^\]]*)\]\(<?([^\s)>]+)>?(?:\s+[\"\'][^\n]*?[\"\'])?\)',
                   lambda match: image_link(match.group(2), '查看图片' + (' · ' + match.group(1) if match.group(1) else '')),
                   text)
+    # Qt 5's Markdown importer can lose the text following GitHub's HTML header.
+    # Normalize presentation wrappers before passing mixed HTML/Markdown to Qt.
+    def anchor(match):
+        href = re.search(r'\bhref\s*=\s*[\"\']([^\"\']+)', match.group(1), re.I)
+        label = re.sub(r'<[^>]*>', '', match.group(2)).strip()
+        if not href:return label
+        url = html.unescape(href.group(1)).strip()
+        if urlparse(url).scheme not in ('', 'http', 'https'):return label
+        return '[%s](<%s>)' % (label.replace('[', '').replace(']', ''), url.replace('>', '%3E'))
+
+    text = re.sub(r'<a\b([^>]*)>([\s\S]*?)</a\s*>', anchor, text, flags=re.I)
+    text = re.sub(r'<h([1-6])\b[^>]*>([\s\S]*?)</h\1\s*>',
+                  lambda m: '\n\n' + '#' * int(m.group(1)) + ' ' + m.group(2).strip() + '\n\n', text, flags=re.I)
+    text = re.sub(r'</?(?:p|div|center)\b[^>]*>', '\n\n', text, flags=re.I)
+    text = re.sub(r'</?span\b[^>]*>', '', text, flags=re.I)
+    text = re.sub(r'<br\s*/?>', '  \n', text, flags=re.I)
     # Reference-style images should remain clickable too, without resource loading.
     return re.sub(r'!\[([^\]]*)\](\[[^\]]*\])', r'[查看图片 · \1]\2', text)
+
+
+def display_markdown(text):
+    """Normalize README prose, preserving literal code examples verbatim."""
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    # Fenced blocks and inline backticks must not be treated as HTML/media.
+    code = re.compile(r'(^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^[ \t]{0,3}\2[ \t]*$|(`+)[^`\n]*?\3)', re.M)
+    parts, start = [], 0
+    for match in code.finditer(text):
+        parts.extend((_display_prose(text[start:match.start()]), match.group()))
+        start = match.end()
+    parts.append(_display_prose(text[start:]))
+    return ''.join(parts)
 
 
 class ReadmeBrowser(QtWidgets.QTextBrowser):
@@ -146,6 +176,7 @@ class ReadmeController(QtCore.QObject):
         self.cache = self.directory / '.readme_cache.md'
         self.metadata_path = self.directory / '.readme_cache.json'
         self.metadata = {}
+        self.cache_valid = False
         self.text = ''
         self.busy = False
         self.closed = threading.Event()
@@ -166,10 +197,19 @@ class ReadmeController(QtCore.QObject):
         for path in (self.cache, self.directory / 'README.md'):
             try:
                 content = _valid_markdown(_read_bounded(path))
+                if path == self.cache:
+                    digest = hashlib.sha256(content.encode('utf-8')).hexdigest()
+                    if self.metadata.get('sha256') not in (None, digest):
+                        raise ValueError('缓存内容与校验记录不一致')
+                    self.cache_valid = True
+                    # Legacy caches remain readable but need an unconditional check.
+                    if not self.metadata.get('sha256'):self.metadata = {}
             except (OSError, ValueError, UnicodeError):
+                if path == self.cache:self.metadata = {}
                 continue
             self._display(content)
             self.page.readme_status.setText('已加载缓存' if path == self.cache else '本地说明 · 自动检查更新')
+            self.page.readme_status.setToolTip('内容来源：' + str(path))
             return
         self.page.readme_status.setText('正在准备项目说明')
         self._display('## 欢迎使用 AetherLoom\n\n打开 RunningHub 添加应用，或在画布中连接应用与素材。')
@@ -191,22 +231,30 @@ class ReadmeController(QtCore.QObject):
             age = time.time() - float(self.metadata.get('checked_at', 0))
         except (TypeError, ValueError):
             age = REFRESH_AGE
-        if not force and 0 <= age < REFRESH_AGE and self.cache.is_file():
-            self.page.readme_status.setText('已是最新缓存 · ' + time.strftime('%H:%M', time.localtime(float(self.metadata['checked_at']))))
+        if not force and 0 <= age < REFRESH_AGE and self.cache_valid and self.cache.is_file():
+            self.page.readme_status.setText('GitHub 缓存 · 上次检查 ' + time.strftime('%H:%M', time.localtime(float(self.metadata['checked_at']))))
             self.timer.start(max(1000, int((REFRESH_AGE - age) * 1000)))
             return
         self.busy = True
         self.page.refresh_button.setEnabled(False)
         self.page.readme_status.setText('正在从 GitHub 更新…')
+        self.page.readme_status.setToolTip('内容来源：' + README_URL)
         threading.Thread(target=self._fetch, args=(dict(self.metadata),), name='readme-refresh', daemon=True).start()
 
     def _fetch(self, metadata):
         result = dict(ok=False, message='网络暂不可用，保留当前说明')
+        cached = None
+        try:
+            content = _valid_markdown(_read_bounded(self.cache))
+            if hashlib.sha256(content.encode('utf-8')).hexdigest() == metadata.get('sha256'):
+                cached = content
+        except (OSError, ValueError, UnicodeError):pass
+        failures = []
         for url in (RAW_URL, API_URL):
             if self.closed.is_set():
                 return
             headers = {'Accept': 'application/vnd.github.raw+json', 'User-Agent': 'AetherLoom/' + __version__}
-            if metadata.get('url') == url and self.cache.is_file():
+            if metadata.get('url') == url and cached is not None:
                 if metadata.get('etag'):
                     headers['If-None-Match'] = str(metadata['etag'])
                 elif metadata.get('last_modified'):
@@ -215,7 +263,8 @@ class ReadmeController(QtCore.QObject):
                 started = time.monotonic()
                 with requests.get(url, headers=headers, timeout=(3, 7), stream=True) as response:
                     if response.status_code == 304:
-                        content = _valid_markdown(_read_bounded(self.cache))
+                        if cached is None:raise ValueError('服务器返回 304，但本地没有可用缓存')
+                        content = cached
                     else:
                         response.raise_for_status()
                         if int(response.headers.get('Content-Length', 0)) > MAX_BYTES:
@@ -235,20 +284,25 @@ class ReadmeController(QtCore.QObject):
                             content = base64.b64decode(payload['content']).decode('utf-8-sig')
                         _valid_markdown(content)
                     updated = dict(url=url, checked_at=time.time(),
-                                   etag=response.headers.get('ETag', metadata.get('etag', '') if metadata.get('url') == url else ''),
-                                   last_modified=response.headers.get('Last-Modified', ''))
+                                   sha256=hashlib.sha256(content.encode('utf-8')).hexdigest(),
+                                   etag=response.headers.get('ETag', metadata.get('etag', '') if response.status_code == 304 and metadata.get('url') == url else ''),
+                                   last_modified=response.headers.get('Last-Modified', metadata.get('last_modified', '') if response.status_code == 304 and metadata.get('url') == url else ''))
                 if self.closed.is_set():
                     return
-                message = '已更新 · ' + time.strftime('%H:%M')
+                message = ('GitHub 内容未变化 · ' if response.status_code == 304 else '已从 GitHub 更新 · ') + time.strftime('%H:%M')
+                cached_ok = True
                 try:
                     _atomic_write(self.cache, content)
                     _atomic_write(self.metadata_path, json.dumps(updated, ensure_ascii=False))
                 except OSError:
                     message = '已更新 · 本次未能写入缓存'
-                result = dict(ok=True, content=content, metadata=updated, message=message)
+                    cached_ok = False
+                result = dict(ok=True, content=content, metadata=updated, message=message, cached=cached_ok)
                 break
-            except (requests.RequestException, OSError, ValueError, KeyError, TypeError, UnicodeError):
+            except (requests.RequestException, OSError, ValueError, KeyError, TypeError, UnicodeError) as error:
+                failures.append(urlparse(url).netloc + '：' + str(error)[:300])
                 continue
+        if not result['ok']:result['detail'] = '\n'.join(failures)
         if not self.closed.is_set():
             try:
                 self.finished.emit(result)
@@ -262,8 +316,10 @@ class ReadmeController(QtCore.QObject):
         self.page.refresh_button.setEnabled(True)
         if result['ok']:
             self.metadata = result['metadata']
+            self.cache_valid = result.get('cached', False)
             self._display(result['content'])
         self.page.readme_status.setText(result['message'])
+        self.page.readme_status.setToolTip(result.get('detail', '内容来源：GitHub README' if result['ok'] else ''))
         self.timer.start(REFRESH_AGE * 1000 if result['ok'] else 5 * 60 * 1000)
 
     def close(self):
@@ -373,6 +429,13 @@ class HomePage(QtWidgets.QWidget):
             QPushButton#homeAction { font-size: 13px; text-align: left; padding: 10px 14px; }
             QTextBrowser#homeReadme { background: transparent; color: %s; border: none; font-size: 13px; selection-background-color: #386b9c; }
         ''' % ('#f3f6fb' if light else '#101827', text, muted, accent, border, surface, border, surface, text, border, accent, muted, text))
+        self.readme.verticalScrollBar().setStyleSheet('''
+            QScrollBar:vertical { background: transparent; width: 9px; margin: 0; }
+            QScrollBar::handle:vertical { background: %s; min-height: 30px; border-radius: 4px; }
+            QScrollBar::handle:vertical:hover { background: %s; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+        ''' % (border, muted))
         self.footer.setText('<a style="color:%s" href="%s">项目仓库</a>  ·  '
                             '<a style="color:%s" href="https://www.runninghub.ai/user-center/1911823721911500801/webapp?inviteCode=rh-v1380">作者的 RunningHub 应用 ↗</a>' % (accent, REPOSITORY, accent))
         self.readme.document().setDefaultStyleSheet('body { color: %s; } a { color: %s; } h1 { font-size: 21px; } h2 { font-size: 18px; } pre { white-space: pre-wrap; }' % (text, accent))

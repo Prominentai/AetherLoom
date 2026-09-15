@@ -20,10 +20,17 @@ RUNTIME_FIELDS = ('results', 'result_signatures', 'fingerprint', 'status', 'prog
                   'message', 'generation', 'cached', 'stale', '_restored_missing_results',
                   '_restored_positions_ambiguous', 'activated')
 RUNTIME_FIELDS += ('selection_token', 'selection_round')
+RUNTIME_FIELDS += ('_runtime_input_issue', '_runtime_missing_ports')
 
 
 class MissingHistoricalInput(ValueError):
     """Only this local branch is omitted; completed upstream tasks stay complete."""
+
+
+class MissingRuntimeInput(ValueError):
+    def __init__(self, message, port):
+        super().__init__(message)
+        self.port = port
 
 
 class DetachedExecution(RuntimeError):
@@ -120,20 +127,16 @@ class CanvasEngine(QtCore.QObject):
             if previous:
                 updated['run'] = copy.deepcopy(previous.get('run', {}))
                 previous_nodes = {n['id']: n for n in previous['nodes']}
-                snapshot_nodes = {n['id']: n for n in previous.get('run', {}).get('snapshot', {}).get('nodes', [])}
+                changed = model.changed_execution_nodes(updated, previous)
                 for node in updated['nodes']:
                     before = previous_nodes.get(node['id'])
                     if before:
                         for key in RUNTIME_FIELDS:
                             if key in before:
                                 node[key] = copy.deepcopy(before[key])
-                    frozen = snapshot_nodes.get(node['id'])
-                    if frozen and any(node.get(key) != frozen.get(key) for key in
-                                      ('params', 'app', 'decode_settings', 'model_config')):
+                    if node['id'] in changed:
                         node['stale'] = True
-                if updated.get('edges') != previous.get('edges'):
-                    for node in updated['nodes']:
-                        node['stale'] = True
+                        node.update(_runtime_input_issue='', _runtime_missing_ports=[])
             self._documents[updated['id']] = updated
             return copy.deepcopy(updated)
 
@@ -249,7 +252,7 @@ class CanvasEngine(QtCore.QObject):
             current = self._document_locked(canvas_id)
             previous_token = self._workflow_tokens.get(canvas_id)
             missing = self.store.workflow_token(canvas_id) is None
-            if explicit and missing:
+            if explicit and missing and not self.store.path_for(canvas_id).exists():
                 previous_token = None
             path = self.store.save_pair(current, expected_token=previous_token,
                 recreate=explicit or previous_token is None and canvas_id not in self._forgotten)
@@ -319,7 +322,8 @@ class CanvasEngine(QtCore.QObject):
     def capture_prepared(self, document, target=None, prepare_app=None):
         """Freeze App options on the GUI thread when a workflow is enqueued."""
         order = model.validate_document(document)
-        scope = model.ancestors(document, target) if target else set(order)
+        from .input_requirements import plan
+        scope = plan(document, target)['scope']
         captured = {}
         prepare = prepare_app or self.prepare_app
         for node in document['nodes']:
@@ -401,8 +405,14 @@ class CanvasEngine(QtCore.QObject):
             if source.get('id') != canvas_id:
                 raise ValueError('排队快照与画布标识不一致')
             order = model.validate_document(source)
-            scope = model.ancestors(source, target) if target else set(order)
-            scope -= {node['id'] for node in source['nodes'] if node['kind'] in ('note','subgraph')}
+            from .input_requirements import plan
+            input_plan = plan(source, target)
+            scope = input_plan['scope']
+            if not scope:raise ValueError('没有输入完整的执行分支；请补齐红色节点的输入，旧结果保持不变')
+            unsupported = [node for node in source['nodes'] if node['id'] in scope and model.unknown_node(node)]
+            if unsupported:
+                raise ValueError('无法运行：请更新客户端或替换不支持的节点：' + '、'.join(
+                    model.node_title(node) + ' [' + node['kind'] + ']' for node in unsupported[:8]))
             count = model.normalize_batch_count(1 if target else
                 source.get('batch_count', 1) if batch_count is None else batch_count)
             graph = {key: copy.deepcopy(source.get(key)) for key in ('version', 'id', 'name', 'nodes', 'edges', 'view')}
@@ -410,6 +420,7 @@ class CanvasEngine(QtCore.QObject):
             graph['batch_count'] = source.get('batch_count', 1)
             round_id = str(round_id or uuid.uuid4().hex)
             run = {'id': round_id, 'status': 'RUNNING', 'created_at': time.time(),
+                   'input_issues': copy.deepcopy(input_plan['issues']), 'input_skipped': sorted(input_plan['skipped']),
                    'session_id': self.store.session_id,
                    'scope': [node_id for node_id in order if node_id in scope],
                    'force': bool(force), 'snapshot': graph, 'target': target,
@@ -431,9 +442,11 @@ class CanvasEngine(QtCore.QObject):
                              'batch_index': item.get('batch_index', 0), 'repeat_index': item.get('repeat_index', 0)})
                     run['cache'][node_id] = cached_state
             current['run'] = run
+            changed = model.changed_execution_nodes(current, graph)
             for current_node in current['nodes']:
                 if current_node['id'] in scope:
-                    current_node.update(status='PENDING', activated=False, bypassed=False, progress=0, message='等待依赖', stale=False, cached=False)
+                    current_node.update(_runtime_input_issue='', _runtime_missing_ports=[])
+                    current_node.update(status='PENDING', activated=False, bypassed=False, progress=0, message='等待依赖', stale=current_node['id'] in changed, cached=False)
                     current_node.pop('_restored_missing_results', None)
                     current_node.pop('_restored_positions_ambiguous', None)
             for frozen_node in graph['nodes']:
@@ -607,6 +620,8 @@ class CanvasEngine(QtCore.QObject):
             if node:
                 for key in RUNTIME_FIELDS:
                     if key in values:
+                        if key in ('_runtime_input_issue', '_runtime_missing_ports') and node.get('stale'):
+                            continue
                         node[key] = copy.deepcopy(values[key])
             self._publish_locked(document, save=values.get('status') not in {'PREPARING', 'RUNNING'})
         self._cancel_halted(document)
@@ -628,6 +643,7 @@ class CanvasEngine(QtCore.QObject):
         run['message'] = '正在运行第 {}/{} 批'.format(run['batch_index'] + 1, run['batch_count'])
         for node in document['nodes']:
             if node['id'] in run['nodes']:
+                node.update(_runtime_input_issue='', _runtime_missing_ports=[])
                 node.update(status='PENDING', activated=False, bypassed=False, progress=0, cached=False, message='等待依赖')
         self._publish_locked(document)
 
@@ -686,6 +702,7 @@ class CanvasEngine(QtCore.QObject):
                         states = self._document_locked(canvas_id)['run']['nodes']
                         states_copy = {node_id: {'status': state.get('status'),
                             'conditional_skip':state.get('conditional_skip',False),
+                            'input_skipped': state.get('input_skipped', False),
                             'items': [{'task_id': item.get('task_id'), 'status': item.get('status')}
                                       for item in state.get('items', [])]} for node_id, state in states.items()}
                     for node_id, future in list(futures.items()):
@@ -697,11 +714,14 @@ class CanvasEngine(QtCore.QObject):
                             return
                         except Exception as error:
                             failure_status = ('CANCELED' if getattr(error, 'status', '') == 'canceled' else
-                                              'SKIPPED' if isinstance(error, MissingHistoricalInput) else 'FAILED')
+                                              'SKIPPED' if isinstance(error, (MissingHistoricalInput, MissingRuntimeInput)) else 'FAILED')
                             if self._fail_unsubmitted_items(canvas_id, node_id, str(error), status=failure_status):
                                 futures[node_id] = pool.submit(self._worker_call, self._wait_app, round_id, canvas_id, node_id, stop)
                                 continue
-                            self._set_state(canvas_id, node_id, status=failure_status, message=str(error))
+                            details = (dict(input_skipped=True, _runtime_input_issue=str(error),
+                                            _runtime_missing_ports=[error.port])
+                                       if isinstance(error, MissingRuntimeInput) else {})
+                            self._set_state(canvas_id, node_id, status=failure_status, message=str(error), **details)
                         del futures[node_id]
                     launched = False
                     for node_id in order:
@@ -729,12 +749,15 @@ class CanvasEngine(QtCore.QObject):
                         if not submitted and any(parent.get('status') in TERMINAL - {'SUCCESS'} for parent in parents):
                             skipped = any(parent.get('status') == 'SKIPPED' for parent in parents)
                             conditional = skipped and all(parent.get('conditional_skip') for parent in parents if parent.get('status')=='SKIPPED')
-                            message = '条件未选中此分支' if conditional else '历史输入结果缺失，已跳过本分支' if skipped else '上游未成功，已停止后续提交'
+                            input_skipped = skipped and any(parent.get('input_skipped') for parent in parents)
+                            message = ('上游未提供匹配结果，已跳过本分支' if input_skipped else '条件未选中此分支' if conditional
+                                       else '历史输入结果缺失，已跳过本分支' if skipped else '上游未成功，已停止后续提交')
                             if self._fail_unsubmitted_items(canvas_id, node_id, message, status='SKIPPED' if skipped else 'FAILED'):
                                 futures[node_id] = pool.submit(self._worker_call, self._wait_app, round_id, canvas_id, node_id, stop)
                                 launched = True
                             else:
-                                self._set_state(canvas_id, node_id, status='SKIPPED' if skipped else 'BLOCKED', conditional_skip=conditional, message=message)
+                                self._set_state(canvas_id, node_id, status='SKIPPED' if skipped else 'BLOCKED', conditional_skip=conditional,
+                                                input_skipped=input_skipped, message=message)
                         elif submitted or all(parent.get('status') == 'SUCCESS' for parent in parents):
                             self._set_state(canvas_id, node_id, status='PREPARING', activated=True, progress=0, message='正在准备输入')
                             futures[node_id] = pool.submit(self._worker_call, self._execute_node, round_id, canvas_id, round_id, graph,
@@ -755,8 +778,9 @@ class CanvasEngine(QtCore.QObject):
                                              'CANCELED' if stop.is_set() else 'FAILED')
                             if run.get('has_failure') and run.get('batch_index', 0) + 1 < run.get('batch_count', 1):
                                 run['message'] = '本批存在失败，已停止后续画布批次；独立分支已处理完毕'
-                            if 'SKIPPED' in statuses:
+                            if 'SKIPPED' in statuses and run['status'] == 'SUCCESS':
                                 run['message'] = ('条件未选中的分支已跳过' if all(s.get('conditional_skip') for s in run['nodes'].values() if s.get('status')=='SKIPPED')
+                                                  else '部分分支未获得所需输入，已跳过；其他分支已完成' if any(s.get('input_skipped') for s in run['nodes'].values())
                                                   else '部分历史结果缺失，已跳过对应分支')
                             self._publish_locked(self._document_locked(canvas_id))
                             break
@@ -824,6 +848,7 @@ class CanvasEngine(QtCore.QObject):
 
     def _execute_node(self, canvas_id, round_id, graph, node, prepared, force, stop):
         node_id, kind = node['id'], node['kind']
+        if model.unknown_node(node):raise ValueError('当前客户端不支持节点：' + model.node_title(node) + ' [' + kind + ']')
         if kind == 'manual_select':
             with self._condition:
                 state=copy.deepcopy(self._document_locked(canvas_id)['run']['nodes'][node_id])
@@ -857,6 +882,9 @@ class CanvasEngine(QtCore.QObject):
                 if node.get('bypass'):continue
                 if parent.get('_restored_missing_results'):
                     raise MissingHistoricalInput('所需历史结果已缺失，已跳过本分支') from error
+                if isinstance(error, model.NoMatchingInput):
+                    label = next(port['label'] for port in model.input_ports(node) if port['key'] == edge['input'])
+                    raise MissingRuntimeInput(f'{label}：上游没有匹配结果，已跳过本分支', edge['input']) from error
                 raise
         if node.get('bypass'):
             results=model.bypass_results(node,inputs)
@@ -899,7 +927,7 @@ class CanvasEngine(QtCore.QObject):
                 and model.results_valid(cached.get('results', []), cached.get('result_signatures'))):
             compatible=True
             for edge in graph['edges']:
-                if edge['source'] != node_id:continue
+                if edge['source'] != node_id or edge['target'] not in states:continue
                 target=next(n for n in graph['nodes'] if n['id']==edge['target'])
                 if target.get('bypass'):continue
                 accepted=next(port['type'] for port in model.input_ports(target) if port['key']==edge['input'])
@@ -950,14 +978,13 @@ class CanvasEngine(QtCore.QObject):
                     raise ValueError('文件格式不属于此导入节点：' + str(path))
                 result = {'path': path, 'type': kind, 'index': index, 'lineage': model.result_lineage({}, node_id, index)}
                 if kind == 'image':
-                    from aetherloom_core.mask_assets import matches, materialize
+                    from aetherloom_core.mask_assets import matches, input_image
                     mask = next((value for value in node.get('params', {}).get('masks', []) if matches(value,path)),None)
-                    if mask:
-                        assets={}
-                        result['path'],result['mask_path'] = materialize(path,mask,(prepared or {}).get('input_dir') or str(self.store.root.parent/'input'),self.temporary.directory(round_id,node_id),assets=assets)
-                        result.update(assets)
-                        result['source_path'] = path
-                        result['_file_identity'] = digest + ':' + str(index)
+                    result['path'],assets = input_image(path,mask,
+                        (prepared or {}).get('input_dir') or str(self.store.root.parent/'input'),
+                        self.temporary.directory(round_id,node_id)/'inputs'/str(index))
+                    result.update(assets)
+                    if result.get('source_path'):result['_file_identity'] = digest + ':' + str(index)
                 model.result_signature(result)
                 results.append(model.normalize_result(result))
             if not results:
@@ -1009,6 +1036,8 @@ class CanvasEngine(QtCore.QObject):
                 except ValueError as error:
                     if any(states[edge['source']].get('_restored_missing_results') for edge in edges):
                         raise MissingHistoricalInput('所选历史结果已不可用，已跳过本分支') from error
+                    if isinstance(error, model.NoMatchingInput):
+                        raise MissingRuntimeInput('没有符合过滤条件的结果，已跳过本分支', 'value') from error
                     raise
         else:
             self._execute_app(canvas_id, round_id, node, prepared, batches, digest, stop)
@@ -1077,6 +1106,14 @@ class CanvasEngine(QtCore.QObject):
                 if key in batches[batch_index]:
                     field['fieldValue'] = model.input_value(batches[batch_index][key], field)
                     field.pop('_mask',None)
+                    field.pop('_canvas_masks',None)
+                    value = batches[batch_index][key]
+                    values = model.batch_items(value) if model.result_type(value) == 'batch' else [value]
+                    from aetherloom_core.mask_assets import frozen_mask_reference
+                    masks = {value['path']: frozen_mask_reference(value['path'], value['mask_path'])
+                             for value in values if model.result_type(value) == 'image'
+                             and value.get('mask_path') and value.get('_mask_nonempty', True)}
+                    if masks:field['_canvas_masks'] = masks
             snapshot['run_id'] = item['run_id']
             snapshot['origin'] = {'kind': 'canvas', 'canvas_id': canvas_id, 'canvas_name': canvas_name,
                                   'node_id': node_id, 'node_title': node.get('title', 'App'),

@@ -1,5 +1,6 @@
 """Window settings serialization and restoration."""
 from aetherloom_core.resources import DEFAULT_EXPAND_SYSTEM_PROMPT
+from aetherloom_core.resources import DEFAULT_POLISH_SYSTEM_PROMPT
 from aetherloom_core.resources import DEFAULT_IMAGE_REVERSE_PROMPT
 from aetherloom_core.autocomplete import completion_options
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -231,6 +232,15 @@ class SettingsMixin:
             except Exception:
                 pass
 
+            # Persist the independent selected-text polish prompt, including a
+            # default for older configurations and empty/whitespace-only values.
+            polish_prompt = (getattr(self, 'settings', {}) or {}).get('polish_system_prompt')
+            if not isinstance(polish_prompt, str) or not polish_prompt.strip():
+                polish_prompt = DEFAULT_POLISH_SYSTEM_PROMPT
+            data['polish_system_prompt'] = polish_prompt
+            if isinstance(getattr(self, 'settings', None), dict):
+                self.settings['polish_system_prompt'] = polish_prompt
+
             # persist image-reverse prompt if provided in settings
             try:
                 if isinstance(getattr(self, 'settings', None), dict):
@@ -259,6 +269,14 @@ class SettingsMixin:
         if not settings:
             return
         try:
+            polish_prompt = settings.get('polish_system_prompt')
+            if not isinstance(polish_prompt, str) or not polish_prompt.strip():
+                polish_prompt = DEFAULT_POLISH_SYSTEM_PROMPT
+            self.settings['polish_system_prompt'] = polish_prompt
+            polish_editor = getattr(self, 'polish_system_prompt_edit', None)
+            if polish_editor is not None:
+                with QtCore.QSignalBlocker(polish_editor):
+                    polish_editor.setPlainText(polish_prompt)
             from aetherloom_core.image_prompts import DEFAULTS, options
             for category, (key, _) in DEFAULTS.items():
                 value = options(settings, category)

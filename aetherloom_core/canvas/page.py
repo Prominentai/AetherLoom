@@ -22,6 +22,7 @@ from .controls import CanvasStatus
 
 
 RUNTIME_FIELDS = ('results', 'result_signatures', 'fingerprint', 'status', 'progress', 'node_progress', 'message', 'error', 'generation', 'cached', 'stale', 'activated', 'bypassed', '_restored_missing_results', '_restored_positions_ambiguous')
+RUNTIME_FIELDS += ('_runtime_input_issue', '_runtime_missing_ports')
 
 
 class _BatchCountSpinBox(QtWidgets.QSpinBox):
@@ -276,16 +277,21 @@ class CanvasPage(QtWidgets.QWidget):
         self.palette_action.setChecked(False)
         self.palette_action.toggled.connect(lambda checked: self.library.setVisible(checked))
         package_menu = QtWidgets.QMenu('画布',toolbar);self.document_menu=package_menu
-        for label, callback in [('新建画布', self.new_canvas), ('打开画布…', self.open_canvas), ('保存', self.save), ('另存为…', self.save_as)]:
+        for label, callback in [('新建画布', self.new_canvas), ('打开画布…', self.open_canvas), ('保存', self.save), ('保存副本…', self.save_as)]:
             package_menu.addAction(label, callback)
         package_menu.addSeparator()
         package_menu.addAction('导入工作流 JSON…', self.import_canvas)
         package_menu.addAction('导出工作流 JSON…', self.export_canvas)
-        package_menu.addSeparator();package_menu.addAction('删除当前画布…',self.delete_canvas)
+        package_menu.addSeparator()
+        self.clear_action = package_menu.addAction('清空画布', self.clear_canvas)
+        self.clear_action.setToolTip('移除全部节点和连线，保留当前画布；可通过 Ctrl+Z 撤销')
+        package_menu.addAction('删除当前画布…',self.delete_canvas)
         def add_menu(menu):
             action=menu.menuAction();toolbar.addAction(action)
             toolbar.widgetForAction(action).setPopupMode(QtWidgets.QToolButton.InstantPopup)
         add_menu(package_menu)
+        toolbar.addAction('打开', self.open_canvas).setToolTip('打开本地画布或工作流 JSON · Ctrl+O')
+        toolbar.addAction('保存', self.save).setToolTip('保存当前画布 · Ctrl+S；编辑后也会自动保存')
         self.add_node_action=toolbar.addAction('＋ 添加节点',self._quick_add_node)
         self.add_node_action.setToolTip('按分类搜索并添加节点 · 画布内按 Tab')
         toolbar.widgetForAction(self.add_node_action).setObjectName('canvasAddNodeButton')
@@ -338,7 +344,10 @@ class CanvasPage(QtWidgets.QWidget):
         self.missing_label.setWordWrap(True)
         self.missing_label.setMinimumWidth(0)
         missing_layout.addWidget(self.missing_label, 1)
-        self.install_missing_button = QtWidgets.QPushButton('添加缺失 App')
+        self.locate_missing_button = QtWidgets.QPushButton('定位节点')
+        self.locate_missing_button.clicked.connect(self._locate_missing_nodes)
+        missing_layout.addWidget(self.locate_missing_button)
+        self.install_missing_button = QtWidgets.QPushButton('一键补齐')
         self.install_missing_button.clicked.connect(lambda: self._install_missing_apps())
         missing_layout.addWidget(self.install_missing_button)
         self.missing_banner.hide()
@@ -470,6 +479,7 @@ class CanvasPage(QtWidgets.QWidget):
         self.status_label.setWordWrap(False)
         footer.addWidget(self.status_label, 1)
         self.zoom_label = QtWidgets.QLabel('100%')
+        self.zoom_label.setToolTip('滚轮缩放画布 · 指向节点内滚动条时直接滚动内容\nShift + 滚轮也可滚动节点内容')
         self.zoom_label.setObjectName('canvasMuted')
         footer.addWidget(self.zoom_label)
         layout.addLayout(footer)
@@ -591,47 +601,62 @@ class CanvasPage(QtWidgets.QWidget):
 
     def _refresh_missing_apps(self):
         requests, issues, count = self._app_requirements()
+        unsupported = [node for node in self.document['nodes'] if model.unknown_node(node)]
         pieces = []
         if requests:
-            pieces.append(f'此画布缺少 {len(requests)} 个 App，涉及 {count} 个节点。添加后保留各节点参数。')
+            from aetherloom_core.rh_model_apps import LABELS
+            counts = {kind:sum(ref.get('backend','rh_app')==kind for ref in requests) for kind in LABELS}
+            names = '、'.join(f'{LABELS[kind]} {number} 个' for kind,number in counts.items() if number)
+            pieces.append(f'此画布缺少：{names}，涉及 {count} 个节点。补齐后保留各节点参数和连线。')
         if issues:
-            pieces.append(f'{len(issues)} 个节点的 App 引用无效，请重新添加对应 App 节点。')
+            pieces.append(f'{len(issues)} 个节点的应用或模型引用无效，请检查对应节点。')
+        if unsupported:
+            pieces.append(f'{len(unsupported)} 个节点类型暂不支持，已保留参数和连线；请更新客户端或替换对应节点。')
         if self._install_summary:
             pieces.append(self._install_summary)
         self.missing_label.setText(' '.join(pieces))
-        self.missing_label.setToolTip('\n'.join(issues))
-        self.install_missing_button.setText('正在添加…' if self._install_busy else '添加缺失 App')
+        self.missing_label.setToolTip('\n'.join(issues + [model.node_title(n)+' ['+n['kind']+']' for n in unsupported]))
+        self.install_missing_button.setText('正在补齐…' if self._install_busy else '一键补齐')
         self.install_missing_button.setEnabled(bool(requests) and not self._install_busy)
         self.missing_banner.setVisible(bool(pieces) or self._install_busy)
+        self.install_missing_button.setVisible(bool(requests) or self._install_busy)
+        self.locate_missing_button.setVisible(bool(requests or issues or unsupported))
+        from .dependencies import refresh
+        refresh(self)
+        from .input_requirements import refresh as refresh_inputs
+        refresh_inputs(self)
         if isinstance(self._inspector, Inspector) and getattr(self._inspector, 'install_button', None):
             self._inspector.install_button.setEnabled(not self._install_busy)
+
+    def _locate_missing_nodes(self):
+        from .dependencies import notice
+        ids = [node['id'] for node in self.document['nodes'] if notice(node, self.apps)]
+        # Reveal a collapsed group when its unavailable member is selected.
+        groups = [node for node in self.document['nodes'] if node['kind']=='subgraph'
+                  and node.get('params', {}).get('collapsed', True) and set(node.get('members', [])) & set(ids)]
+        if groups:
+            self._checkpoint()
+            for node in groups:node.setdefault('params', {})['collapsed'] = False
+            self._edited(rebuild=True)
+        self.scene.clearSelection()
+        for identity in ids:
+            if identity in self.scene.nodes:self.scene.nodes[identity].setSelected(True)
+        if ids:self.view.reveal_nodes(ids)
 
     def _install_missing_apps(self, node_id=None):
         if self._closed or self._install_busy:
             return
         self.refresh_apps()
         references, issues, unused = self._app_requirements({node_id} if node_id else None)
-        models = [ref for ref in references if ref.get('backend') in ('rh_standard', 'rh_llm')]
-        if models:
-            from aetherloom_core.rh_model_apps import install as install_model
-            try:
-                for ref in models:
-                    install_model(Path(current_dir) / 'RH_apps', dict(schema_version=1, webappId=ref['webapp_id'],
-                        title=ref['name'], backend=ref['backend'], base_url=ref['base_url'],
-                        model_definition=ref['model_definition'], nodeInfoList=ref['nodes']))
-                self.owner._rh_reload_apps();self.refresh_apps()
-                references = [ref for ref in references if ref not in models]
-            except (ValueError, OSError) as error:
-                self._message('模型应用添加失败：' + str(error));return
         if not references:
-            self._message(issues[0] if issues else '所需 App 已添加到本机。')
+            self._message(issues[0] if issues else '所需应用和模型已添加到本机。')
             return
         install = getattr(self.owner, '_rh_install_apps', None)
         if install is None:
             self._message('App 添加服务尚未就绪，请重新打开客户端。')
             return
         self._install_busy = True
-        self._install_summary = f'准备添加 {len(references)} 个 App…'
+        self._install_summary = f'准备补齐 {len(references)} 个应用或模型…'
         self._refresh_missing_apps()
         try:
             self._install_job = install(references, self._install_progress, self._install_finished)
@@ -643,7 +668,7 @@ class CanvasPage(QtWidgets.QWidget):
     def _install_progress(self, index, total, app, error):
         if self._closed:
             return
-        self._install_summary = f'已处理 {index} / {total} 个 App' + ('，部分添加失败。' if error else '…')
+        self._install_summary = f'已处理 {index} / {total} 个应用或模型' + ('，部分添加失败。' if error else '…')
         self._refresh_missing_apps()
 
     def _install_finished(self, report):
@@ -652,11 +677,13 @@ class CanvasPage(QtWidgets.QWidget):
         if self._closed:
             return
         failures = report.get('failed') or []
-        self._install_summary = (f"已添加 {len(report.get('added') or [])} 个 App。"
-                                 + (f'{len(failures)} 个添加失败，可检查 RH 连接设置后重试。' if failures else ''))
+        self._install_summary = (f"已补齐 {len(report.get('added') or [])} 个应用或模型。"
+                                 + (f'{len(failures)} 个添加失败，悬停查看原因后重试。' if failures else ''))
         # The installer has refreshed the owner's catalog. Existing canvas node
         # definitions/values remain independent; changed schemas require rebind.
         self.refresh_apps()
+        if isinstance(self._inspector, Inspector) and self._inspector.install_button is not None:
+            self._selection_changed(force=True)
         if failures:
             details = '\n'.join(str(item.get('webapp_id') or 'App') + '：' + str(item.get('error') or '添加失败') for item in failures)
             self.missing_label.setToolTip(details)
@@ -778,7 +805,7 @@ class CanvasPage(QtWidgets.QWidget):
             accepted = next((port['type'] for port in model.input_ports(anchor_node) if port['key'] == anchor['input']), None)
             if accepted is None:
                 return choices
-        type_names = {'mask': '遮罩', 'text': '文本', 'image': '图像', 'audio': '音频', 'video': '视频',
+        type_names = {'mask': '遮罩', 'bounding': 'Bounding', 'text': '文本', 'image': '图像', 'audio': '音频', 'video': '视频',
                       'int': 'INT', 'float': 'FLOAT', 'boolean': '布尔', 'enum': '枚举', 'number': '数值', 'scalar': '枚举', 'file': '任意', 'any': '任意', 'archive': '压缩文件',
                       'batch': 'Batch', 'image_input': '图像', 'video_input': '视频', 'audio_input': '音频', 'text_input': '文本'}
         for group, value, title, prototype in prototypes:
@@ -841,7 +868,9 @@ class CanvasPage(QtWidgets.QWidget):
         app_id = str(node.get('app', {}).get('webapp_id', ''))
         installed = self.apps.get(app_id)
         if installed is None:
-            raise ValueError(f"请先添加 App：{node.get('title', app_id)}")
+            from .dependencies import notice
+            issue = notice(node, self.apps)
+            raise ValueError(model.node_title(node) + '：' + (issue['label'] if issue else '缺少依赖') + '，请先一键补齐')
         if (installed.get('model_definition') != node.get('app', {}).get('model_definition')
                 or _schema(installed['nodes']) != _schema(node.get('app', {}).get('nodes', []))):
             raise ValueError(f"{node.get('title', 'App')} 的定义已变化，请在节点设置中重新绑定参数")
@@ -850,6 +879,8 @@ class CanvasPage(QtWidgets.QWidget):
         return self._prepare(node, rh_nodes)
 
     def _set_document(self, doc):
+        self._document_epoch = getattr(self, '_document_epoch', 0) + 1
+        self._autosave.stop()
         if self._node_search is not None:
             self._node_search.close()
         self._updating = True
@@ -880,7 +911,8 @@ class CanvasPage(QtWidgets.QWidget):
             self.scene.refresh_nodes(self.document)
         self._sync_actions()
         self._refresh_missing_apps()
-        self.save_state.setText('已保存' if self.store.path_for(doc['id']).exists() else '本地画布')
+        self.save_state.setText('已保存' if self.store.path_for(doc['id']).exists() else '尚未保存')
+        self.save_state.setToolTip(str(self.store.path_for(doc['id'])))
         self.zoom_label.setText(f'{int(zoom * 100)}%')
         self._schedule_selected_recovery()
 
@@ -963,6 +995,11 @@ class CanvasPage(QtWidgets.QWidget):
         self._undo.append(self._edit_snapshot())
         del self._undo[:-40]
         self._redo.clear()
+        self._prune_removed_runtime()
+
+    def _prune_removed_runtime(self):
+        retained = {node['id'] for snapshot in self._undo + self._redo for node in snapshot['nodes']}
+        self._removed_runtime = {key: value for key, value in self._removed_runtime.items() if key in retained}
 
     def _edit_snapshot(self):
         # Undo is editing history, never a duplicate of task/result history.
@@ -974,10 +1011,11 @@ class CanvasPage(QtWidgets.QWidget):
         return result
 
     def _edited(self, rebuild=False, select=None, connections=False):
+        self._edit_serial = getattr(self, '_edit_serial', 0) + 1
         model.sync_dynamic_inputs(self.document)
         self._dirty = True
         deleted = self._is_deleted(self.document['id'])
-        self.save_state.setText('工作流已删除 · 手动保存可重新建立' if deleted else '正在保存…')
+        self.save_state.setText('工作流已删除 · 手动保存可重新建立' if deleted else '待自动保存')
         if not deleted:
             self._autosave.start()
         update = getattr(self.engine, 'update_document', None)
@@ -1360,7 +1398,7 @@ class CanvasPage(QtWidgets.QWidget):
         self._edited(rebuild=True, select=node_id)
 
     def _action(self, action):
-        method = {'copy': self.copy_nodes, 'paste': self.paste_nodes, 'delete': self.delete_selected, 'undo': self.undo, 'redo': self.redo,'select_all':self.select_all_nodes}.get(action)
+        method = {'copy': self.copy_nodes, 'paste': self.paste_nodes, 'delete': self.delete_selected, 'clear': self.clear_canvas, 'undo': self.undo, 'redo': self.redo,'select_all':self.select_all_nodes}.get(action)
         if method:
             method()
 
@@ -1381,6 +1419,19 @@ class CanvasPage(QtWidgets.QWidget):
             self._message('画布已删除；仍被任务读取的临时文件会在释放后清理。')
         except (OSError,ValueError,RuntimeError) as error:self._message('删除画布失败：'+str(error))
 
+    def clear_canvas(self):
+        """Clear the editable graph as one undo step; active runs keep their snapshot."""
+        if not self.document['nodes'] and not self.document['edges']:return
+        if not self._flush_editors():return
+        self._checkpoint()
+        count = len(self.document['nodes'])
+        for node in self.document['nodes']:
+            self._removed_runtime[node['id']] = {key: copy.deepcopy(node[key]) for key in RUNTIME_FIELDS if key in node}
+        self.document['nodes'] = []
+        self.document['edges'] = []
+        self._edited(rebuild=True)
+        self._message(f'已清空 {count} 个节点及全部连线，可按 Ctrl+Z 撤销。已发起的任务仍按运行快照执行。')
+
     def copy_nodes(self):
         ids = {item.node['id'] for item in self.scene.selectedItems() if isinstance(item, NodeItem)}
         from .subgraphs import members
@@ -1388,6 +1439,8 @@ class CanvasPage(QtWidgets.QWidget):
         if ids:
             self._clipboard = copy.deepcopy({'nodes': [node for node in self.document['nodes'] if node['id'] in ids],
                                              'edges': [edge for edge in self.document['edges'] if edge['source'] in ids and edge['target'] in ids]})
+            for node in self._clipboard['nodes']:
+                for key in model.RUNTIME_FIELDS:node.pop(key, None)
             self._message(f'已复制 {len(ids)} 个节点。')
 
     def paste_nodes(self):
@@ -1401,8 +1454,8 @@ class CanvasPage(QtWidgets.QWidget):
             node['id'] = ids[node['id']]
             node['x'] += 40
             node['y'] += 40
+            for key in model.RUNTIME_FIELDS:node.pop(key, None)
             node['results'], node['fingerprint'], node['status'] = [], '', 'IDLE'
-            node.pop('_ui_stale', None)
         for edge in graph['edges']:
             edge.update(id=uuid.uuid4().hex, source=ids[edge['source']], target=ids[edge['target']])
         self.document['nodes'].extend(graph['nodes'])
@@ -1435,6 +1488,10 @@ class CanvasPage(QtWidgets.QWidget):
     def _restore_edit(self, restored):
         selected={item.node['id'] for item in self.scene.selectedItems() if isinstance(item,NodeItem)}
         live_nodes={node['id']:node for node in self.document['nodes']}
+        restored_ids = {node['id'] for node in restored['nodes']}
+        for key, node in live_nodes.items():
+            if key not in restored_ids:
+                self._removed_runtime[key] = {field: copy.deepcopy(node[field]) for field in RUNTIME_FIELDS if field in node}
         runtime = dict(self._removed_runtime)
         runtime.update(live_nodes)
         restored['run'] = copy.deepcopy(self.document.get('run', {}))
@@ -1468,11 +1525,13 @@ class CanvasPage(QtWidgets.QWidget):
         if self._undo:
             self._redo.append(self._edit_snapshot())
             self._restore_edit(self._undo.pop())
+            self._prune_removed_runtime()
 
     def redo(self):
         if self._redo:
             self._undo.append(self._edit_snapshot())
             self._restore_edit(self._redo.pop())
+            self._prune_removed_runtime()
 
     def _drop_files(self, paths, position):
         groups = {}
@@ -1510,8 +1569,8 @@ class CanvasPage(QtWidgets.QWidget):
         if self.document['nodes']:
             self._edited()
 
-    def save(self, *unused, automatic=False):
-        if not automatic and not self._validate_inline():return False
+    def save(self, *unused, automatic=False, validation_scope=None):
+        if not automatic and not self._flush_editors(validation_scope):return False
         self._autosave.stop()
         canvas_id = self.document['id']
         if self._is_deleted(canvas_id):
@@ -1519,6 +1578,8 @@ class CanvasPage(QtWidgets.QWidget):
             if automatic:
                 return True
         try:
+            self.save_state.setText('正在保存…')
+            self.document['view'] = self.view.view_state()
             model.normalize_app_urls(self.document)
             self.engine.save_document(self.document, explicit=not automatic)
             current = self.engine.document(canvas_id)
@@ -1530,43 +1591,50 @@ class CanvasPage(QtWidgets.QWidget):
             self._watch_workflow_directory()
             self._dirty = False
             self._refresh_missing_apps()
-            self.save_state.setText('已保存到本地')
+            self.save_state.setText('已保存 · ' + QtCore.QTime.currentTime().toString('HH:mm:ss'))
+            self.save_state.setToolTip(str(self.store.path_for(canvas_id)))
             return True
         except (OSError, ValueError, TypeError, RuntimeError) as error:
             if automatic and self._is_deleted(canvas_id):
                 self._mark_workflow_deleted(canvas_id)
                 return True
             self.save_state.setText('保存失败')
+            self.save_state.setToolTip(str(error))
             self._message(f'保存失败：{error}')
             return False
 
     def new_canvas(self):
-        if self._dirty and not self.save(automatic=True):
+        if not self._save_before_switch():
             return
         self._set_document(model.new_document())
 
     def open_canvas(self):
-        if self._dirty and not self.save(automatic=True):
+        if self._package_busy:
+            self._message('正在读取或保存工作流，请等待完成。');return
+        if not self._save_before_switch():
             return
+        from .workflow_library import WorkflowLibrary
+        dialog = WorkflowLibrary(self)
         try:
-            path, _ = QtWidgets.QFileDialog.getOpenFileName(self, '打开工作流 JSON', str(self.store.root), 'AetherLoom 工作流 (*.json)')
-            if not path:
-                return
-            doc = self.store.load(path) if Path(path).resolve().parent == self.store.root else self.store.import_workflow(path)
-            self._set_document(doc)
-        except (OSError, ValueError, TypeError, KeyError) as error:
-            self._message(f'打开工作流失败：{error}')
+            if dialog.exec_() == QtWidgets.QDialog.Accepted:self._open_path(dialog.selected_path)
+        finally:dialog.deleteLater()
+
+    def _open_path(self, path):
+        if not path or self._package_busy:return
+        path = Path(path).resolve()
+        if not self._save_before_switch():return
+        self._start_package('open', lambda: self.store.load(path) if path.parent == self.store.root else self.store.import_workflow(path))
 
     def save_as(self):
         if self._package_busy:
             self._message('正在处理工作流，请等待完成。')
             return
-        if not self.save():
-            return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, '工作流另存为', self.document['name'] + '.aetherloom.json', 'AetherLoom 工作流 (*.json)')
-        if path:
+        if not self._flush_editors():return
+        name, accepted = QtWidgets.QInputDialog.getText(self, '保存画布副本', '副本名称（仅复制节点设置与连线，运行快照独立）', text=self.document['name'] + ' 副本')
+        if accepted and name.strip():
             snapshot = copy.deepcopy(self.document)
-            self._start_package('export', lambda: self.store.export_workflow(snapshot, path))
+            # A copy can rescue edits even if the original file has a conflict.
+            self._start_package('copy', lambda: self.store.duplicate_workflow(snapshot, name))
 
     def import_canvas(self):
         if self._package_busy:
@@ -1575,7 +1643,7 @@ class CanvasPage(QtWidgets.QWidget):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, '导入工作流 JSON', '', 'AetherLoom 工作流 (*.json)')
         if not path:
             return
-        if self._dirty and not self.save(automatic=True):
+        if not self._save_before_switch():
             return
         self._start_package('import', lambda: self.store.import_workflow(path))
 
@@ -1583,17 +1651,20 @@ class CanvasPage(QtWidgets.QWidget):
         if self._package_busy:
             self._message('正在处理工作流，请等待完成。')
             return
-        if not self.save(automatic=True):
+        if not self._flush_editors():
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, '导出工作流 JSON', self.document['name'] + '.aetherloom.json', 'AetherLoom 工作流 (*.json)')
         if not path:
             return
+        if not Path(path).suffix:path += '.json'
         snapshot = copy.deepcopy(self.document)
         self._start_package('export', lambda: self.store.export_workflow(snapshot, path))
 
     def _start_package(self, kind, operation):
         self._package_busy = True
-        self._message('正在导入工作流…' if kind == 'import' else '正在保存工作流 JSON…')
+        self._package_origin = (self.document['id'], getattr(self, '_document_epoch', 0))
+        self._package_edit_serial = getattr(self, '_edit_serial', 0)
+        self._message('正在读取工作流…' if kind in ('import', 'open') else '正在保存工作流…')
         # A single package operation per page; no Qt widgets enter the worker.
         QtCore.QThreadPool.globalInstance().start(_PackageJob(kind, operation, self._package_signals))
 
@@ -1603,20 +1674,53 @@ class CanvasPage(QtWidgets.QWidget):
         if self._closed:
             return
         if error:
-            self._message(('导入失败：' if kind == 'import' else '导出失败：') + error)
-        elif kind == 'import':
+            self._message(('打开失败：' if kind in ('import', 'open') else '保存失败：') + error)
+        elif kind in ('import', 'open', 'copy'):
+            if self._package_origin != (self.document['id'], getattr(self, '_document_epoch', 0)):
+                self._message('工作流处理完成，可从“打开”列表选择；已保留当前画布。');return
+            if not self._flush_editors():
+                self._message('工作流读取完成；请先修正当前输入，再打开画布。');return
+            if kind == 'open' and result['id'] == self.document['id'] and self._package_edit_serial != getattr(self, '_edit_serial', 0):
+                self._message('读取期间当前画布已有新编辑，已保留编辑内容。');return
+            if kind == 'open' and not self.store.workflow_matches(result):
+                self._message('画布文件在读取期间被修改，请重新打开。');return
             # The user may continue editing while the workflow is being read.
-            if self._dirty and not self.save(automatic=True):
+            if kind != 'copy' and not self._save_before_switch():
                 self._message('工作流已导入到本地，请先保存当前编辑，再从“打开”选择它。')
                 return
+            if kind == 'copy' and self._dirty:
+                self._message('副本已保存到本地，当前编辑继续保留；可从“打开”选择副本。');return
             self._set_document(result)
             missing = sum(node['kind'] == 'app' and str(node.get('app', {}).get('webapp_id', '')) not in self.apps for node in result['nodes'])
-            self._message('工作流已导入。' + (f' {missing} 个 App 尚未添加到本机，请补齐后运行。' if missing else ''))
+            unsupported = sum(model.unknown_node(node) for node in result['nodes'])
+            skipped = sum(bool(node.get('_restored_missing_results')) for node in result['nodes'])
+            self._message(('画布副本已打开。' if kind == 'copy' else '画布已打开。') + (f' {skipped} 个节点的缺失结果已跳过。' if skipped else '') + (f' {missing} 个节点缺少应用或模型，请一键补齐。' if missing else '')
+                          + (f' {unsupported} 个节点类型暂不支持，已保留为占位节点。' if unsupported else ''))
         else:
-            self._message('工作流 JSON 已保存。输入素材和运行结果保留在独立恢复快照中。')
+            self._message('工作流 JSON 已导出，仅含节点设置与连线；不包含输入素材、运行结果或密钥。')
+
+    def _flush_editors(self, scope=None):
+        """Commit active controls before explicit saves/switches, not while typing."""
+        if not self._validate_inline(scope):return False
+        panel = self._inspector
+        if isinstance(panel, Inspector) and scope is not None and panel.node['id'] not in scope:panel = None
+        if isinstance(panel, Inspector) and not panel.validate():return False
+        if panel is not None:
+            for editor in panel.findChildren(QtWidgets.QLineEdit):
+                if editor.isEnabled() and not editor.isReadOnly() and editor.isModified():
+                    editor.editingFinished.emit();editor.setModified(False)
+        self._rename()
+        return True
+
+    def _save_before_switch(self):
+        if not self._flush_editors():return False
+        if self._dirty and self._is_deleted(self.document['id']):
+            self._message('当前画布文件已被删除；请先手动保存或保存副本，以保留当前编辑。');return False
+        return self.save(automatic=True) if self._dirty else True
 
     def _record_run_texts(self, target):
-        ids = model.ancestors(self.document, target) if target else {node['id'] for node in self.document['nodes']}
+        from .input_requirements import plan
+        ids = plan(self.document, target)['scope']
         for node in self.document['nodes']:
             if node['id'] not in ids:
                 continue
@@ -1638,8 +1742,9 @@ class CanvasPage(QtWidgets.QWidget):
                 else:
                     entries.append(TextSnapshot(str(value), 'run'))
 
-    def _validate_inline(self):
+    def _validate_inline(self, scope=None):
         for item in self.scene.nodes.values():
+            if scope is not None and item.node['id'] not in scope:continue
             if item.inline_proxy is not None:
                 editor = item.inline_proxy.widget()
                 if hasattr(editor, 'validate') and not editor.validate():
@@ -1648,9 +1753,37 @@ class CanvasPage(QtWidgets.QWidget):
                     return False
         return True
 
+    def _commit_valid_text_drafts(self, scope=None):
+        # InlineText and media editors do not wrap an Inspector. Search the
+        # actual widget so every inline editor can participate safely.
+        panels = [item.inline_proxy.widget() for key, item in self.scene.nodes.items()
+                  if (scope is None or key in scope) and item.inline_proxy is not None]
+        if isinstance(self._inspector, Inspector) and (scope is None or self._inspector.node['id'] in scope):
+            panels.append(self._inspector)
+        for panel in panels:
+            for editor in panel.findChildren(QtWidgets.QLineEdit):
+                if editor.isEnabled() and not editor.isReadOnly() and editor.isModified() and editor.hasAcceptableInput():
+                    editor.editingFinished.emit()
+                    editor.setModified(False)
+
     def run_canvas(self, target=None, force=False):
-        if not self._validate_inline():return
-        if isinstance(self._inspector, Inspector) and not self._inspector.validate():
+        from .input_requirements import plan, refresh
+        try:
+            requested = model.execution_scope(self.document, target)
+            # Commit valid text drafts before deciding whether local input is
+            # missing, without validating unrelated or pruned numeric editors.
+            self._commit_valid_text_drafts(requested)
+            input_plan = plan(self.document, target)
+            scope = input_plan['scope']
+        except ValueError as error:
+            self._message(f'无法运行：{error}');return
+        refresh(self)
+        if not scope:
+            self.save(automatic=True)
+            self._message('本次没有输入完整的执行分支；已标出缺少输入的节点，保留上次预览。')
+            return
+        if not self._validate_inline(scope):return
+        if isinstance(self._inspector, Inspector) and self._inspector.node['id'] in scope and not self._inspector.validate():
             self._message('请先修正节点中未完成或无效的数值。')
             return
         self._rename()
@@ -1660,14 +1793,17 @@ class CanvasPage(QtWidgets.QWidget):
             if not self.document['nodes']:
                 raise ValueError('请先添加节点并设置输入。')
             model.validate_document(self.document)
+            input_plan = plan(self.document, target)
+            scope = input_plan['scope']
             self._record_run_texts(target)
-            if not self.save():
+            if not self.save(validation_scope=scope):
                 return
             batches = 1 if target else self.document.get('batch_count', 1)
             self.workflow_queue.enqueue(self.document, target=target, force=force, batch_count=batches,
                                         prepare_app=self._prepare_node)
             self._sync_actions()
-            self._message(f'已加入工作流队列，共 {batches} 批；将按加入顺序运行并同步 App 输出卡片。')
+            self._message(f'已加入工作流队列，共 {batches} 批、{len(scope)} 个节点。'
+                          + (f' {len(input_plan["issues"])} 个节点缺少输入，对应分支本次跳过，旧预览保留。' if input_plan['issues'] else ''))
         except (OSError, ValueError, TypeError, RuntimeError) as error:
             self._message(f'无法运行：{error}')
 
@@ -1693,9 +1829,12 @@ class CanvasPage(QtWidgets.QWidget):
         for node in self.document['nodes']:
             incoming = nodes.get(node['id'])
             if incoming:
+                if incoming.get('status') in ('SUCCESS', 'REUSED') and not incoming.get('stale'):
+                    node.pop('_ui_stale', None)
                 changed = node.get('results') != incoming.get('results')
                 result_changed |= changed
                 for key in RUNTIME_FIELDS:
+                    if key == 'results' and not changed:continue
                     if key in incoming:
                         node[key] = copy.deepcopy(incoming[key])
                 if changed:
@@ -1707,19 +1846,21 @@ class CanvasPage(QtWidgets.QWidget):
                         node['_restored_missing_results'] = True
         self.scene.refresh_nodes(self.document)
         self._sync_actions()
-        if result_changed and isinstance(self._inspector, Inspector) and self._selection_identity:
+        if isinstance(self._inspector, Inspector) and self._selection_identity:
             selected = next((node for node in self.document['nodes'] if node['id'] == self._selection_identity[1]), None)
             if selected:
                 # Runtime updates must not destroy in-progress numeric/text drafts.
-                self._inspector.update_results(selected.get('results', []))
+                self._inspector.update_results(selected.get('results', []), node=selected)
         run = self.document.get('run', {})
         if run:
             status = STATUS_NAMES.get(run.get('status', ''), run.get('status', ''))
-            completed = sum(node.get('status') in ('SUCCESS', 'REUSED', 'SKIPPED') for node in self.document['nodes'])
-            skipped = sum(node.get('status') == 'SKIPPED' for node in self.document['nodes'])
+            states = list(run.get('nodes', {}).values())
+            completed = sum(node.get('status') in ('SUCCESS', 'REUSED', 'SKIPPED') for node in states)
+            skipped = sum(node.get('status') == 'SKIPPED' for node in states)
             batches = run.get('batch_count', 1)
             batch_index = run.get('batch_index', 0) + 1
-            self.status_label.setText(f'第 {batch_index}/{batches} 批 · {completed} / {len(self.document["nodes"])} 节点已处理'
+            self.status_label.setText(f'第 {batch_index}/{batches} 批 · {completed} / {len(states)} 节点已处理'
+                                      + (f' · {len(run["input_issues"])} 个缺少输入的节点及其分支未运行' if run.get('input_issues') else '')
                                       + (f' · {skipped} 个已跳过' if skipped else '') + (f' · {status}' if status else ''))
 
     def _batch_count_changed(self, value):
@@ -1745,11 +1886,12 @@ class CanvasPage(QtWidgets.QWidget):
             self.batch_spin.setValue(batch_count)
             del blocker
         self.run_action.setText('加入队列' if busy or running else '运行画布')
-        self.run_action.setToolTip(f'将当前设置固化为新的工作流组并加入队尾，共 {batch_count} 批')
+        self.run_action.setToolTip(f'按输出节点及其所需上游执行，共 {batch_count} 批；独立 App / API 也属于输出节点。')
         self.stop_action.setText('取消中…' if canceling and not can_cancel else '全部终止')
         self.stop_action.setEnabled(can_cancel)
         self.undo_action.setEnabled(bool(self._undo))
         self.redo_action.setEnabled(bool(self._redo))
+        self.clear_action.setEnabled(bool(self.document['nodes'] or self.document['edges']))
         self._place_inspector()
 
     def _message(self, text):
@@ -1953,6 +2095,8 @@ class CanvasPage(QtWidgets.QWidget):
     def shutdown(self):
         if self._closed:
             return
+        self._commit_valid_text_drafts()
+        self._rename()
         if self._dirty:
             self.save(automatic=True)
         self._prune_workflows()

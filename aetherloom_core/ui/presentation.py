@@ -777,6 +777,10 @@ class PresentationMixin:
 
     def _refresh_preview_placeholder(self, lbl):
         """Render a theme-aware placeholder into a preview QLabel and clear any saved path."""
+        from aetherloom_core.image_input_preview import ImageInputPreview
+        if isinstance(lbl, ImageInputPreview):
+            lbl.update()
+            return
         try:
             if lbl is None:
                 return

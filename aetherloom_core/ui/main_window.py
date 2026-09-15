@@ -1,6 +1,7 @@
 """Main window lifecycle and coordination."""
 from aetherloom_core.ui.compare import CompareWindow
 from aetherloom_core.resources import DEFAULT_EXPAND_SYSTEM_PROMPT
+from aetherloom_core.resources import DEFAULT_POLISH_SYSTEM_PROMPT
 from aetherloom_core.resources import DEFAULT_IMAGE_REVERSE_PROMPT
 from aetherloom_core.tasks.media import FileInfoJob
 from aetherloom_core.resources import IMAGE_EXTS
@@ -143,6 +144,9 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
             if isinstance(self.settings, dict):
                 if not self.settings.get('expand_system_prompt'):
                     self.settings['expand_system_prompt'] = DEFAULT_EXPAND_SYSTEM_PROMPT
+                polish_prompt = self.settings.get('polish_system_prompt')
+                if not isinstance(polish_prompt, str) or not polish_prompt.strip():
+                    self.settings['polish_system_prompt'] = DEFAULT_POLISH_SYSTEM_PROMPT
                 if not self.settings.get('image_reverse_prompt'):
                     self.settings['image_reverse_prompt'] = DEFAULT_IMAGE_REVERSE_PROMPT
                 if not self.settings.get('image_reverse_prompt'):

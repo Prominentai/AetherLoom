@@ -618,12 +618,9 @@ class TaskLifecycle:
             code = getattr(error, 'code', None)
             if context.get('cancel_acknowledged') and str(code) in {'805', '807', '423', '1004'}:
                 remote_status = 'CANCELED'
-            elif code is not None:
-                try:
-                    safe_code = str(int(code))
-                except (ValueError, TypeError, OverflowError):
-                    safe_code = '未知'
-                self._note(context['webapp_id'], task_id, '取消尚未确认：状态查询返回错误码 ' + safe_code)
+            else:
+                from api_calls.call_rh import query_error_detail
+                self._note(context['webapp_id'], task_id, '取消尚未确认：' + query_error_detail(error, context.get('api_key')))
         if not self._recovery_stopped(task_id):
             self._cancel_status_result(task_id, context, remote_status)
 
@@ -704,6 +701,8 @@ class TaskLifecycle:
                 # pending queue. Long decodes never leave queued stale URLs.
                 outputs = self._validate(self._api().get_outputs(
                     context['api_key'], task_id, base_url=context['base_url'], timeout=30))
+                if outputs.get('query_warning'):
+                    self._note(webapp_id, task_id, outputs['query_warning'])
                 output_records = outputs.get('data')
                 if self._cancelled(task_id):
                     return
@@ -755,11 +754,12 @@ class TaskLifecycle:
                 delay = min(300, 30 * 2 ** min(count - 1, 4))
                 self._download_retry_due[task_id] = time.monotonic() + delay
             self._status(webapp_id, task_id, 'DOWNLOAD_FAILED')
-            # Downloader errors are sanitized at their boundary. Other
-            # exceptions can contain credentials/URLs; expose only the type.
-            detail = str(exc) if isinstance(exc, OutputDownloadError) else type(exc).__name__
+            # Downloader errors are sanitized at their boundary; query errors
+            # retain safe HTTP/business details. Unknown exceptions show type only.
+            from api_calls.call_rh import query_error_detail
+            detail = str(exc) if isinstance(exc, OutputDownloadError) else query_error_detail(exc, context.get('api_key'))
             self._note(webapp_id, task_id,
-                       f'输出下载失败，{delay} 秒后重试：{detail[:240]}')
+                       f'输出下载失败，{delay} 秒后重试：{detail[:450]}')
         finally:
             if output_records and self.receipts_finished(task_id):
                 cleanup_output_receipts(task_id, output_records, context['output_dir'])
@@ -806,6 +806,7 @@ class TaskLifecycle:
         webapp_id = context['webapp_id']
         deferred = False
         query = None
+        query_warning = ''
         try:
             if self._recovery_stopped(task_id):
                 return
@@ -824,6 +825,7 @@ class TaskLifecycle:
                     context['api_key'], task_id, base_url=context['base_url'], timeout=15))
                 remote_status = reply.get('data')
                 query = reply.get('query')
+                query_warning = reply.get('query_warning') or ''
             remote_status = remote_status.strip().upper() if isinstance(remote_status, str) else ''
             if remote_status == 'CANCELLED':
                 remote_status = 'CANCELED'
@@ -840,6 +842,7 @@ class TaskLifecycle:
                     self.store.put(task_id, context)
                     self.owner._rh_task_contexts[task_id] = context
                 self._status(webapp_id, task_id, 'DOWNLOADING')
+                if query_warning:self._note(webapp_id, task_id, query_warning)
                 if background_download:
                     with self.lock:
                         if not self._cancelled(task_id):
@@ -850,12 +853,16 @@ class TaskLifecycle:
                     self._download_task(task_id, context)
             elif remote_status in ('FAILED', 'CANCELED', 'QUEUED', 'RUNNING'):
                 self._status(webapp_id, task_id, remote_status)
+                if query_warning:self._note(webapp_id, task_id, query_warning)
                 self.poll_progress(task_id, webapp_id, context['api_key'], context['base_url'], remote_status, query)
             else:
                 self._status(webapp_id, task_id, 'POLL_TIMEOUT')
-        except Exception:
+                self._note(webapp_id, task_id, '任务状态查询失败：接口返回无法识别的任务状态；将自动重试')
+        except Exception as error:
             if not self._cancelled(task_id):
                 self._status(webapp_id, task_id, 'POLL_TIMEOUT')
+                from api_calls.call_rh import query_error_detail
+                self._note(webapp_id, task_id, '任务状态查询失败：' + query_error_detail(error, context.get('api_key')) + '；将自动重试')
         finally:
             with self.lock:
                 self._recovery_workers.pop(task_id, None)

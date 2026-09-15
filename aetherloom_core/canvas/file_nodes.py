@@ -18,6 +18,7 @@ def execute(node, prepared, batches, stop):
         path = Path(source['path']) if physical else Path(source.get('name') or '文本结果.txt')
         if physical and not path.is_file():raise FileNotFoundError('文件不存在：' + str(path))
         if not physical and 'text' not in source:raise ValueError('结果没有可读取的文件或文本')
+        path = Path(source.get('_archive_name') or path.name)
         if node['kind'] == 'filename':
             params = node.get('params', {})
             mode = params.get('read_mode', 'full' if params.get('include_extension', False) else 'name')
@@ -46,6 +47,7 @@ def execute(node, prepared, batches, stop):
             item['_content_type'] = model.result_type(source)
             item['type'] = item['kind'] = item['_content_type']
             item.pop('name', None)
+            item.pop('_archive_name', None)
             # Keep actual content type: changing the suffix does not transcode.
             item['index'] = len(results)
         results.append(item)

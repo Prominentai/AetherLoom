@@ -190,11 +190,13 @@ class Inspector(QtWidgets.QWidget):
             interrupted.setObjectName('canvasMuted')
             self.form.addWidget(interrupted)
         if missing_app:
-            label = QtWidgets.QLabel('此 App 尚未添加到本机。添加后保留当前节点的独立参数。')
+            from aetherloom_core.rh_model_apps import LABELS
+            name = LABELS.get(node.get('app', {}).get('backend', 'rh_app'), '应用')
+            label = QtWidgets.QLabel(f'此{name}尚未添加到本机。补齐后保留当前节点的独立参数。')
             label.setWordWrap(True)
             label.setObjectName('canvasWarning')
             self.form.addWidget(label)
-            self.install_button = QtWidgets.QPushButton('添加此 App')
+            self.install_button = QtWidgets.QPushButton('补齐此' + name)
             self.install_button.clicked.connect(lambda: self.install_requested.emit(node['id']))
             self.form.addWidget(self.install_button)
         elif changed_definition:
@@ -206,6 +208,21 @@ class Inspector(QtWidgets.QWidget):
             rebind.clicked.connect(lambda: self.rebind_requested.emit(node['id']))
             self.form.addWidget(rebind)
         self.decode_group = None
+        from .model import unknown_node
+        if unknown_node(node):
+            label = QtWidgets.QLabel('当前客户端不支持节点类型：' + node['kind'] + '\n参数、原始类型和连线已保留。请更新客户端，或添加兼容节点后重新连接。')
+            label.setTextFormat(QtCore.Qt.PlainText);label.setWordWrap(True);label.setObjectName('canvasWarning')
+            self.form.addWidget(label)
+            import json
+            parameters = QtWidgets.QPlainTextEdit()
+            parameters.setReadOnly(True)
+            parameters.setPlainText(json.dumps(node.get('params', {}), ensure_ascii=False, indent=2)[:16000])
+            parameters.setMinimumHeight(180);parameters.setToolTip('参数只读预览（最多展示 16000 字符）；保存保留完整原始数据。')
+            self.form.addWidget(parameters)
+            self.form.addStretch(1)
+            if self.tabs is not None:
+                while self.tabs.count()>1:self.tabs.removeTab(self.tabs.count()-1)
+            return
         from .model import MODEL_KINDS
         if node['kind'] in MODEL_KINDS:
             if embedded:
@@ -290,7 +307,8 @@ class Inspector(QtWidgets.QWidget):
             overwrite.toggled.connect(lambda value:self.changed.emit('params.overwrite', value))
             enabled.toggled.connect(overwrite.setEnabled)
             self.form.addWidget(overwrite)
-            self.form.addWidget(QtWidgets.QLabel('保存目录'))
+            directory_label = QtWidgets.QLabel('保存目录')
+            self.form.addWidget(directory_label)
             row = QtWidgets.QHBoxLayout()
             directory = QtWidgets.QLineEdit(node.get('params', {}).get('save_directory', ''))
             directory.setObjectName('canvasSaveDirectory')
@@ -313,6 +331,14 @@ class Inspector(QtWidgets.QWidget):
             default_path = default_directory(model_owner.output_dir, canvas_doc) if model_owner else '输出目录/canvases/画布名称_标识'
             hint = QtWidgets.QLabel('默认不保存，仅预览。保存时沿用输入名称；修改名称请在上游使用文件重命名节点。重名覆盖默认关闭，重名添加 (1)、(2)…；开启覆盖后替换同名文件。\n默认目录：' + default_path)
             hint.setWordWrap(True);hint.setObjectName('canvasMuted');self.form.addWidget(hint)
+            if embedded:
+                enabled.setToolTip(hint.text())
+                hint.hide()
+                def show_save_options(checked):
+                    for widget in (overwrite, directory_label, directory, browse):
+                        widget.setVisible(checked)
+                show_save_options(enabled.isChecked())
+                enabled.toggled.connect(show_save_options)
         elif node['kind'] == 'filename':
             mode = RhEnumComboBox();mode.setObjectName('canvasFilenameMode')
             for label, value in [('只读取文件名', 'name'), ('只读取扩展名', 'extension'), ('全部读取', 'full')]:mode.addItem(label, value)
@@ -384,7 +410,7 @@ class Inspector(QtWidgets.QWidget):
             hint.setWordWrap(True)
             hint.setObjectName('canvasMuted')
             self.form.addWidget(hint)
-        self.form.addStretch(1)
+        if node['kind'] != 'image':self.form.addStretch(1)
         if embedded:return
         self.form = self.tab_forms[1]
         self._other_options(node)
@@ -671,6 +697,10 @@ class Inspector(QtWidgets.QWidget):
             self.changed.emit('params.' + key, path)
 
     def _files(self, node):
+        if node['kind'] == 'image':
+            from .image_input_ui import build
+            build(self, node)
+            return
         hint = QtWidgets.QLabel('选择、输入路径或拖入文件／文件夹。仅接收本节点支持的格式；文件夹在运行时读取当前层匹配文件，按文件名排序，不递归子文件夹。拖动条目可调整顺序。')
         hint.setWordWrap(True)
         hint.setObjectName('canvasMuted')
@@ -736,6 +766,7 @@ class Inspector(QtWidgets.QWidget):
             files.set_paths(paths);files.setCurrentRow(index)
             files.files_changed.emit(paths)
             self.changed.emit('params.masks',[value for value in masks if not matches(value,path)]+[changed])
+            if hasattr(self, 'refresh_input_preview'):self.refresh_input_preview()
 
     def _add_files(self, files, kind):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self.dialog_parent, '添加素材', '', FILE_FILTERS[kind])
@@ -804,26 +835,31 @@ class Inspector(QtWidgets.QWidget):
         row.addWidget(save_button)
         self.form.addLayout(row)
         def update_buttons():
-            open_button.setEnabled(listing.currentItem() is not None)
-            save_button.setEnabled(bool(listing.selectedItems()))
+            from .preview_data import can_open
+            open_button.setEnabled(listing.currentItem() is not None and can_open(listing.currentItem().data(QtCore.Qt.UserRole)))
+            selected = listing.selectedItems()
+            save_button.setEnabled(bool(selected) and all(can_open(item.data(QtCore.Qt.UserRole)) for item in selected))
             copy_button.setVisible(listing.currentItem() is not None and browser.stack.currentWidget() is browser.text)
         listing.itemSelectionChanged.connect(update_buttons)
         listing.currentItemChanged.connect(update_buttons)
         update_buttons()
 
-    def update_results(self, results):
+    def update_results(self, results, node=None):
         if hasattr(self, 'compare_view'):self.compare_view.set_results(results)
         if self.results_list is None:
             return
-        self.results_title.setText(f'最近结果 · {len(results)}' + (' 个 Batch' if results and isinstance(results[0], dict) and results[0].get('type') == 'batch' else ''))
+        self.result_browser.node = self.node if node is None else node
         self.result_browser.results = results
         self.result_browser.refresh()
+        index = self.result_browser._index
+        self.results_title.setText(f'最近结果 · {index.total} 项' + (f' · 含 {index.batch_count} 组 Batch' if index.batch_count else ''))
 
     def _open_result(self, result):
         from .preview_data import path_of, text_of
         path = path_of(result)
         if path and os.path.exists(path):
-            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
+            from aetherloom_core.hover_preview import open_external
+            open_external(path)
         elif any(key in result for key in ('text', 'value')):
             dialog = QtWidgets.QDialog(self)
             dialog.setWindowTitle('文本结果')

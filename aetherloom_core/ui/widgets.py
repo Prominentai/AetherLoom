@@ -37,6 +37,19 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
         else:
             super().insertFromMimeData(source)
 
+    def createStandardContextMenu(self, *args):
+        menu = super().createStandardContextMenu(*args)
+        from aetherloom_core.selection_text_tools import add_actions
+        add_actions(self, menu)
+        return menu
+
+    def contextMenuEvent(self, event):
+        self._hide_popup()
+        menu = self.createStandardContextMenu(event.pos())
+        menu.aboutToHide.connect(menu.deleteLater)
+        menu.popup(event.globalPos())
+        event.accept()
+
     def _completion_options(self):
         # Editors are initially parentless, then attached to cached RH pages.
         # Resolve the live owning window so both existing and new pages update.

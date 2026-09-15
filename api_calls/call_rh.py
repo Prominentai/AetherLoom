@@ -61,6 +61,52 @@ class RunningHubAPIError(RuntimeError):
         super().__init__(f"{operation} failed (code={code}): {message}")
 
 
+class RunningHubQueryError(RuntimeError):
+    """Both read-only query routes failed; retain the legacy business code."""
+
+    def __init__(self, primary, legacy, api_key):
+        self.code = getattr(legacy, 'code', None)
+        super().__init__('V2 查询失败：' + query_error_detail(primary, api_key)
+                         + '；旧版查询也失败：' + query_error_detail(legacy, api_key))
+
+
+def query_error_detail(error, api_key=None):
+    """UI-safe diagnostics, without response bodies or signed download URLs."""
+    if isinstance(error, requests.HTTPError):
+        status = getattr(error.response, 'status_code', None)
+        text = 'HTTP ' + str(status if status is not None else '错误')
+    elif isinstance(error, requests.Timeout):
+        text = '请求超时（Timeout）'
+    elif isinstance(error, requests.RequestException):
+        text = str(error) if str(error).endswith(('ConnectionError', 'SSLError', 'ProxyError')) else type(error).__name__
+    elif isinstance(error, (RunningHubAPIError, RunningHubResponseError, RunningHubQueryError)):
+        text = str(error)
+    else:
+        text = type(error).__name__
+    text = _safe_message(text, api_key)
+    text = re.sub(r'https?://[^\s<>]+', '[URL]', text)
+    text = re.sub(r'(?i)bearer\s+[^\s,;]+', 'Bearer [redacted]', text)
+    return ' '.join(text.split())[:450]
+
+
+def _query_unavailable(error):
+    if isinstance(error, requests.HTTPError):
+        code = getattr(error.response, 'status_code', None)
+    elif isinstance(error, RunningHubAPIError):
+        code = error.code
+    elif isinstance(error, requests.RequestException):
+        return True
+    elif isinstance(error, RunningHubResponseError):
+        return 'invalid JSON' in str(error) or 'missing code' in str(error)
+    else:
+        return False
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return False
+    return code in {404, 405, 408, 410, 429} or 500 <= code <= 599
+
+
 def normalize_base_url(base_url: str) -> str:
     """Normalize a host or HTTP(S) base URL, retaining an optional API path."""
     value = (base_url or '').strip()
@@ -271,7 +317,7 @@ def query_task(api_key: str, task_id: str, *, base_url: str = DEFAULT_BASE_URL,
     if status == 'CANCELLED':
         status = 'CANCELED'
     code = result.get('errorCode')
-    request_errors = {'401', '403', '429', '802', '806', '811', '1002', '1003', '1004', '1014'}
+    request_errors = {'401', '403', '429', '802', '806', '811', '1002', '1003', '1004', '1014'} | {str(c) for c in range(500,600)}
     if str(code or '') not in {'', '0'} and (status not in {'FAILED', 'CANCELED'} or str(code) in request_errors):
         raise RunningHubAPIError(operation, str(code), _safe_message(result.get('errorMessage') or 'Query rejected', api_key))
     if status not in {'QUEUED', 'RUNNING', 'SUCCESS', 'FAILED', 'CANCELED'}:
@@ -317,14 +363,53 @@ def _output_records(result):
 
 def get_status(api_key: str, task_id: str, *, base_url: str = DEFAULT_BASE_URL,
                timeout: int = 15) -> Dict[str, Any]:
-    result = query_task(api_key, task_id, base_url=base_url, timeout=timeout)
-    return dict(code=0, data=result['status'], query=result)
+    try:
+        result = query_task(api_key, task_id, base_url=base_url, timeout=timeout)
+        return dict(code=0, data=result['status'], query=result)
+    except Exception as error:
+        if not _query_unavailable(error):
+            raise
+        return _legacy_query('status', api_key, task_id, base_url, timeout, error)
 
 
 def get_outputs(api_key: str, task_id: str, *, base_url: str = DEFAULT_BASE_URL,
                 timeout: int = 30) -> Dict[str, Any]:
-    result = query_task(api_key, task_id, base_url=base_url, timeout=timeout)
-    return outputs_from_query(result)
+    try:
+        result = query_task(api_key, task_id, base_url=base_url, timeout=timeout)
+        return outputs_from_query(result)
+    except Exception as error:
+        if not _query_unavailable(error):
+            raise
+        return _legacy_query('outputs', api_key, task_id, base_url, timeout, error)
+
+
+def _legacy_query(endpoint, api_key, task_id, base_url, timeout, primary_error):
+    """One fallback on the original origin/key; never resubmit generation."""
+    operation = 'Query task legacy ' + endpoint
+    origin = site_base_url(base_url)
+    try:
+        result = _request_json('POST', origin + '/task/openapi/' + endpoint, operation,
+            headers={'Host': urlsplit(origin).netloc, 'Authorization': 'Bearer ' + api_key,
+                     'Content-Type': 'application/json'},
+            json={'apiKey': api_key, 'taskId': str(task_id)}, timeout=timeout)
+        validate_response(result, operation, api_key=api_key)
+        identity = accepted_task_id(result)
+        if identity is not None and identity != str(task_id):
+            raise RunningHubResponseError(operation + ' returned a mismatched taskId')
+        if endpoint == 'status':
+            value = result.get('data')
+            status = value.strip().upper() if isinstance(value, str) else ''
+            if status == 'CANCELLED':status = 'CANCELED'
+            if status not in {'QUEUED', 'RUNNING', 'SUCCESS', 'FAILED', 'CANCELED'}:
+                raise RunningHubResponseError(operation + ' returned an unknown task status')
+            result = dict(code=0, data=status,
+                          query=dict(taskId=str(task_id), status=status, netWssUrl=progress_connection_url(result)))
+        elif not isinstance(result.get('data'), list) or not all(isinstance(v, dict) for v in result['data']):
+            raise RunningHubResponseError(operation + ' returned an invalid output list')
+        result['query_warning'] = 'V2 查询不可用（' + query_error_detail(primary_error, api_key) + '），已使用同站点旧版接口'
+        return result
+    except Exception as legacy_error:
+        raise RunningHubQueryError(primary_error, legacy_error, api_key) from None
 
 
 def outputs_from_query(result):

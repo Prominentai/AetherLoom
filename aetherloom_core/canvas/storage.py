@@ -38,7 +38,7 @@ def _unsafe_component(part):
 def _atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', suffix='.tmp', dir=path.parent)
+    descriptor, temporary = tempfile.mkstemp(prefix='.canvas-', suffix='.tmp', dir=path.parent)
     try:
         with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
             json.dump(value, stream, ensure_ascii=False, indent=2, allow_nan=False)
@@ -123,12 +123,12 @@ def _visit_paths(document, transform, include_results=True):
         if isinstance(value,list):
             for item in value:masks(item)
         elif isinstance(value,dict):
-            if value.get('version') == 1 and 'sha256' in value and ('png' in value or 'path' in value):
+            if value.get('version') in (1, 2) and 'sha256' in value and ('png' in value or 'path' in value):
                 for key in ('source','path','import_path','paint_path','paint_import_path'):
                     if value.get(key):value[key]=transform(value[key],required=True)
             else:
                 for key,item in value.items():
-                    if key in ('source_path','mask_path','archive_path','original_path','paint_path','paint_temp_path','composite_path') and isinstance(item,str):value[key]=transform(item,required=True)
+                    if key in ('source_path','mask_path','mask_asset_path','archive_path','original_path','paint_path','paint_temp_path','composite_path') and isinstance(item,str):value[key]=transform(item,required=True)
                     else:masks(item)
     masks(document)
     for nodes in _node_sets(document):
@@ -352,6 +352,40 @@ class CanvasStore:
             except (OSError, ValueError, AttributeError):
                 continue
         return sorted(result, key=lambda item: item['modified'], reverse=True)
+
+    def catalog(self):
+        """Metadata only: never read runtime snapshots or resolve result files."""
+        cache = getattr(self, '_catalog_cache', {})
+        refreshed, result = {}, []
+        for path in self.root.glob('*.json'):
+            if path.name.startswith('.') or not _ID.fullmatch(path.stem):continue
+            try:
+                stat = path.stat();revision = (stat.st_mtime_ns, stat.st_size)
+                old = cache.get(path.name)
+                if old and old[0] == revision:entry = dict(old[1])
+                else:
+                    entry = dict(id=path.stem, name=path.stem, path=str(path), modified=stat.st_mtime, nodes=0, edges=0, error='')
+                    try:
+                        data = _read_json(path)
+                        if not isinstance(data, dict) or data.get('id') != path.stem or data.get('version') != VERSION:
+                            raise ValueError('不支持的版本或画布标识不一致')
+                        entry.update(name=str(data.get('name') or path.stem), nodes=len(data.get('nodes') or []), edges=len(data.get('edges') or []))
+                    except (OSError, ValueError, TypeError, AttributeError) as error:
+                        entry['error'] = '无法读取：' + str(error)[:180]
+                refreshed[path.name] = (revision, dict(entry))
+                entry['snapshot'] = self.runtime_path_for(path.stem).is_file()
+                result.append(entry)
+            except OSError:continue
+        self._catalog_cache = refreshed
+        return sorted(result, key=lambda item: item['modified'], reverse=True)
+
+    def duplicate_workflow(self, document, name):
+        """Independent configuration copy, without another canvas's run identity."""
+        duplicate = initialize_runtime(workflow_document(copy.deepcopy(document)))
+        duplicate['id'] = uuid.uuid4().hex
+        duplicate['name'] = str(name).strip() or '未命名画布'
+        self.save(duplicate)
+        return duplicate
 
     def _drop_runtime_secrets(self, canvas_ids):
         try:
@@ -756,7 +790,7 @@ class CanvasStore:
             if isinstance(value,list):
                 for item in value:portable_masks(item)
             elif isinstance(value,dict):
-                if value.get('version') == 1 and 'png' in value and 'sha256' in value:
+                if value.get('version') in (1, 2) and 'png' in value and 'sha256' in value:
                     # Draft settings are portable even before their first execution.
                     # The destination client materializes its own input/masks asset.
                     value.pop('path',None)

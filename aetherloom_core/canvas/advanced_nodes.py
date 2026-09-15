@@ -26,10 +26,24 @@ SCHEMAS = {
   choice('channel','读取通道','gray',[('gray','灰度'),('red','红'),('green','绿'),('blue','蓝'),('alpha','Alpha')]),
   field('invert','反相','bool',False)]),
  'attached_mask': ('读取图像遮罩','mask_tools',[]),
+ 'image_join_alpha': ('图像与遮罩合并（RGBA）','mask_tools',[]),
+ 'image_split_alpha': ('拆分图像与遮罩','mask_tools',[]),
+ 'image_mask_composite': ('按遮罩混合图像','mask_tools',[
+  field('x','横向位置','int',0,(0,16384)),field('y','纵向位置','int',0,(0,16384)),
+  field('resize_source','前景适应背景尺寸','bool',False)]),
+ 'mask_preview': ('遮罩与图像混合预览','mask_tools',[
+  field('opacity','遮罩显示透明度','float',.5,(0.,1.))]),
  'mask_to_image': ('MASK 转图像','mask_tools',[]),
  'mask_invert': ('遮罩反相','mask_tools',[]),
- 'mask_grow': ('遮罩扩张 / 收缩','mask_tools',[field('amount','像素（负值收缩）','int',8,(-64,64))]),
+ 'mask_grow': ('遮罩扩张 / 收缩','mask_tools',[field('amount','像素（负值收缩）','int',8,(-64,64)),
+  field('tapered_corners','削角扩张','bool',False)]),
  'mask_feather': ('遮罩羽化','mask_tools',[field('radius','模糊半径','float',4.,(0.,128.))]),
+ 'mask_grow_blur': ('遮罩高斯扩展','mask_tools',[
+  field('amount','扩张像素（负值收缩）','int',8,(-64,64)),field('radius','高斯羽化半径','float',4.,(0.,128.)),
+  field('tapered_corners','削角扩张','bool',False)]),
+ 'mask_edge_feather': ('遮罩四边羽化','mask_tools',[
+  field('left','左侧宽度','int',0,(0,16384)),field('top','顶部宽度','int',0,(0,16384)),
+  field('right','右侧宽度','int',0,(0,16384)),field('bottom','底部宽度','int',0,(0,16384))]),
  'mask_threshold': ('遮罩二值化','mask_tools',[field('threshold','阈值','float',.5,(0.,1.))]),
  'mask_resize': ('遮罩缩放','mask_tools',[
   field('width','宽度','int',512,(1,16384)),field('height','高度','int',512,(1,16384)),
@@ -66,6 +80,8 @@ SCHEMAS = {
   field('fps','帧率','float',24.,(.1,240.)),field('quality','CRF（越小越清晰）','int',18,(0,51))]),
  'subgraph': ('组合节点','utility',[]),
 }
+from . import bounding_nodes
+SCHEMAS.update(bounding_nodes.SCHEMAS)
 KINDS = frozenset(SCHEMAS)
 IMAGE_KINDS = frozenset(k for k in KINDS if k.startswith(('image_', 'mask_')) or k == 'attached_mask')
 VIDEO_KINDS = frozenset({'video_frames','video_assemble'})
@@ -73,9 +89,14 @@ PASS_KINDS = frozenset({'manual_select','branch'})
 
 
 def inputs(node):
+ if node['kind'] in bounding_nodes.KINDS:return bounding_nodes.inputs(node)
  kind=node['kind'];ports=[]
  if kind=='image_grid':ports=[('images','图像','image_input')]
  elif kind=='image_composite':ports=[('background','背景','image'),('foreground','前景','image'),('mask','遮罩','mask')]
+ elif kind=='mask_preview':ports=[('image','图像','image'),('mask','遮罩','mask')]
+ elif kind=='image_join_alpha':ports=[('image','图像','image'),('mask','遮罩','mask')]
+ elif kind=='image_split_alpha':ports=[('image','图像','image')]
+ elif kind=='image_mask_composite':ports=[('destination','背景','image'),('source','前景','image'),('mask','遮罩','mask')]
  elif kind in ('image_format','image_to_mask','attached_mask'):ports=[('image','图像','image')]
  elif kind.startswith('mask_'):ports=[('mask','遮罩','mask')]
  elif kind=='value_convert':ports=[('value','内容','any')]
@@ -92,6 +113,7 @@ def inputs(node):
 
 def output_type(node):
  kind=node['kind']
+ if kind=='mask_preview':return 'image'
  if kind in ('image_to_mask','attached_mask') or kind.startswith('mask_') and kind!='mask_to_image':return 'mask'
  if kind.startswith('image_') or kind=='mask_to_image':return 'image'
  if kind in ('json_extract','value_convert'):return node.get('params',{}).get('type','text')
@@ -141,10 +163,12 @@ def _size(size):
 
 
 def image_operation(node, batch, params, directory, stop):
+ if node['kind'] in bounding_nodes.KINDS:return bounding_nodes.operation(node,batch,params,directory,stop)
  from PIL import Image,ImageOps,ImageColor,ImageFilter,ImageChops
  from . import model
  from .utility_nodes import _image
  kind=node['kind'];directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
+ result_metadata={}
  def open_image(key):return _image(batch[key]['path'])
  def open_mask():
   if model.result_type(batch['mask'])!='mask':raise ValueError('请先使用“图像转 MASK”')
@@ -173,6 +197,49 @@ def image_operation(node, batch, params, directory, stop):
     alpha=stack.enter_context(ImageChops.multiply(alpha,mask))
    alpha=stack.enter_context(alpha.point(lambda x:round(x*float(params['opacity']))));foreground.putalpha(alpha)
    result.alpha_composite(foreground,(int(params['x']),int(params['y'])))
+  elif kind in ('image_join_alpha','image_split_alpha'):
+   if 'image' not in batch or kind=='image_join_alpha' and 'mask' not in batch:
+    raise ValueError('请连接图像和 MASK' if kind=='image_join_alpha' else '请连接图像')
+   image=stack.enter_context(open_image('image'))
+   if kind=='image_join_alpha':
+    mask=stack.enter_context(open_mask());mask=stack.enter_context(mask.resize(image.size,Image.Resampling.BILINEAR))
+    result=image;alpha=stack.enter_context(ImageOps.invert(mask));result.putalpha(alpha)
+   else:
+    alpha=stack.enter_context(image.getchannel('A'));mask=stack.enter_context(ImageOps.invert(alpha))
+    result=stack.enter_context(image.convert('RGB'))
+   mask_path=directory/'mask.png';mask.save(mask_path)
+   result_metadata.update(mask_path=str(mask_path),_processed_mask=True,_mask_nonempty=bool(mask.getbbox()))
+  elif kind=='image_mask_composite':
+   if 'destination' not in batch or 'source' not in batch:raise ValueError('请连接背景和前景图像')
+   with Image.open(batch['destination']['path']) as original:
+    mode='RGBA' if 'A' in original.getbands() or 'transparency' in original.info else 'RGB'
+   destination=stack.enter_context(open_image('destination'));result=stack.enter_context(destination.convert(mode))
+   source=stack.enter_context(open_image('source'));source=stack.enter_context(source.convert(mode))
+   if params['resize_source']:source=stack.enter_context(source.resize(result.size,Image.Resampling.BILINEAR))
+   mask=stack.enter_context(open_mask()) if 'mask' in batch else stack.enter_context(Image.new('L',source.size,255))
+   mask=stack.enter_context(mask.resize(source.size,Image.Resampling.BILINEAR))
+   # ComfyUI blends channels using MASK coverage; this is distinct from the
+   # existing alpha-composited foreground/background node.
+   result.paste(source,(int(params['x']),int(params['y'])),mask)
+  elif kind=='mask_preview':
+   image=stack.enter_context(open_image('image')) if 'image' in batch else None
+   mask=stack.enter_context(open_mask()) if 'mask' in batch else None
+   if mask is None and image is not None:
+    attached=batch['image'].get('mask_path')
+    if attached:
+     with Image.open(attached) as original:
+      _size(original.size);mask=stack.enter_context(original.convert('L'))
+    else:mask=stack.enter_context(ImageOps.invert(image.getchannel('A')))
+   if image is None:
+    if mask is None:raise ValueError('请连接图像或 MASK')
+    result=stack.enter_context(mask.convert('RGB'))
+   else:
+    mask=stack.enter_context(mask.resize(image.size,Image.Resampling.BILINEAR))
+    overlay=stack.enter_context(Image.new('RGBA',image.size,(88,180,255,0)))
+    alpha=stack.enter_context(mask.point(lambda value:round(value*float(params['opacity']))))
+    overlay.putalpha(alpha)
+    base=stack.enter_context(image.convert('RGB'));base=stack.enter_context(base.convert('RGBA'))
+    result=stack.enter_context(Image.alpha_composite(base,overlay))
   elif kind=='attached_mask':
    path=batch['image'].get('mask_path')
    if not path or not Path(path).is_file():raise ValueError('此图像没有附带遮罩')
@@ -192,7 +259,14 @@ def image_operation(node, batch, params, directory, stop):
    if kind=='mask_to_image':result=stack.enter_context(mask.convert('RGB'))
    elif kind=='mask_invert':result=stack.enter_context(ImageOps.invert(mask))
    elif kind=='mask_grow':
-    amount=int(params['amount']);result=stack.enter_context(mask.filter(ImageFilter.MaxFilter(2*amount+1) if amount>=0 else ImageFilter.MinFilter(-2*amount+1))) if amount else mask
+    from .mask_processing import grow
+    result=stack.enter_context(grow(mask,params['amount'],params['tapered_corners'],stop))
+   elif kind=='mask_grow_blur':
+    from .mask_processing import grow_blur
+    result=stack.enter_context(grow_blur(mask,params['amount'],params['radius'],params['tapered_corners'],stop))
+   elif kind=='mask_edge_feather':
+    from .mask_processing import feather_edges
+    result=stack.enter_context(feather_edges(mask,params,stop))
    elif kind=='mask_feather':result=stack.enter_context(mask.filter(ImageFilter.GaussianBlur(float(params['radius']))))
    elif kind=='mask_threshold':result=stack.enter_context(mask.point(lambda x:255 if x/255>=float(params['threshold']) else 0))
    elif kind=='mask_resize':
@@ -202,7 +276,7 @@ def image_operation(node, batch, params, directory, stop):
   check_stop(stop)
   suffix=params['format'] if kind=='image_format' else 'png';target=directory/('result.'+suffix)
   result.save(target,quality=int(params.get('quality',95)))
- return [dict(type=output_type(node),path=str(target))]
+ return [dict(type=output_type(node),path=str(target),**result_metadata)]
 
 
 def check_stop(stop):
@@ -278,5 +352,10 @@ def execute(node,directory,batches,stop):
   elif kind=='boolean':results=[dict(type='boolean',value=params['value'])]
   else:raise ValueError('此节点需由画布调度器执行')
   for result in results:
-   result.update(index=len(output),lineage=model.result_lineage(batch,node['id'],len(output)));output.append(result)
+   # The crop's image, box and mask describe the same input item. Their common
+   # origin must survive edits/filters so each patch returns to its own image.
+   origin_index = index if kind == 'image_crop_mask' else len(output)
+   origins = model.result_lineage(batch,node['id'],origin_index)
+   if kind == 'image_crop_mask':origins['__bounding_group__:' + node['id']] = str(index)
+   result.update(index=len(output),lineage=origins);output.append(result)
  check_stop(stop);return output

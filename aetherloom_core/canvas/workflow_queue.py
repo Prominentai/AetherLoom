@@ -377,7 +377,8 @@ class WorkflowQueue(QtCore.QObject):
     @staticmethod
     def _scope_nodes(document, target):
         order = model.validate_document(document)
-        scope = model.ancestors(document, target) if target else set(order)
+        from .input_requirements import plan
+        scope = plan(document, target)['scope']
         by_id = {node['id']: node for node in document['nodes']}
         return [dict(id=node_id, title=by_id[node_id].get('title', 'App'),
                      webapp_id=(by_id[node_id].get('app') or {}).get('webapp_id', ''),
@@ -393,6 +394,8 @@ class WorkflowQueue(QtCore.QObject):
         frozen = copy.deepcopy(document)
         frozen['run'] = {}
         model.validate_document(frozen)
+        from .input_requirements import plan
+        if not plan(frozen, target)['scope']:return None
         count = model.normalize_batch_count(1 if target else
             frozen.get('batch_count', 1) if batch_count is None else batch_count)
         nodes = self._scope_nodes(frozen, target)

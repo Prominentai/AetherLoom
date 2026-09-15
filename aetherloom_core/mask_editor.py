@@ -45,7 +45,7 @@ class MaskCanvas(QtWidgets.QWidget):
         self.offset = QtCore.QPointF()
         self.diameter = 40
         self.erasing = False
-        self.opacity = .55
+        self.opacity = .5
         self._space = False
         self._pan = None
         self._last = None
@@ -248,7 +248,7 @@ class MaskEditor(QtWidgets.QDialog):
         from .mask_assets import draft
         self.canvas.finish_stroke()
         try:
-            self.result_mask=draft(mask_alpha(self.canvas.mask),self.source_path)
+            self.result_mask=draft(mask_alpha(self.canvas.mask),self.source_path,rgb=self.canvas.rgb)
             if hasattr(self.canvas,'settings'):self.canvas.settings(self.result_mask)
             from .paths import current_dir
             owner=self.parentWidget().window() if self.parentWidget() else None
@@ -267,8 +267,8 @@ class MaskEditor(QtWidgets.QDialog):
     def import_mask(self):
         path,_=QtWidgets.QFileDialog.getOpenFileName(self,'导入遮罩','','图像 (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff *.gif);;所有文件 (*)')
         if not path:return
-        labels=['自动（透明图取反 Alpha，其余取亮度）','亮度（白色为选区）','Alpha（透明区域为选区）','红色通道','绿色通道','蓝色通道']
-        label,ok=QtWidgets.QInputDialog.getItem(self,'遮罩通道','尺寸不同时自动缩放至原图；灰度以 128 为阈值二值化。',labels,0,False)
+        labels=['自动（含 Alpha 时取反 Alpha，其余取亮度）','亮度（白色为选区）','Alpha（透明区域为选区）','红色通道','绿色通道','蓝色通道']
+        label,ok=QtWidgets.QInputDialog.getItem(self,'遮罩通道','尺寸不同时自动缩放至原图，保留灰度、软边缘和笔触不透明度。',labels,0,False)
         if not ok:return
         try:
             from .mask_assets import import_mask
@@ -315,6 +315,7 @@ def add_mask_button(layout, editor, parent=None, mask=None, on_change=None):
     button=QtWidgets.QPushButton('遮罩 / 绘画');button.setObjectName('rhMaskButton')
     button.setToolTip('编辑遮罩与 RGBA 绘画层；节点执行或应用提交时才保存图像文件')
     editor._aetherloom_mask=mask
+    editor._mask_button=button
     def open_editor():
         value=edit_mask(editor.text().strip(),parent,getattr(editor,'_aetherloom_mask',None))
         if value:

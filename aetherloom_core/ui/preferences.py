@@ -78,6 +78,50 @@ def _header(frame, title, description, eyebrow):
         layout.addWidget(label)
 
 
+def _polish_prompt_card(window):
+    from aetherloom_core.resources import DEFAULT_POLISH_SYSTEM_PROMPT
+    card = QtWidgets.QFrame()
+    card.setObjectName('settingsCard')
+    layout = QtWidgets.QVBoxLayout(card)
+    heading = QtWidgets.QHBoxLayout()
+    title = QtWidgets.QLabel('润色系统提示词')
+    title.setObjectName('settingsCardTitle')
+    heading.addWidget(title)
+    heading.addStretch()
+    reset = QtWidgets.QPushButton('恢复默认')
+    reset.setAccessibleName('恢复默认润色系统提示词')
+    heading.addWidget(reset)
+    layout.addLayout(heading)
+    hint = QtWidgets.QLabel('用于 App 应用和画布节点文本输入框中选中文字后的右键“润色”；留空使用默认提示词，修改仅影响新请求。')
+    hint.setObjectName('settingsHint')
+    hint.setWordWrap(True)
+    layout.addWidget(hint)
+    editor = QtWidgets.QTextEdit()
+    editor.setAcceptRichText(False)
+    editor.setFixedHeight(210)
+    editor.setAccessibleName('润色系统提示词')
+    editor.setPlaceholderText(DEFAULT_POLISH_SYSTEM_PROMPT)
+    prompt = window.settings.get('polish_system_prompt')
+    if not isinstance(prompt, str) or not prompt.strip():
+        prompt = DEFAULT_POLISH_SYSTEM_PROMPT
+    editor.setPlainText(prompt)
+    window.polish_system_prompt_edit = editor
+    window.polish_system_prompt_reset = reset
+    layout.addWidget(editor)
+    timer = QtCore.QTimer(card)
+    timer.setSingleShot(True)
+    timer.setInterval(400)
+    timer.timeout.connect(window._save_settings)
+
+    def changed():
+        window.settings['polish_system_prompt'] = editor.toPlainText()
+        timer.start()
+
+    editor.textChanged.connect(changed)
+    reset.clicked.connect(lambda: editor.setPlainText(DEFAULT_POLISH_SYSTEM_PROMPT))
+    return card
+
+
 def _image_prompt_card(window, category, title):
     from aetherloom_core.image_prompts import DEFAULTS, options
     key, default = DEFAULTS[category]
@@ -172,6 +216,8 @@ def configure_settings(window, layout, column, hero):
     window._settings_tabs = tabs
     # Prompt cards start at index six; preserve the existing category mapping.
     column.insertWidget(6, _completion_card(window))
+    expand_card = window.expand_system_prompt_edit.parentWidget()
+    column.insertWidget(column.indexOf(expand_card) + 1, _polish_prompt_card(window))
     window.image_prompt_fields = {}
     column.addWidget(_image_prompt_card(window, 'text2img', 'Agent 图像生成提示词'))
     column.addWidget(_image_prompt_card(window, 'image_edit', 'Agent 图像编辑提示词'))

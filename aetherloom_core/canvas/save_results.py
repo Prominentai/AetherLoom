@@ -47,7 +47,8 @@ def save_results(results, directory, stop=None, overwrite=False, *, names=None):
             saved.append(item)
             continue
         if not source and 'text' not in item:raise ValueError('结果没有可保存的本地文件或文本')
-        name = names[index] if names is not None else source.name if source else item.get('name') or '文本结果.txt'
+        name = names[index] if names is not None else item.get('_archive_name') or (source.name if source else item.get('name') or '文本结果.txt')
+        item.pop('_archive_name', None)
         validate_filename(name)
         temporary = target = None
         committed = False

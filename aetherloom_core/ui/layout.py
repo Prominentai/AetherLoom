@@ -1829,7 +1829,7 @@ class MainLayoutMixin:
         self.pages.addWidget(api_page)
 
         # --- Page: Runninghub 应用 (placeholder empty page) ---
-        from aetherloom_core.rh_dashboard import Dashboard, AppCard, TaskPanel
+        from aetherloom_core.rh_dashboard import Dashboard, AppCard
         self._rh_dashboard = Dashboard(self)
         runninghub_page = QtWidgets.QWidget()
         runninghub_layout = QtWidgets.QVBoxLayout(runninghub_page)
@@ -2144,20 +2144,13 @@ class MainLayoutMixin:
             rh_flow_widget = QtWidgets.QWidget()
             rh_flow_widget.setObjectName('runninghubFlow')
             rh_flow_scroll.setWidget(rh_flow_widget)
-            rh_hbox = QtWidgets.QWidget()
-            rh_hbox_l = QtWidgets.QHBoxLayout(rh_hbox)
-            rh_hbox_l.setContentsMargins(0, 0, 0, 0)
-            rh_hbox_l.setSpacing(16)
             rh_flow_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
             rh_flow_scroll.setMinimumHeight(260)
-            rh_hbox_l.addWidget(rh_flow_scroll, 3)
-            task_panel = TaskPanel(self._rh_dashboard)
-            task_panel.setMinimumWidth(260)
-            task_panel.setMaximumWidth(380)
-            task_panel.layout().addWidget(cancel_all_btn)
-            self._rh_task_panel = task_panel
-            rh_hbox_l.addWidget(task_panel, 1)
-            runninghub_layout.addWidget(rh_hbox, 1)
+            runninghub_layout.addWidget(rh_flow_scroll, 1)
+            # Keep the existing cancellation action for the lazily opened queue.
+            cancel_all_btn.setParent(runninghub_page)
+            cancel_all_btn.hide()
+            self._rh_dashboard.cancel_all_button = cancel_all_btn
 
             rh_flow_layout = QtWidgets.QGridLayout(rh_flow_widget)
             rh_flow_layout.setContentsMargins(8, 8, 8, 8)
@@ -2205,153 +2198,8 @@ class MainLayoutMixin:
                 return AppCard(title, self._rh_dashboard, rh_flow_widget)
 
             def _set_button_thumbnail(btn: QtWidgets.QPushButton, url: str, wid: str, force: bool = False):
-                try:
-                    if not url:
-                        return
-                    try:
-                        from urllib.parse import urlparse
-                    except Exception:
-                        urlparse = None
-                    # prepare per-app dir under RH_apps and deterministic thumb name
-                    outdir = os.path.join(current_dir, 'RH_apps', str(wid))
-                    os.makedirs(outdir, exist_ok=True)
-                    # derive extension from url path if possible
-                    try:
-                        parsed = urlparse(url) if urlparse else None
-                        base = os.path.basename(parsed.path) if parsed and parsed.path else ''
-                        ext = os.path.splitext(base)[1] or '.jpg'
-                    except Exception:
-                        ext = '.jpg'
-                    dst = os.path.join(outdir, f"{wid}_thumb" + ext)
-
-                    # if thumbnail already exists and caller didn't request force-refresh,
-                    # reuse it without downloading.
-                    try:
-                        if os.path.exists(dst) and not force:
-                            try:
-                                btn._has_thumbnail = True
-                                btn._thumb_path = dst
-                            except Exception:
-                                pass
-                            try:
-                                pix = QtGui.QPixmap(dst)
-                                if pix and not pix.isNull():
-                                    bw = max(1, btn.width() - 24)
-                                    bh = max(1, btn.height() - 24)
-                                    scaled = pix.scaled(bw, bh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                                    try:
-                                        btn.setIcon(QtGui.QIcon(scaled))
-                                        btn.setIconSize(scaled.size())
-                                        btn.setStyleSheet('QPushButton { border-radius: 8px; padding: 12px 10px 8px 12px; text-align: left; color: #12c2e9; }')
-                                    except Exception:
-                                        try:
-                                            p = dst.replace('\\', '/')
-                                            btn.setStyleSheet(f"QPushButton {{ border-radius: 8px; padding: 12px 10px 8px 12px; text-align: left; color: #12c2e9; background-image: url({p}); background-position: center; background-repeat: no-repeat; }}")
-                                        except Exception:
-                                            pass
-                            except Exception:
-                                pass
-                            return
-                    except Exception:
-                        pass
-
-                    def _dl():
-                        try:
-                            import requests as _req
-                            r = _req.get(url, timeout=12)
-                            if r is not None and r.status_code == 200:
-                                try:
-                                    tmp = dst + '.tmp'
-                                    with open(tmp, 'wb') as wf:
-                                        wf.write(r.content)
-                                    # try to detect if content is a video or animated gif
-                                    try:
-                                        ct = (r.headers.get('content-type') or '').lower()
-                                    except Exception:
-                                        ct = ''
-                                    try:
-                                        ext_lower = ext.lower()
-                                    except Exception:
-                                        ext_lower = ''
-                                    is_gif = ('gif' in ct) or ext_lower.endswith('.gif')
-                                    is_video = (ct.startswith('video')) or ext_lower in ('.mp4', '.webm', '.mov', '.avi', '.mkv', '.flv', '.wmv')
-                                    dst_to_use = dst
-                                    if is_gif or is_video:
-                                        try:
-                                            png_tmp = tmp + '.png'
-                                            # handle GIF first-frame via PIL
-                                            if is_gif:
-                                                try:
-                                                    im = Image.open(tmp)
-                                                    im.seek(0)
-                                                    frame = im.convert('RGBA')
-                                                    frame.save(png_tmp, 'PNG')
-                                                except Exception:
-                                                    raise
-                                            else:
-                                                # try moviepy first, fallback to cv2
-                                                try:
-                                                    clip = VideoFileClip(tmp)
-                                                    frame = clip.get_frame(0)
-                                                    clip.reader.close()
-                                                    try:
-                                                        if clip.audio:
-                                                            clip.audio.reader.close_proc()
-                                                    except Exception:
-                                                        pass
-                                                    img = Image.fromarray((frame).astype('uint8'))
-                                                    img.save(png_tmp, 'PNG')
-                                                except Exception:
-                                                    try:
-                                                        cap = cv2.VideoCapture(tmp)
-                                                        ok, fr = cap.read()
-                                                        cap.release()
-                                                        if ok and fr is not None:
-                                                            fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
-                                                            img = Image.fromarray(fr)
-                                                            img.save(png_tmp, 'PNG')
-                                                        else:
-                                                            raise RuntimeError('no frame')
-                                                    except Exception:
-                                                        raise
-                                            # move png into final destination path (use .png ext)
-                                            try:
-                                                newdst = os.path.splitext(dst)[0] + '.png'
-                                                os.replace(png_tmp, newdst)
-                                                try:
-                                                    os.remove(tmp)
-                                                except Exception:
-                                                    pass
-                                                dst_to_use = newdst
-                                            except Exception:
-                                                # fallback to original tmp->dst
-                                                try:
-                                                    os.replace(tmp, dst)
-                                                    dst_to_use = dst
-                                                except Exception:
-                                                    dst_to_use = dst
-                                        except Exception:
-                                            pass
-                                    else:
-                                        try:
-                                            os.replace(tmp, dst)
-                                            dst_to_use = dst
-                                        except Exception:
-                                            try:
-                                                os.replace(tmp, dst)
-                                                dst_to_use = dst
-                                            except Exception:
-                                                dst_to_use = dst
-                                except Exception:
-                                    return
-                                self._rh_dashboard.thumbnail_ready.emit(weakref.ref(btn), dst_to_use)
-                        except Exception:
-                            pass
-
-                    import threading as _thr
-                    _thr.Thread(target=_dl, daemon=True).start()
-                except Exception:
-                    pass
+                from aetherloom_core.rh_app_thumbnails import request
+                request(self._rh_dashboard, btn, url, wid, current_dir, force=force)
 
             def _reflow_buttons():
                 margins = rh_flow_layout.contentsMargins()
@@ -2368,7 +2216,7 @@ class MainLayoutMixin:
                 while rh_flow_layout.count():
                     rh_flow_layout.takeAt(0)
                 for i, button in enumerate(buttons):
-                    button.setFixedSize(card_width, int(card_width * 0.62) + 70)
+                    button.setFixedSize(card_width, int(card_width * 0.62) + 92)
                     rh_flow_layout.addWidget(button, i // columns, i % columns, Qt.AlignTop | Qt.AlignLeft)
                 self._rh_dashboard.refresh()
 
@@ -4413,7 +4261,8 @@ class MainLayoutMixin:
                                                     prev_layout = QtWidgets.QVBoxLayout(prev_box)
                                                     prev_layout.setContentsMargins(12, 8, 12, 12)
                                                     prev_layout.setSpacing(6)
-                                                    prev_label = QtWidgets.QLabel()
+                                                    from aetherloom_core.image_input_preview import ImageInputPreview
+                                                    prev_label = ImageInputPreview() if ftype == 'IMAGE' else QtWidgets.QLabel()
                                                     prev_label.setObjectName('rhInputPreview')
                                                     prev_label.setProperty('rh_compact_input', True)
                                                     prev_label.setAlignment(Qt.AlignCenter)
@@ -4424,10 +4273,16 @@ class MainLayoutMixin:
                                                     prev_label.setProperty('rh_preview', True)
                                                     # store original pixmap for rescaling on resize
                                                     prev_label._orig_pixmap = None
+                                                    if isinstance(prev_label, ImageInputPreview):
+                                                        prev_label.setMinimumHeight(220)
+                                                        prev_label.setProperty('rh_compact_input', False)
                                                     prev_label.setAcceptDrops(True)
                                                     # (previously showed file path here; removed per request)
 
-                                                    def _set_placeholder(lbl=prev_label):
+                                                    def _set_placeholder(lbl=prev_label, _editor=le):
+                                                        if isinstance(lbl, ImageInputPreview):
+                                                            lbl.set_input('', getattr(_editor, '_aetherloom_mask', None))
+                                                            return
                                                         try:
                                                             # delegate to shared helper to ensure consistent theme behavior
                                                             try:
@@ -4464,6 +4319,10 @@ class MainLayoutMixin:
                                                                 pass
 
                                                     def _update_preview_on_resize(obj, ev):
+                                                        if isinstance(obj, ImageInputPreview):
+                                                            obj.setFixedHeight(max(220, min(400, int(obj.width() * .7))))
+                                                            obj.update()
+                                                            return False
                                                         try:
                                                             lbl = obj
                                                             if not getattr(lbl, '_last_path', None):
@@ -4817,7 +4676,10 @@ class MainLayoutMixin:
                                                     except Exception:
                                                         pass
 
-                                                    def _load_preview_from_path(pth, lbl=prev_label, ftype_local=ftype):
+                                                    def _load_preview_from_path(pth, lbl=prev_label, ftype_local=ftype, _editor=le):
+                                                        if isinstance(lbl, ImageInputPreview):
+                                                            lbl.set_input(pth, getattr(_editor, '_aetherloom_mask', None))
+                                                            return
                                                         try:
                                                             if not pth or not os.path.exists(pth):
                                                                 _set_placeholder(lbl)
@@ -4904,6 +4766,13 @@ class MainLayoutMixin:
                                                             except Exception:
                                                                 pass
                                                         prev_label._on_drop_path = _on_drop
+                                                        if isinstance(prev_label, ImageInputPreview):
+                                                            def _choose_input(_lbl=prev_label):
+                                                                path, _ = QtWidgets.QFileDialog.getOpenFileName(self, '导入图像', '', '图像 (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff *.gif *.avif)')
+                                                                if path:_lbl._on_drop_path(path)
+                                                            prev_label.browse_requested.connect(_choose_input)
+                                                            if hasattr(le, '_mask_button'):prev_label.edit_requested.connect(le._mask_button.click)
+                                                            le.editingFinished.connect(lambda _le=le, _lbl=prev_label: _lbl.set_input(_le.text().strip(), getattr(_le, '_aetherloom_mask', None)))
                                                     except Exception:
                                                         pass
 
@@ -6245,7 +6114,7 @@ class MainLayoutMixin:
                                                             pass
                                                 except Exception:
                                                     pass
-                                                # double-click on the preview label opens the file in default app
+                                                # Double-click opens the original result in the system application.
                                                 try:
                                                     def _on_preview_dbl(e, _lbl=lbl, _pth=path):
                                                         try:
@@ -6276,6 +6145,9 @@ class MainLayoutMixin:
                                                     lbl._last_path = None
                                                 except Exception:
                                                     pass
+
+                                                from aetherloom_core.hover_preview import WidgetHover
+                                                card._hover_preview = WidgetHover(card, lbl, lambda _lbl=lbl, _path=path: getattr(_lbl, '_last_path', None) or _path or '')
 
                                                 # context menu on preview card: Cancel task when unfinished, otherwise file actions
                                                 try:
@@ -7437,11 +7309,11 @@ class MainLayoutMixin:
                                     is_fav = bool(favs is not None and str(wid) in favs)
                                 except Exception:
                                     is_fav = False
-                                act_fav = menu.addAction('取消喜爱' if is_fav else '标记喜爱')
+                                act_fav = menu.addAction('取消收藏' if is_fav else '收藏应用')
                                 act_delete = menu.addAction('删除应用')
 
-                                # Use the global cursor position to avoid mapping issues inside scroll/layout
-                                act = menu.exec_(QtGui.QCursor.pos())
+                                act = menu.exec_(_btn.mapToGlobal(pos))
+                                menu.deleteLater()
                                 if act is None:
                                     return
 
@@ -7483,26 +7355,7 @@ class MainLayoutMixin:
                                     except Exception:
                                         pass
                                 elif act == act_fav:
-                                    try:
-                                        if not hasattr(self, 'rh_favorites'):
-                                            self.rh_favorites = set()
-                                        if str(wid) in self.rh_favorites:
-                                            self.rh_favorites.discard(str(wid))
-                                            is_fav_now = False
-                                        else:
-                                            self.rh_favorites.add(str(wid))
-                                            is_fav_now = True
-                                        try:
-                                            if hasattr(_btn, '_rh_set_fav'):
-                                                _btn._rh_set_fav(is_fav_now)
-                                        except Exception:
-                                            pass
-                                        try:
-                                            self._save_settings()
-                                        except Exception:
-                                            pass
-                                    except Exception:
-                                        pass
+                                    self._rh_dashboard.toggle_favorite(_btn)
                                 elif act == act_rename:
                                     try:
                                         # read existing title from the local JSON (if present)
@@ -7835,85 +7688,19 @@ class MainLayoutMixin:
 
             def _show_add_dialog():
                 try:
-                    dlg = QtWidgets.QDialog(self)
-                    # remove context-help (?) button from titlebar and keep close/title
-                    try:
-                        flags = dlg.windowFlags()
-                        flags &= ~Qt.WindowContextHelpButtonHint
-                        flags |= (Qt.Dialog | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
-                        dlg.setWindowFlags(flags)
-                    except Exception:
-                        pass
-                    dlg.setWindowTitle('添加应用')
-                    # apply native dark/titlebar mode to dialog
-                    try:
-                        _set_native_titlebar_dark(dlg, getattr(self, '_theme_mode', 'dark') == 'dark')
-                    except Exception:
-                        pass
-                    try:
-                        dlg.setMinimumSize(900, 420)
-                        dlg.resize(900, 420)
-                    except Exception:
-                        pass
-                    v = QtWidgets.QVBoxLayout(dlg)
-                    label = QtWidgets.QLabel('输入AI应用网址：')
-                    v.addWidget(label)
-
-                    mode_state = {'author': False}
-
-                    edit = QtWidgets.QLineEdit(dlg)
-                    edit.setPlaceholderText('https://www.runninghub.ai/ai-detail/1999435605639561217')
-                    try:
-                        edit.setMinimumWidth(820)
-                        edit.setMinimumHeight(32)
-                        edit.setFont(QtGui.QFont(edit.font().family(), 12))
-                    except Exception:
-                        pass
-                    v.addWidget(edit)
-
-                    author_wrap = QtWidgets.QWidget(dlg)
-                    author_form = QtWidgets.QFormLayout(author_wrap)
-                    author_form.setContentsMargins(0, 6, 0, 0)
-                    author_form.setSpacing(8)
-                    author_uid = QtWidgets.QLineEdit(author_wrap)
-                    author_uid.setPlaceholderText('作者 UID，如 1911823721911500801')
-                    try:
-                        author_uid.setMinimumHeight(32)
-                        author_uid.setFont(QtGui.QFont(author_uid.font().family(), 12))
-                    except Exception:
-                        pass
-                    author_limit = QtWidgets.QSpinBox(author_wrap)
-                    author_limit.setMinimum(1)
-                    author_limit.setMaximum(200)
-                    author_limit.setValue(15)
-                    try:
-                        author_limit.setFixedWidth(120)
-                    except Exception:
-                        pass
-                    author_form.addRow('UID：', author_uid)
-                    author_form.addRow('APP数量上限：', author_limit)
-                    author_wrap.setVisible(False)
-                    v.addWidget(author_wrap)
-
-                    toggle_row = QtWidgets.QHBoxLayout()
-                    toggle_row.addStretch(1)
-                    toggle_btn = QtWidgets.QPushButton('按作者添加')
-                    toggle_row.addWidget(toggle_btn)
-                    v.addLayout(toggle_row)
-                    btn_row = QtWidgets.QHBoxLayout()
-                    btn_row.addStretch(1)
-                    ok = QtWidgets.QPushButton('确认')
-                    cancel = QtWidgets.QPushButton('取消')
-                    btn_row.addWidget(ok)
-                    btn_row.addWidget(cancel)
-                    v.addLayout(btn_row)
+                    from aetherloom_core.rh_app_add_dialog import AddAppDialog
+                    dlg = AddAppDialog(self)
+                    edit, author_uid, author_limit = dlg.edit, dlg.author_uid, dlg.author_limit
 
                     def _accept():
                         try:
-                            if mode_state.get('author'):
+                            if dlg.by_author:
                                 uid = (author_uid.text() or '').strip()
                                 if not uid:
-                                    QtWidgets.QMessageBox.warning(self, '错误', '请输入作者 UID')
+                                    dlg.show_error('请输入作者 UID')
+                                    return
+                                if not uid.isascii() or not uid.isdecimal() or len(uid) > 32:
+                                    dlg.show_error('作者 UID 应为纯数字，请检查后重试。')
                                     return
                                 try:
                                     limit = int(author_limit.value() or 15)
@@ -7923,7 +7710,7 @@ class MainLayoutMixin:
                                 base_url = host if host.startswith('http') else f'https://{host}'
                                 api_key = self.rh_apikey_input.text().strip()
                                 if not api_key:
-                                    QtWidgets.QMessageBox.warning(self, '缺少 apikey', '请在界面中输入 apikey 后重试')
+                                    dlg.show_error('请先在连接设置中配置当前站点的 API key。')
                                     return
 
                                 try:
@@ -8038,16 +7825,18 @@ class MainLayoutMixin:
 
                             url = edit.text().strip()
                             if not url:
-                                dlg.accept()
+                                dlg.show_error('请输入应用链接或 App 编号。')
                                 return
                             from aetherloom_core.rh_app_install import application_reference
                             from aetherloom_core.rh_connections import ensure_connections
                             try:
-                                reference = application_reference({'url': url})
-                                if not ensure_connections(self).keys_for(reference['base_url']):
+                                connections = ensure_connections(self)
+                                connection = connections.snapshot()
+                                reference = application_reference({'url': url}, default_base=connection['base_url'])
+                                if not connections.keys_for(reference['base_url']):
                                     raise ValueError('请先在连接设置中配置该应用站点的 API key')
                             except ValueError as exc:
-                                QtWidgets.QMessageBox.warning(self, '无法添加应用', str(exc))
+                                dlg.show_error(str(exc))
                                 return
                             dlg.accept()
 
@@ -8063,39 +7852,11 @@ class MainLayoutMixin:
                         except Exception:
                             pass
 
-                    def _apply_mode():
-                        try:
-                            if mode_state.get('author'):
-                                label.setText('输入作者 UID 与数量上限：')
-                                edit.setVisible(False)
-                                author_wrap.setVisible(True)
-                                toggle_btn.setText('按链接添加')
-                            else:
-                                label.setText('输入AI应用网址：')
-                                edit.setVisible(True)
-                                author_wrap.setVisible(False)
-                                toggle_btn.setText('按作者添加')
-                        except Exception:
-                            pass
-
-                    def _toggle_mode():
-                        try:
-                            mode_state['author'] = not mode_state.get('author')
-                        except Exception:
-                            mode_state['author'] = False
-                        _apply_mode()
-
+                    dlg.ok.clicked.connect(_accept)
                     try:
-                        toggle_btn.clicked.connect(_toggle_mode)
-                    except Exception:
-                        pass
-                    _apply_mode()
-
-                    ok.clicked.connect(_accept)
-                    cancel.clicked.connect(lambda: dlg.reject())
-                    # pressing Enter triggers Accept
-                    edit.returnPressed.connect(_accept)
-                    dlg.exec_()
+                        dlg.exec_()
+                    finally:
+                        dlg.deleteLater()
                 except Exception:
                     pass
 
@@ -8160,7 +7921,7 @@ class MainLayoutMixin:
         make_responsive(runninghub_page, rows=tuple(
             (runninghub_layout.itemAt(i).layout(), 980)
             for i in range(runninghub_layout.count())
-            if isinstance(runninghub_layout.itemAt(i).layout(), QtWidgets.QHBoxLayout)) + ((rh_hbox_l, 980),))
+            if isinstance(runninghub_layout.itemAt(i).layout(), QtWidgets.QHBoxLayout)))
         self._rh_dashboard.apply_theme()
         self._rh_dashboard.setup_header(runninghub_layout)
         from aetherloom_core.rh_model_app_ui import dashboard_tabs

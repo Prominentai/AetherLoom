@@ -5,6 +5,21 @@ from . import utility_nodes
 
 
 def build(panel, node):
+    descriptions = {
+        'image_crop_mask': '按遮罩有效区域的最小外接矩形裁剪，边距向四周扩展并限制在原图内。阈值只影响范围计算，输出遮罩保留灰度和软边缘；遮罩尺寸不同时先对齐图像。空遮罩会提示无法裁剪。',
+        'image_paste_bounding': '将裁剪图按 Bounding 的位置回填到底图。尺寸不同会缩放到裁剪区域；可连接裁剪区遮罩进行柔和混合，不连接则回填整个矩形。底图尺寸必须与 Bounding 记录一致，输出通道跟随底图。',
+        'mask_grow': '正值扩张白色区域，负值收缩，0 不改变遮罩。默认方形扩张保持已有画布行为；开启削角时使用 ComfyUI 式十字邻域。保留灰度，不自动二值化。',
+        'mask_feather': '使用高斯模糊柔化遮罩轮廓；半径为 0 时保持原样。此节点不改变画面尺寸，也不是从画面四边渐隐。',
+        'mask_grow_blur': '先扩张 / 收缩，再做高斯羽化；用于补足遮罩覆盖范围并柔化边界。扩张为 0 时只羽化，羽化半径为 0 时只扩张。',
+        'mask_edge_feather': '参考 ComfyUI FeatherMask，从遮罩画面的左、上、右、下边缘向内渐变；各侧可独立设置，0 表示关闭。不会围绕内部轮廓模糊。',
+        'image_join_alpha': '图像 + MASK → RGBA PNG。Alpha = 1 − MASK：白色遮罩变透明，黑色保留图像；覆盖原 Alpha，软边缘保留。遮罩自动缩放至图像尺寸。',
+        'image_split_alpha': '输出 RGB 图像与独立 MASK，MASK = 1 − Alpha。无 Alpha 的图像输出同尺寸全黑遮罩。',
+        'image_mask_composite': '白色遮罩取前景，黑色保留背景，灰色按比例混合；不连接遮罩时完全覆盖。位置相对背景左上角，超出背景部分裁切。输出通道跟随背景。',
+        'mask_preview': '蓝色叠加仅用于观察遮罩，默认透明度 0.5。仅接 MASK 时显示灰度图；仅接图像时读取附带遮罩或 Alpha。需要透明 PNG 请使用“图像与遮罩合并（RGBA）”。',
+    }
+    if node['kind'] in descriptions:
+        hint = QtWidgets.QLabel(descriptions[node['kind']]);hint.setWordWrap(True);hint.setObjectName('canvasMuted')
+        panel.form.addWidget(hint)
     if node['kind'] == 'subgraph':
         from .subgraphs import build as build_group
         build_group(panel,node);return

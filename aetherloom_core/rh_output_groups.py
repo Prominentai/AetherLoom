@@ -82,6 +82,12 @@ class OutputCard(QtWidgets.QFrame):
         label = getattr(self, '_img_label', None)
         if label is None or sip.isdeleted(label) or not self.isVisible():
             return
+        hover = getattr(self, '_hover_preview', None)
+        if hover is None or hover.preview is not label:
+            from .hover_preview import WidgetHover
+            if hover is not None:
+                hover.dispose()
+            self._hover_preview = WidgetHover(self, label, lambda: getattr(label, '_last_path', None) or '')
         width = self.preview_width()
         progress = getattr(self, '_rh_progress_widget', None)
         if progress is not None and not sip.isdeleted(progress) and not progress.isHidden():
