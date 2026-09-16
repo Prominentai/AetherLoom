@@ -919,8 +919,12 @@ class CanvasEngine(QtCore.QObject):
             if any(states[edge['source']].get('_restored_missing_results') for edge in edges):
                 raise MissingHistoricalInput('历史结果缺失导致输入无法配对，已跳过本分支') from error
             raise
+        text_files_prepared = None
         try:
-            if kind in model.MEDIA:
+            if kind == 'text_file':
+                from .text_files import prepare
+                text_files_prepared = prepare(node, inputs, self.temporary.directory(round_id, node_id), stop)
+            elif kind in model.MEDIA:
                 from .media_inputs import resolve_files
                 node = copy.deepcopy(node)
                 node['params']['files'] = resolve_files(node.get('params', {}).get('files', []), kind, stop)
@@ -930,8 +934,10 @@ class CanvasEngine(QtCore.QObject):
             elif kind in model.MODEL_KINDS:
                 node = copy.deepcopy(node)
                 node['params']['_output_directory'] = (prepared or {}).get('output_dir', '')
-            digest = model.fingerprint(node, inputs, edges)
+            digest = model.fingerprint(node, text_files_prepared.fingerprint_inputs if text_files_prepared else inputs,
+                                       edges, file_snapshots=text_files_prepared.signatures if text_files_prepared else None)
         except (OSError, ValueError) as error:
+            if text_files_prepared is not None:text_files_prepared.discard()
             if any(states[edge['source']].get('_restored_missing_results') for edge in edges):
                 raise MissingHistoricalInput('历史输入已不可读取，已跳过本分支') from error
             raise
@@ -950,6 +956,7 @@ class CanvasEngine(QtCore.QObject):
                 try:model.select_results(cached['results'],edge,accepted)
                 except ValueError:compatible=False;break
             if compatible:
+                if text_files_prepared is not None:text_files_prepared.discard()
                 results = cached['results']
                 if kind == 'preview' and node.get('params', {}).get('save_enabled', False):
                     from .save_results import save_node_results
@@ -1014,6 +1021,8 @@ class CanvasEngine(QtCore.QObject):
         elif kind in ('int', 'float'):
             results = [{'value': model.primitive_value(node), 'type': kind, 'kind': kind, 'index': 0,
                         'name': kind + '.txt', 'lineage': model.result_lineage({}, node_id, 0)}]
+        elif kind == 'text_file':
+            results = text_files_prepared.results
         elif kind == 'text':
             values = node.get('params', {}).get('texts')
             if not isinstance(values, list):
@@ -1065,7 +1074,10 @@ class CanvasEngine(QtCore.QObject):
         else:
             self._execute_app(canvas_id, round_id, node, prepared, batches, digest, stop)
             return
-        self._finish_node(canvas_id, node_id, results, digest)
+        try:
+            self._finish_node(canvas_id, node_id, results, digest)
+        finally:
+            if text_files_prepared is not None:text_files_prepared.discard()
 
     def choose_results(self,canvas_id,node_id,round_id,token,indices):
         """Commit a selection once; file checks and copying run in the worker."""

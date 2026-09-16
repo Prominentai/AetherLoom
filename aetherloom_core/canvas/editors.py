@@ -270,6 +270,9 @@ class Inspector(QtWidgets.QWidget):
         elif collections.current(node):
             from .collection_editor import build
             build(self, node)
+        elif node['kind'] == 'text_file':
+            from .text_file_ui import build
+            build(self, node)
         elif node['kind'] in FILE_FILTERS:
             self._files(node)
         elif node['kind'] in ('int', 'float'):
@@ -410,7 +413,7 @@ class Inspector(QtWidgets.QWidget):
             hint.setWordWrap(True)
             hint.setObjectName('canvasMuted')
             self.form.addWidget(hint)
-        if node['kind'] != 'image':self.form.addStretch(1)
+        if node['kind'] not in ('image', 'text_file'):self.form.addStretch(1)
         if embedded:return
         self.form = self.tab_forms[1]
         self._other_options(node)

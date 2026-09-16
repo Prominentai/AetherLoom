@@ -59,9 +59,41 @@ def _read_json(path):
         return json.load(source)
 
 
-def _remove_secrets(value, secrets=None, route=()):
+def _opaque_text_routes(value, prefix=()):
+    """Locate typed prompt dictionaries whose keys are words, not field names.
+
+    Only the text_wildcards node's params.wildcards mapping qualifies, and only
+    with the string / list-of-strings shape accepted by that node. Nested objects
+    cannot use this exception to bypass credential stripping or path checks.
+    The traversal also covers frozen graph snapshots in queued workflow records.
+    """
+    opaque = set()
+    def visit(item, route):
+        if isinstance(item, list):
+            for index, child in enumerate(item):visit(child, route + (index,))
+        elif isinstance(item, dict):
+            params = item.get('params')
+            if item.get('kind') == 'text_wildcards' and isinstance(params, dict):
+                words = params.get('wildcards')
+                if isinstance(words, dict) and all(
+                        isinstance(key, str) and (isinstance(entries, str) or isinstance(entries, list)
+                            and all(isinstance(entry, str) for entry in entries))
+                        for key, entries in words.items()):
+                    opaque.add(route + ('params', 'wildcards'))
+            for key, child in item.items():
+                child_route = route + (key,)
+                if child_route not in opaque:visit(child, child_route)
+    visit(value, prefix)
+    return opaque
+
+
+def _remove_secrets(value, secrets=None, route=(), *, _opaque=None):
+    if _opaque is None:
+        _opaque = _opaque_text_routes(value, route)
+    if route in _opaque:
+        return copy.deepcopy(value)
     if isinstance(value, list):
-        return [_remove_secrets(item, secrets, route + (index,)) for index, item in enumerate(value)]
+        return [_remove_secrets(item, secrets, route + (index,), _opaque=_opaque) for index, item in enumerate(value)]
     if not isinstance(value, dict):
         return value
     result = {}
@@ -75,7 +107,7 @@ def _remove_secrets(value, secrets=None, route=()):
             if item:
                 result['password_required'] = True
             continue
-        result[key] = _remove_secrets(item, secrets, route + (key,))
+        result[key] = _remove_secrets(item, secrets, route + (key,), _opaque=_opaque)
     return result
 
 
@@ -107,6 +139,7 @@ def _run_states(document):
 
 def _visit_paths(document, transform, include_results=True):
     """Visit only file-bearing fields; never rewrite arbitrary prompt strings."""
+    opaque = _opaque_text_routes(document)
     media_fields = ('image', 'video', 'audio', 'file', 'archive', 'image_input', 'video_input', 'audio_input')
     def media_value(value, field):
         if field.get('_model_multiple'):
@@ -119,9 +152,10 @@ def _visit_paths(document, transform, include_results=True):
             yield result
             if canvas_model.result_type(result) == 'batch':
                 yield from canvas_model.batch_items(result)
-    def masks(value):
+    def masks(value, route=()):
+        if route in opaque:return
         if isinstance(value,list):
-            for item in value:masks(item)
+            for index, item in enumerate(value):masks(item, route + (index,))
         elif isinstance(value,dict):
             if value.get('version') in (1, 2) and 'sha256' in value and ('png' in value or 'path' in value):
                 for key in ('source','path','import_path','paint_path','paint_import_path'):
@@ -129,7 +163,7 @@ def _visit_paths(document, transform, include_results=True):
             else:
                 for key,item in value.items():
                     if key in ('source_path','mask_path','mask_asset_path','archive_path','original_path','paint_path','paint_temp_path','composite_path') and isinstance(item,str):value[key]=transform(item,required=True)
-                    else:masks(item)
+                    else:masks(item, route + (key,))
     masks(document)
     for nodes in _node_sets(document):
         for node in nodes:
@@ -180,12 +214,14 @@ def _visit_paths(document, transform, include_results=True):
 def _configuration_hash(document, base_dir):
     """Compare configuration independently of JSON formatting and relative roots."""
     public = _remove_secrets(workflow_document(document))
-    def remove_markers(value):
+    opaque = _opaque_text_routes(public)
+    def remove_markers(value, route=()):
+        if route in opaque:return copy.deepcopy(value)
         if isinstance(value, dict):
-            return {key: remove_markers(item) for key, item in value.items()
+            return {key: remove_markers(item, route + (key,)) for key, item in value.items()
                     if key not in ('password_required', 'local_files')}
         if isinstance(value, list):
-            return [remove_markers(item) for item in value]
+            return [remove_markers(item, route + (index,)) for index, item in enumerate(value)]
         return value
     public = remove_markers(public)
     local_files = set(document.get('local_files') or [])
@@ -786,16 +822,18 @@ class CanvasStore:
     def export_package(self, document, path, include_results=False):
         public = _remove_secrets(copy.deepcopy(document))
         if include_results:public = _available_runtime_results(public)
-        def portable_masks(value):
+        opaque = _opaque_text_routes(public)
+        def portable_masks(value, route=()):
+            if route in opaque:return
             if isinstance(value,list):
-                for item in value:portable_masks(item)
+                for index, item in enumerate(value):portable_masks(item, route + (index,))
             elif isinstance(value,dict):
                 if value.get('version') in (1, 2) and 'png' in value and 'sha256' in value:
                     # Draft settings are portable even before their first execution.
                     # The destination client materializes its own input/masks asset.
                     value.pop('path',None)
                 else:
-                    for item in value.values():portable_masks(item)
+                    for key, item in value.items():portable_masks(item, route + (key,))
         portable_masks(public)
         # An export is a reusable project, not a cross-account task recovery file.
         public['run'] = {}
@@ -811,11 +849,16 @@ class CanvasStore:
                 # A task ID here is inert result provenance, not a resumable
                 # task. Keep it consistent with cached content signatures.
                 result.pop('url', None)
-        files, seen = {}, {}
+        files, seen, text_input_paths = {}, {}, set()
         from .media_inputs import resolve_files
+        from .text_files import resolve_files as resolve_text_files
         for node in public['nodes']:
             if node['kind'] in canvas_model.MEDIA:
                 node['params']['files'] = resolve_files(node.get('params', {}).get('files', []), node['kind'])
+            elif node['kind'] == 'text_file':
+                node['params']['files'] = resolve_text_files(node.get('params', {}).get('files', []))
+                text_input_paths.update(os.path.normcase(str(Path(value).resolve()))
+                                        for value in node['params']['files'])
         def collect(value, required=False):
             if not value or '://' in str(value):
                 return value
@@ -826,8 +869,13 @@ class CanvasStore:
                 raise ValueError('打包所需文件不存在：' + str(value))
             key = os.path.normcase(str(source.resolve()))
             if key not in seen:
-                safe_name = re.sub(r'[^\w. -]', '_', source.name)[:160] or 'file'
-                archive_name = 'assets/{}-{}'.format(uuid.uuid4().hex[:12], safe_name)
+                if key in text_input_paths:
+                    # The filename is data for text imports: keep it unchanged
+                    # when a package is imported and this node executes again.
+                    archive_name = 'assets/{}/{}'.format(uuid.uuid4().hex[:12], source.name)
+                else:
+                    safe_name = re.sub(r'[^\w. -]', '_', source.name)[:160] or 'file'
+                    archive_name = 'assets/{}-{}'.format(uuid.uuid4().hex[:12], safe_name)
                 seen[key] = archive_name
                 files[archive_name] = source
             return seen[key]

@@ -6,9 +6,13 @@ def decorate(node, ports):
     kind = node['kind']
     editable = {field[0] for field in utility_nodes.SCHEMAS.get(kind, ('', '', []))[2]}
     if kind == 'rename':editable |= {'name', 'extension'}
+    if kind == 'text_file':editable.add('path')
     if kind in model.MODEL_KINDS:editable |= {'prompt', 'image'}
     optional = {'image_composite': {'mask'}, 'image_mask_composite': {'mask'}, 'image_paste_bounding': {'mask'},
                 'video_assemble': {'audio'}}.get(kind, set())
+    module = utility_nodes.advanced_nodes.LOCAL_NODES.get(kind)
+    if module is not None:
+        optional = optional | set(getattr(module, 'OPTIONAL_INPUTS', {}).get(kind, ()))
     group = {port['key'] for port in ports} if kind in model.DYNAMIC_INPUT_KINDS else {'image', 'mask'} if kind == 'mask_preview' else set()
     for port in ports:
         key = port['key']
@@ -56,6 +60,8 @@ def missing(node, connected):
         issues.append(dict(ports=['image'], message='请导入图像或连接图像输入'))
     elif node['kind'] in model.MEDIA and empty(params.get('files')):
         issues.append(dict(ports=[], message='请先导入素材或设置输入路径'))
+    elif node['kind'] == 'text_file' and 'path' not in connected and empty(params.get('files')):
+        issues.append(dict(ports=['path'], message='请导入文本文件或文件夹，或连接路径文本'))
     return issues
 
 

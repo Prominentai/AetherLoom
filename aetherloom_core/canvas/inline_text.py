@@ -36,7 +36,11 @@ def sync_documents(histories, canvas, *, reset=False):
         defaults = utility_nodes.defaults(node['kind']) if node['kind'] in utility_nodes.SCHEMAS else {}
         if node['kind'] == 'app':
             defaults = {model.parameter_key(field): field.get('fieldValue', '') for field in model.app_fields(node)}
-        sync_document(document, node.get('params', {}).get(key, defaults.get(key, '')), reset=reset)
+        value = node.get('params', {}).get(key, defaults.get(key, ''))
+        if node['kind'] == 'text_wildcards' and key == 'wildcards':
+            from .prompt_nodes import wildcard_text
+            value = wildcard_text(value)
+        sync_document(document, value, reset=reset)
 
 
 def bind_document(editor,text,identity,histories):

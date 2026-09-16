@@ -33,11 +33,14 @@ SCHEMAS = {
 }
 from . import advanced_nodes
 SCHEMAS.update(advanced_nodes.SCHEMAS)
+from . import prompt_nodes
+SCHEMAS.update(prompt_nodes.SCHEMAS)
 KINDS = frozenset(SCHEMAS)
 _IMAGE_SLOT = threading.BoundedSemaphore(1)
 
 
 def defaults(kind):
+    if kind in prompt_nodes.KINDS:return prompt_nodes.defaults(kind)
     return {key: copy.deepcopy(default) for key, _, _, default, _ in SCHEMAS[kind][2]}
 
 
@@ -56,6 +59,7 @@ def template_keys(text):
 
 
 def inputs(node):
+    if node['kind'] in prompt_nodes.KINDS:return prompt_nodes.inputs(node)
     if node['kind'] in advanced_nodes.KINDS:return advanced_nodes.inputs(node)
     kind = node['kind']
     ports = []
@@ -77,6 +81,7 @@ def inputs(node):
 
 
 def output_type(node):
+    if node['kind'] in prompt_nodes.KINDS:return prompt_nodes.output_type(node)
     if node['kind'] in advanced_nodes.KINDS:return advanced_nodes.output_type(node)
     kind = node['kind']
     if kind == 'media_info':return 'float' if node.get('params', {}).get('property', 'width') in ('duration', 'fps') else 'int'
@@ -86,6 +91,9 @@ def output_type(node):
 
 
 def validate(node):
+    if node['kind'] in prompt_nodes.KINDS:
+        prompt_nodes.validate(node)
+        return
     params = node.get('params', {})
     for key, label, editor, default, options in SCHEMAS[node['kind']][2]:
         value = params.get(key, default)
@@ -169,6 +177,7 @@ def _information(result, prop):
 
 
 def execute(node, directory, batches, stop):
+    if node['kind'] in prompt_nodes.KINDS:return prompt_nodes.execute(node,directory,batches,stop)
     if node['kind'] in advanced_nodes.KINDS:return advanced_nodes.execute(node,directory,batches,stop)
     # Large local pixel buffers are serialized independently of cloud branches.
     # Waiting for this slot remains cancellable and never blocks the GUI thread.

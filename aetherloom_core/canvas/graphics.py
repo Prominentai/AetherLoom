@@ -15,7 +15,7 @@ from . import preview_data
 from .appearance import tint, kind_color, draw_kind_icon, bypass_colors
 
 
-KIND_NAMES = {'app': 'APP', 'image': '图像', 'video': '视频', 'audio': '音频',
+KIND_NAMES = {'app': 'APP', 'image': '图像', 'video': '视频', 'audio': '音频', 'text_file': '文本文件导入',
               'text': '文本', 'select': '内容过滤', 'preview': '预览 / 保存'}
 KIND_NAMES.update(llm_model='LLM · API / Agent', vision_model='VISION · API / Agent',
                   image_model='IMAGE · API / Agent', edit_model='EDIT · API / Agent')
@@ -201,6 +201,8 @@ class PortItem(QtWidgets.QGraphicsEllipseItem):
                 self.setToolTip(('条件为真' if self.key=='true' else '条件为假')+'\n'+self.toolTip())
             if self.node_item.node['kind']=='image' and self.key=='mask':
                 self.setToolTip('绘制或导入遮罩后，从此端口输出独立 MASK；没有遮罩时不输出。\n'+self.toolTip())
+            if self.node_item.node['kind']=='prompt_styles':
+                self.setToolTip(('正向提示词' if self.key=='positive' else '反向提示词')+'\n'+self.toolTip())
         else:
             contract = next((p for p in model.input_ports(self.node_item.node) if p['key'] == self.key), {})
             has_internal = contract.get('accepts_local', False)
@@ -279,6 +281,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
             height = max(height, 350)
         if node['kind'] in ('preview', 'mask_preview'):return 380, max(height, 390)
         if node['kind'] == 'image':return 380, max(height, 430)
+        if node['kind'] == 'text_file':return 380, max(height, 470)
         return 300 if node['kind'] != 'text' else cls.WIDTH, height
 
     def source_port(self, edge):
@@ -473,7 +476,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
         return preview_data.has_inputs(self.node)
 
     def result_count(self):
-        if self.node['kind'] == 'image' and self.has_inline_form():return 0
+        if self.node['kind'] in ('image', 'text_file') and self.has_inline_form():return 0
         if self.node['kind'] == 'image_compare' and self.has_inline_form():return 0
         return preview_data.count(self.node, 'input') if self.input_preview() else self._result_index.total
 
@@ -497,12 +500,12 @@ class NodeItem(QtWidgets.QGraphicsObject):
     def body_rect(self):
         rows = max(len(self.ports), len(self.outputs))
         top = 40 if self.has_inline_form() else 42 + 22 * rows
-        if self.node['kind'] == 'image' and self.has_inline_form():top = 88
+        if self.node['kind'] in ('image', 'text_file') and self.has_inline_form():top = 88
         return QtCore.QRectF(12, top, self.width - 24, self.height - top - 29)
 
     def controls_rect(self):
         rect = self.body_rect()
-        if self.node['kind'] == 'image':return rect
+        if self.node['kind'] in ('image', 'text_file'):return rect
         rect.setRight(rect.right() - self.output_column_width())
         if self.node['kind'] in ('preview', 'mask_preview') and self.result_count():
             rect.setHeight(max(56, getattr(self, 'form_content_height', 100)))
@@ -1822,8 +1825,21 @@ class CanvasView(QtWidgets.QGraphicsView):
         def imported(paths):
             if getattr(self.scene(),'_document',{}).get('id')==identity:
                 self.files_dropped.emit(paths,position)
+        local = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        if local:
+            item = self.itemAt(event.pos())
+            while item is not None and not isinstance(item, NodeItem):item = item.parentItem()
+            if (isinstance(item, NodeItem) and item.node['kind'] == 'text_file'
+                    and item.inline_proxy is not None and item.controls_rect().contains(item.mapFromScene(position))):
+                editor = getattr(item.inline_proxy.widget().inspector, 'text_file_editor', None)
+                if editor is not None:
+                    if editor.files.import_paths(local):event.acceptProposedAction()
+                    else:event.ignore()
+                    return
+            imported(local);event.acceptProposedAction();return
         if import_mime(event.mimeData(),self,imported,'any'):
             event.acceptProposedAction()
+        else:super().dropEvent(event)
 
     def fit_nodes(self):
         rect = QtCore.QRectF()

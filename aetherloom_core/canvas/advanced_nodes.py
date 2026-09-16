@@ -82,6 +82,10 @@ SCHEMAS = {
 }
 from . import bounding_nodes
 SCHEMAS.update(bounding_nodes.SCHEMAS)
+from . import image_processing_nodes, mask_region_nodes, tile_nodes
+LOCAL_MODULES = (image_processing_nodes, mask_region_nodes, tile_nodes)
+LOCAL_NODES = {kind: module for module in LOCAL_MODULES for kind in module.KINDS}
+for module in LOCAL_MODULES:SCHEMAS.update(module.SCHEMAS)
 KINDS = frozenset(SCHEMAS)
 IMAGE_KINDS = frozenset(k for k in KINDS if k.startswith(('image_', 'mask_')) or k == 'attached_mask')
 VIDEO_KINDS = frozenset({'video_frames','video_assemble'})
@@ -89,6 +93,7 @@ PASS_KINDS = frozenset({'manual_select','branch'})
 
 
 def inputs(node):
+ if node['kind'] in LOCAL_NODES:return LOCAL_NODES[node['kind']].inputs(node)
  if node['kind'] in bounding_nodes.KINDS:return bounding_nodes.inputs(node)
  kind=node['kind'];ports=[]
  if kind=='image_grid':ports=[('images','图像','image_input')]
@@ -113,6 +118,7 @@ def inputs(node):
 
 def output_type(node):
  kind=node['kind']
+ if kind in LOCAL_NODES:return LOCAL_NODES[kind].output_type(node)
  if kind=='mask_preview':return 'image'
  if kind in ('image_to_mask','attached_mask') or kind.startswith('mask_') and kind!='mask_to_image':return 'mask'
  if kind.startswith('image_') or kind=='mask_to_image':return 'image'
@@ -163,6 +169,7 @@ def _size(size):
 
 
 def image_operation(node, batch, params, directory, stop):
+ if node['kind'] in LOCAL_NODES:return LOCAL_NODES[node['kind']].operation(node,batch,params,directory,stop)
  if node['kind'] in bounding_nodes.KINDS:return bounding_nodes.operation(node,batch,params,directory,stop)
  from PIL import Image,ImageOps,ImageColor,ImageFilter,ImageChops
  from . import model
@@ -354,8 +361,19 @@ def execute(node,directory,batches,stop):
   for result in results:
    # The crop's image, box and mask describe the same input item. Their common
    # origin must survive edits/filters so each patch returns to its own image.
-   origin_index = index if kind == 'image_crop_mask' else len(output)
+   origin_index = index if kind in ('image_crop_mask','image_edges','image_palette') else len(output)
    origins = model.result_lineage(batch,node['id'],origin_index)
-   if kind == 'image_crop_mask':origins['__bounding_group__:' + node['id']] = str(index)
+   if kind in ('image_crop_mask','image_edges','image_palette'):
+    origins['__bounding_group__:' + node['id']] = str(index)
+   if kind == 'image_tile':
+    identity = str(index) + ':' + str(result['_tile_index'])
+    origins[node['id']] = identity
+    origins['__bounding_group__:' + node['id']] = identity
+    origins['__tile_run__:' + node['id']] = result['tile_group']
+   if kind == 'image_untile':
+    # A Batch may contain complete tile groups from several original images.
+    # Retain each group's source axes so downstream Lists still pair correctly.
+    origins = result.pop('_tile_source_lineage', {})
+    origins[node['id']] = str(len(output))
    result.update(index=len(output),lineage=origins);output.append(result)
  check_stop(stop);return output

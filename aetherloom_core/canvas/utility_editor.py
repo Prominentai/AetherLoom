@@ -5,6 +5,10 @@ from . import utility_nodes
 
 
 def build(panel, node):
+    if node['kind'] in utility_nodes.prompt_nodes.KINDS:
+        from .prompt_editor import build as build_prompt
+        build_prompt(panel,node)
+        return
     descriptions = {
         'image_crop_mask': '按遮罩有效区域的最小外接矩形裁剪，边距向四周扩展并限制在原图内。阈值只影响范围计算，输出遮罩保留灰度和软边缘；遮罩尺寸不同时先对齐图像。空遮罩会提示无法裁剪。',
         'image_paste_bounding': '将裁剪图按 Bounding 的位置回填到底图。尺寸不同会缩放到裁剪区域；可连接裁剪区遮罩进行柔和混合，不连接则回填整个矩形。底图尺寸必须与 Bounding 记录一致，输出通道跟随底图。',
@@ -17,6 +21,8 @@ def build(panel, node):
         'image_mask_composite': '白色遮罩取前景，黑色保留背景，灰色按比例混合；不连接遮罩时完全覆盖。位置相对背景左上角，超出背景部分裁切。输出通道跟随背景。',
         'mask_preview': '蓝色叠加仅用于观察遮罩，默认透明度 0.5。仅接 MASK 时显示灰度图；仅接图像时读取附带遮罩或 Alpha。需要透明 PNG 请使用“图像与遮罩合并（RGBA）”。',
     }
+    for module in utility_nodes.advanced_nodes.LOCAL_MODULES:
+        descriptions.update(getattr(module, 'DESCRIPTIONS', {}))
     if node['kind'] in descriptions:
         hint = QtWidgets.QLabel(descriptions[node['kind']]);hint.setWordWrap(True);hint.setObjectName('canvasMuted')
         panel.form.addWidget(hint)
@@ -102,5 +108,7 @@ def build(panel, node):
              'text_join': '文本 Batch 合成一段文本；普通 List 逐项通过。需要整体拼接时先使用 List 转 Batch。',
              'image_resize': '分辨率倍数为 1 时按缩放方式输出；大于 1 时宽高分别就近对齐，可能略微改变比例。支持 INT 连线覆盖倍数；输出 RGBA PNG 临时副本，遮罩同步缩放。',
              'image_compare': '运行后按输入顺序两两对比。输出仍为原图像列表，不生成拼接图片。'}
-    if node['kind'] in hints:
+    for module in utility_nodes.advanced_nodes.LOCAL_MODULES:
+        hints.update(getattr(module, 'HINTS', {}))
+    if node['kind'] in hints and hints[node['kind']] != descriptions.get(node['kind']):
         hint = QtWidgets.QLabel(hints[node['kind']]);hint.setWordWrap(True);hint.setObjectName('canvasMuted');panel.form.addWidget(hint)

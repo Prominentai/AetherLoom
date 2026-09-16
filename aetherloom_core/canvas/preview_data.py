@@ -82,7 +82,7 @@ def has_inputs(node):
 def has_batches(node):
     results = node.get('results') or []
     if (not node.get('bypass') and not node.get('bypassed')
-            and node['kind'] in model.MEDIA | set(model.MODEL_KINDS) | {'app', 'text', 'batch2list', 'filename', 'rename'}):
+            and node['kind'] in model.MEDIA | set(model.MODEL_KINDS) | {'app', 'text', 'text_file', 'batch2list', 'filename', 'rename'}):
         return False  # These executors produce ordinary items; avoid scanning large lists on paint.
     return any(isinstance(result, dict) and model.result_type(result) == 'batch' for result in results)
 

@@ -16,7 +16,7 @@ MODEL_KINDS = {'llm_model': 'llm', 'vision_model': 'vision', 'image_model': 'tex
 NODE_CATEGORIES = {'input': '素材输入', 'app': 'RH 应用', 'standard': 'RH 标准模型', 'rh_llm': 'RH LLM', 'api': 'API 节点', 'collection': 'List / Batch', 'output': '处理与输出'}
 MERGE_KINDS = frozenset({'merge_batch', 'merge_list'})
 DYNAMIC_INPUT_KINDS = MERGE_KINDS | {'list_select'}
-LIBRARY_KINDS = ('int', 'float', 'text', 'image', 'video', 'audio', *MODEL_KINDS, 'merge_list', 'list_select', 'list2batch', 'merge_batch', 'batch_select', 'rebatch', 'batch2list', 'select', 'filename', 'rename', 'preview', *utility_nodes.SCHEMAS)
+LIBRARY_KINDS = ('int', 'float', 'text', 'text_file', 'image', 'video', 'audio', *MODEL_KINDS, 'merge_list', 'list_select', 'list2batch', 'merge_batch', 'batch_select', 'rebatch', 'batch2list', 'select', 'filename', 'rename', 'preview', *utility_nodes.SCHEMAS)
 NODE_CATEGORIES.update(image_tools='图像处理', text_tools='文本处理', utility='画布辅助', mask_tools='遮罩', video_tools='视频处理')
 
 
@@ -28,7 +28,7 @@ def node_category(kind):
     return 'output' if kind in DYNAMIC_INPUT_KINDS or kind in ('list2batch', 'batch2list', 'select', 'preview', 'filename', 'rename') else 'input'
 
 
-KINDS = frozenset({'app', 'image', 'video', 'audio', 'text', 'int', 'float', 'list2batch', 'batch2list', 'select', 'preview', 'filename', 'rename'} | set(MODEL_KINDS) | DYNAMIC_INPUT_KINDS | collections.KINDS)
+KINDS = frozenset({'app', 'image', 'video', 'audio', 'text', 'text_file', 'int', 'float', 'list2batch', 'batch2list', 'select', 'preview', 'filename', 'rename'} | set(MODEL_KINDS) | DYNAMIC_INPUT_KINDS | collections.KINDS)
 KINDS |= utility_nodes.KINDS
 NUMERIC_TYPES = frozenset({'int', 'float', 'number'})
 VALUE_TYPES = NUMERIC_TYPES | {'boolean', 'enum', 'scalar'}
@@ -42,6 +42,7 @@ TITLES = {'app': 'App', 'image': '图像导入', 'video': '视频导入',
           'audio': '音频导入', 'text': '文本', 'select': '内容过滤', 'preview': '预览 / 保存'}
 TITLES.update(llm_model='大语言模型', vision_model='视觉模型', image_model='图像生成', edit_model='图像编辑')
 TITLES.update(int='整数 INT', float='浮点数 FLOAT')
+TITLES['text_file'] = '文本文件导入'
 TITLES.update(filename='读取文件名', rename='文件重命名')
 TITLES['list2batch'] = '列表转 Batch'
 TITLES['batch2list'] = 'Batch 转列表'
@@ -156,7 +157,7 @@ def workflow_document(document):
         node.pop('bypass_input', None)
         for key in RUNTIME_FIELDS:
             node.pop(key, None)
-        if node.get('kind') in MEDIA:
+        if node.get('kind') in MEDIA | {'text_file'}:
             node.setdefault('params', {}).pop('files', None)
     return result
 
@@ -171,7 +172,7 @@ def initialize_runtime(document):
         node.setdefault('results', [])
         node.setdefault('status', 'IDLE')
         node.setdefault('fingerprint', '')
-        if node.get('kind') in MEDIA:
+        if node.get('kind') in MEDIA | {'text_file'}:
             node.setdefault('params', {}).setdefault('files', [])
     return document
 
@@ -203,6 +204,9 @@ def new_node(kind, title=None, **values):
         if not collections.current(node):node['params'].setdefault('keep_batch', False)
     if kind in MEDIA:
         node['params'].setdefault('files', [])
+    elif kind == 'text_file':
+        node['params'].setdefault('files', [])
+        node['params'].setdefault('encoding', 'auto')
     elif kind in ('int', 'float'):
         node['params'].setdefault('value', 0 if kind == 'int' else 0.0)
     elif kind == 'text':
@@ -343,6 +347,8 @@ def _input_ports(node):
     if unknown_node(node):
         return [dict(key=key,label=key,type='any') for key in node.get('_ui_unknown_inputs', [])]
     if node.get('kind') in utility_nodes.KINDS:return utility_nodes.inputs(node)
+    if node.get('kind') == 'text_file':
+        return [dict(key='path', label='文件 / 文件夹路径', type='text')]
     if node.get('kind') in ('batch_select', 'rebatch'):
         return [{'key': 'value', 'label': '内容',
                  'type': 'batch' if node['kind'] == 'batch_select' else 'any'}]
@@ -449,6 +455,13 @@ def output_ports(node, legacy=False):
     if unknown_node(node):
         return [dict(key=key,type='any',label='任意') for key in node.get('_ui_unknown_outputs', [])]
     if node.get('kind') in ('note','subgraph'):return []
+    if node.get('kind') == 'prompt_styles':
+        return [dict(key=key,type='text',label='文本') for key in ('positive','negative')]
+    module = utility_nodes.advanced_nodes.LOCAL_NODES.get(node.get('kind'))
+    if module is not None:
+        types = getattr(module, 'OUTPUT_TYPES', {}).get(node['kind'])
+        if types:
+            return [dict(key=kind,type=kind,label=port_type_name(kind)) for kind in types]
     if node.get('kind') in ('image', 'image_split_alpha'):
         return [dict(key='output',type='image',label='图像'),dict(key='mask',type='mask',label='遮罩')]
     if node.get('kind') == 'image_crop_mask':
@@ -468,7 +481,7 @@ def output_ports(node, legacy=False):
 
 
 def connection_output_types(node, key='output'):
-    if key == 'output' and node.get('kind') not in ('branch','video_frames','note','subgraph'):
+    if key == 'output' and node.get('kind') not in ('branch','video_frames','note','subgraph','prompt_styles'):
         return output_types(node)  # Legacy connections retain their selection.
     port = next((port for port in output_ports(node, legacy=True) if port['key'] == key), None)
     if port is None:raise ValueError('连线输出类型已不存在，请重新连接')
@@ -493,7 +506,9 @@ def port_containers(document):
         if kind in ('rename', 'select', 'preview', 'batch_select', 'rebatch', 'list2batch', 'batch2list'):
             inherited = set(streams.get('value', unknown))
         selected = node.get('params', {}).get('type', 'any')
-        if node.get('bypass') and kind in collections.KINDS | {'rename', 'select', 'preview', 'text_join'}:
+        if node.get('bypass') and kind in ('image_untile', 'image_grid', 'edit_model'):
+            shapes = set(streams.get('image' if kind == 'edit_model' else 'images', unknown))
+        elif node.get('bypass') and kind in collections.KINDS | {'rename', 'select', 'preview', 'text_join'}:
             shapes = inherited
         elif kind in ('list2batch', 'merge_batch', 'batch_select', 'rebatch'):
             shapes = {'batch'}
@@ -506,7 +521,8 @@ def port_containers(document):
         elif kind in ('merge_list', 'preview', 'reroute', 'manual_select', 'branch'):shapes = set(streams.get('value', inherited))
         else:shapes = {'item'}
         for port in output_ports(node, legacy=True):
-            outputs[(identity,port['key'])] = frozenset(shapes if port['key'] in ('output','true','false') else {'batch'} if port['key'] == 'batch' else {'item'})
+            passthrough = node.get('bypass') and kind == 'image_untile' and port['key'] == 'image'
+            outputs[(identity,port['key'])] = frozenset(shapes if passthrough or port['key'] in ('output','true','false') else {'batch'} if port['key'] == 'batch' else {'item'})
         for target in outgoing[identity]:
             degree[target] -= 1
             if not degree[target]:ready.append(target)
@@ -553,6 +569,11 @@ def port_colors(document):
 
 def output_types(node):
     kind = node.get('kind')
+    module = utility_nodes.advanced_nodes.LOCAL_NODES.get(kind)
+    if module is not None:
+        types = getattr(module, 'OUTPUT_TYPES', {}).get(kind)
+        if types:return set(types)
+    if kind == 'text_file':return {'text'}
     if kind == 'image_crop_mask':return {'image','bounding','mask'}
     if kind in ('note','subgraph'):return set()
     if kind in utility_nodes.KINDS:return {utility_nodes.output_type(node)}
@@ -574,7 +595,7 @@ def output_types(node):
 
 def types_compatible(produced, accepted):
     return (produced == 'any' or accepted == 'any' or produced == accepted
-            or accepted in ('image_input', 'video_input', 'audio_input', 'text_input') and produced in (accepted[:-6], 'batch')
+            or accepted in ('image_input', 'video_input', 'audio_input', 'text_input', 'bounding_input', 'mask_input') and produced in (accepted[:-6], 'batch')
             or accepted == 'number' and produced in NUMERIC_TYPES
             or produced == 'number' and accepted in NUMERIC_TYPES
             or accepted == 'scalar' and produced in VALUE_TYPES
@@ -652,7 +673,7 @@ def validate_document(document):
         key = (edge['source'], edge.get('output', 'output'))
         shapes = containers.get(key, frozenset({'item', 'batch'}))
         content = colors.get(key, 'any')
-        if shapes == {'batch'} and (accepted not in ('any', 'batch', 'image_input', 'video_input', 'audio_input', 'text_input')
+        if shapes == {'batch'} and (accepted not in ('any', 'batch', 'image_input', 'video_input', 'audio_input', 'text_input', 'bounding_input', 'mask_input')
                                     or target['kind'] in ('filename', 'rename')):
             raise ValueError('此输出传递 Batch；请先使用 Batch 转 List，再连接此输入。')
         if accepted == 'batch' and shapes == {'item'}:
@@ -673,6 +694,9 @@ def validate_node(node):
         raise ValueError('忽略节点设置格式错误')
     if node['kind'] in ('int', 'float'):primitive_value(node)
     if node['kind'] in utility_nodes.KINDS:utility_nodes.validate(node)
+    if node['kind'] == 'text_file':
+        from .text_files import validate_params
+        validate_params(node.get('params', {}))
     if node['kind'] in MODEL_KINDS:
         if not isinstance(node.get('model_config', {}), dict):
             raise ValueError('模型节点配置格式错误')
@@ -763,6 +787,7 @@ def bypass_input_routes(node, connected):
     connected = set(connected)
     ports = [port for port in input_ports(node) if port['key'] in connected]
     kind = node['kind']
+    if kind == 'prompt_styles':return [(key, None) for key in ('positive','negative') if key in connected]
     if kind in DYNAMIC_INPUT_KINDS:
         return [(port['key'], None) for port in ports]
     if kind in ('select', 'preview', 'rename', 'text_join', 'branch') or kind in collections.KINDS:
@@ -780,7 +805,7 @@ def bypass_input_routes(node, connected):
         # first prompt socket must not claim the image socket's whole Batch.
         eligible.update('batch:' + content for content in content_types | {'any'}
                         if (port['type'] in ('any', 'batch') or port['type'] == content + '_input')
-                        and (produced & {'any', 'batch'} or kind == 'edit_model' and content == 'image'))
+                        and (produced & {'any', 'batch'} or kind in ('edit_model','image_untile','image_grid') and content == 'image'))
         eligible -= claimed
         if eligible:
             routes.append((port['key'], frozenset(eligible)))
@@ -922,6 +947,15 @@ def normalize_result(result):
     return result
 
 
+def output_matches(result, output):
+    """Select a physical output without flattening explicitly bypassed Batches."""
+    if output == 'output':return True
+    if output in ('positive','negative'):return result.get('_prompt_port') == output
+    if output in ('true','false'):return result.get('_branch_port') == output
+    if result_type(result) == 'batch' and result.get('_bypass_output') == output:return True
+    return result_matches(result, output)
+
+
 def batch_items(result):
     items = result.get('items')
     if (not isinstance(items, list) or not 1 <= len(items) <= 256 or
@@ -971,7 +1005,7 @@ def available_results(results, signatures=None):
     """
     available, kept_signatures = [], [] if isinstance(signatures, list) and len(signatures) == len(results) else None
     missing, readable, positions = False, {}, []
-    accepted_types = ('any', 'image', 'image_input', 'video_input', 'audio_input', 'text_input', 'batch', 'video', 'audio', 'text', 'file', 'number', 'scalar', 'int', 'float', 'boolean', 'enum', 'archive', 'mask', 'bounding')
+    accepted_types = ('any', 'image', 'image_input', 'video_input', 'audio_input', 'text_input', 'bounding_input', 'mask_input', 'batch', 'video', 'audio', 'text', 'file', 'number', 'scalar', 'int', 'float', 'boolean', 'enum', 'archive', 'mask', 'bounding', 'positive', 'negative')
     counters = dict.fromkeys(accepted_types, 0)
     for index, value in enumerate(results):
         try:
@@ -979,7 +1013,7 @@ def available_results(results, signatures=None):
             original_positions = result.get('_restored_positions') or {}
             current_positions = {}
             for accepted in accepted_types:
-                if result_matches(result, accepted):
+                if (output_matches(result, accepted) if accepted in ('positive','negative') or result.get('_bypass_output') == accepted else result_matches(result, accepted)):
                     counters[accepted] += 1
                     position = original_positions.get(accepted, counters[accepted])
                     if isinstance(position, int) and not isinstance(position, bool) and position > 0:
@@ -1055,14 +1089,13 @@ def select_results(results, edge=None, accepted='any', *, strict=False):
                    if result_type(r)=='image' and r.get('mask_path')
                    and mask_origin(r) not in explicit_masks else r
                    for i,r in enumerate(results)]
-    if output != 'output' and output not in ITEM_OUTPUT_TYPES and output not in ('true','false'):
+    if output != 'output' and output not in ITEM_OUTPUT_TYPES and output not in ('true','false','positive','negative'):
         raise ValueError('无效的输出列表类型')
     matches = [normalize_result(result) for result in results
-               if (output == 'output' or (result.get('_branch_port') == output if output in ('true','false')
-                                         else result_matches(result, output)))
+               if output_matches(result, output)
                and result_matches(result, accepted, connections=not strict)]
     if not matches:
-        if accepted not in ('any', 'batch', 'image_input', 'video_input', 'audio_input', 'text_input') and any(result_type(r) == 'batch' for r in results):
+        if accepted not in ('any', 'batch', 'image_input', 'video_input', 'audio_input', 'text_input', 'bounding_input', 'mask_input') and any(result_type(r) == 'batch' for r in results):
             raise ValueError('此输入不接收 Batch；请先连接“Batch 转 List”，再逐项运行。')
         raise NoMatchingInput('上游没有符合输入类型的结果')
     mode = edge.get('mode', 'all')
@@ -1183,6 +1216,11 @@ def bounding_group(result):
                         if key.startswith('__bounding_group__:')))
 
 
+def prompt_group(result):
+    return tuple(sorted((key, value) for key, value in lineage(result).items()
+                        if key.startswith('__prompt_group__:')))
+
+
 def collection_lineages(results, node_id):
     """Give a crop's distinct typed companions the same collection origin.
 
@@ -1193,10 +1231,18 @@ def collection_lineages(results, node_id):
     groups = {}
     for index, value in enumerate(results):
         marker = bounding_group(value)
-        if marker and result_type(value) in ('image', 'bounding', 'mask'):
+        if marker and result_type(value) in ('image', 'bounding', 'mask', 'text'):
             groups.setdefault(marker, []).append(index)
     for indices in groups.values():
         if len({result_type(results[index]) for index in indices}) != len(indices):continue
+        for index in indices:origins[index][node_id] = str(indices[0])
+    prompt_groups = {}
+    for index, value in enumerate(results):
+        marker = prompt_group(value)
+        if marker and value.get('_prompt_port') in ('positive', 'negative'):
+            prompt_groups.setdefault(marker, []).append(index)
+    for indices in prompt_groups.values():
+        if len({results[index]['_prompt_port'] for index in indices}) != len(indices):continue
         for index in indices:origins[index][node_id] = str(indices[0])
     return origins
 
@@ -1208,9 +1254,9 @@ def assign_collection_lineages(results, node_id):
     # Member origins override type-specific outer Batch origins when unpacked.
     # Include ordinary items in this pass so mixed List/Batch streams align too.
     for member, origins in zip(members, collection_lineages(members, node_id)):
-        if bounding_group(member):member['lineage'] = origins
+        if bounding_group(member) or prompt_group(member):member['lineage'] = origins
     for index, value in enumerate(results):
-        if result_type(value) != 'batch' and bounding_group(value):continue
+        if result_type(value) != 'batch' and (bounding_group(value) or prompt_group(value)):continue
         value['lineage'] = dict(lineage(value), **{node_id: str(index)})
 
 
@@ -1255,6 +1301,7 @@ def result_signature(result):
     signature = {'type': result['type'], 'content': content,
             'generation': result.get('generation', ''),
             'task_id': result.get('task_id', ''), 'index': result.get('index', 0)}
+    if result.get('_prompt_port'):signature['prompt_port'] = result['_prompt_port']
     if not path and result.get('name'):signature['name'] = result['name']
     if result.get('_processed_mask'):
         signature['mask_content'] = file_hash(result['mask_path'])
@@ -1275,6 +1322,17 @@ def results_valid(results, signatures=None):
 def bypass_results(node, inputs, *, connected=None):
     """Forward exactly the routes selected by dependency planning."""
     routes = bypass_input_routes(node, inputs if connected is None else connected)
+    if node['kind'] == 'prompt_styles':
+        result = [dict(copy.deepcopy(value), _prompt_port=key) for key, _ in routes for value in inputs.get(key, [])]
+        groups = {}
+        for value in result:
+            origin = tuple(sorted(lineage(value).items()))
+            if origin:groups.setdefault(origin, []).append(value)
+        for origin, values in groups.items():
+            if len(values) == 2 and {value['_prompt_port'] for value in values} == {'positive','negative'}:
+                marker = hashlib.sha256(json.dumps(origin).encode('utf-8')).hexdigest()
+                for value in values:value.setdefault('lineage', {})['__prompt_group__:' + node['id']] = marker
+        return result
     def content_route(value):
         kind = result_type(value)
         if kind != 'batch':return kind
@@ -1282,6 +1340,9 @@ def bypass_results(node, inputs, *, connected=None):
         return 'batch:' + (next(iter(contents)) if len(contents) == 1 else 'any')
     result = [copy.deepcopy(value) for key, eligible in routes for value in inputs.get(key, [])
               if eligible is None or content_route(value) in eligible]
+    if node['kind'] == 'image_untile':
+        for value in result:
+            if result_type(value) == 'batch':value['_bypass_output'] = 'image'
     if node['kind'] == 'branch':
         return [dict(copy.deepcopy(value), _branch_port=port)
                 for port in ('true', 'false') for value in result]
@@ -1380,7 +1441,7 @@ def input_value(result, field):
     return value
 
 
-def fingerprint(node, inputs, edges=()):
+def fingerprint(node, inputs, edges=(), *, file_snapshots=None):
     """Content-addressed execution identity. Titles and canvas layout are irrelevant."""
     app = node.get('app') or {}
     fields = canonical_fields(node)
@@ -1398,13 +1459,19 @@ def fingerprint(node, inputs, edges=()):
         # Cosmetic descriptions do not change generation semantics.
         field.pop('description', None)
     params = copy.deepcopy(node.get('params', {}))
+    if node['kind'] in utility_nodes.advanced_nodes.LOCAL_NODES or node['kind'] in utility_nodes.prompt_nodes.KINDS:
+        for key in inputs:params.pop(key, None)
     if isinstance(params.get('_masks'),dict):
         params['_masks']={key:value for key,value in params['_masks'].items() if key not in inputs}
         if not params['_masks']:params.pop('_masks')
     if node['kind'] in MODEL_KINDS:
         for key in inputs:params.pop(key, None)
         if params.get('image'):params['image'] = file_hash(params['image'])
-    if 'files' in params:
+    if node['kind'] == 'text_file':
+        if file_snapshots is None:
+            raise ValueError('文本文件必须先冻结内容，再计算运行指纹')
+        params.pop('files', None)
+    elif 'files' in params:
         params['files'] = [file_hash(path) for path in params['files']]
     for key in [parameter_key(field) for field in fields]:
         params.pop(key, None)
@@ -1417,6 +1484,9 @@ def fingerprint(node, inputs, edges=()):
                'edges': [{key: edge.get(key) for key in ('source', 'input', 'mode', 'indices') + (('output',) if edge.get('output') not in (None, 'output') else ())}
                          for edge in edges]}
     if node['kind'] == 'rename':payload['intermediate_copy_version'] = 1
+    if node['kind'] in utility_nodes.advanced_nodes.LOCAL_NODES or node['kind'] in utility_nodes.prompt_nodes.KINDS:
+        payload['local_processing_version'] = 2
+    if node['kind'] == 'text_file':payload['text_file_snapshot'] = file_snapshots
     if node['kind'] in ('image', 'image_resize', 'image_crop', 'image_pad'):
         payload['mask_semantics_version'] = 2
     if any(r.get('path') for values in inputs.values() for r in values):

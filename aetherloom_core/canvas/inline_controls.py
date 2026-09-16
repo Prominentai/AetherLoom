@@ -195,6 +195,9 @@ class InlineControls(QtWidgets.QScrollArea):
 
     def refresh(self):
         self.inspector.node = self.item.node
+        if self.item.node['kind'] == 'text_file':
+            self.inspector.connected_inputs = {edge['input'] for edge in self.page.document['edges']
+                                               if edge['target'] == self.item.node['id']}
         if hasattr(self.inspector, 'refresh_input_preview'):self.inspector.refresh_input_preview()
         if hasattr(self.inspector, 'compare_view'):
             self.inspector.compare_view.set_results(self.item.node.get('results', []))
@@ -218,9 +221,9 @@ class InlineControls(QtWidgets.QScrollArea):
         self.setStyleSheet(
             'QWidget{color:'+colors['text']+';font-family:"Microsoft YaHei UI";font-size:12px;}'
             'QScrollArea,QScrollArea>QWidget>QWidget{background:'+colors['surface']+';border:none;}'
-            'QLineEdit,QTextEdit,QAbstractSpinBox,QComboBox,QListWidget{background:'+colors['input']+';'
+            'QLineEdit,QTextEdit,QPlainTextEdit,QAbstractSpinBox,QComboBox,QListWidget{background:'+colors['input']+';'
             'border:1px solid '+colors['border']+';border-radius:4px;padding:3px;selection-background-color:'+colors['accent']+';}'
-            'QTextEdit{padding:7px;font-size:13px;border-radius:6px;}'
+            'QTextEdit,QPlainTextEdit{padding:7px;font-size:13px;border-radius:6px;}'
             'QTextEdit:focus,QLineEdit:focus{border-color:'+colors['accent']+';}'
             'QTextEdit:disabled,QLineEdit:disabled,QAbstractSpinBox:disabled,QComboBox:disabled{color:'+colors['muted']+';}'
             'QPushButton,QToolButton{background:'+colors['input']+';border:1px solid '+colors['border']+';'

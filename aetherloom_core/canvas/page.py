@@ -808,7 +808,8 @@ class CanvasPage(QtWidgets.QWidget):
                 return choices
         type_names = {'mask': '遮罩', 'bounding': 'Bounding', 'text': '文本', 'image': '图像', 'audio': '音频', 'video': '视频',
                       'int': 'INT', 'float': 'FLOAT', 'boolean': '布尔', 'enum': '枚举', 'number': '数值', 'scalar': '枚举', 'file': '任意', 'any': '任意', 'archive': '压缩文件',
-                      'batch': 'Batch', 'image_input': '图像', 'video_input': '视频', 'audio_input': '音频', 'text_input': '文本'}
+                      'batch': 'Batch', 'image_input': '图像', 'video_input': '视频', 'audio_input': '音频', 'text_input': '文本',
+                      'bounding_input': 'Bounding', 'mask_input': '遮罩'}
         for group, value, title, prototype in prototypes:
             prefix = model.NODE_CATEGORIES[group] + ' · '
             choice = {'group': group, 'value': value, 'label': prefix + title,
@@ -1102,7 +1103,7 @@ class CanvasPage(QtWidgets.QWidget):
         self._mark_stale(edge['target'])
         self._edited(connections=True, select=edge['target'])
         target = next((node for node in self.document['nodes'] if node['id'] == edge['target']), {})
-        internal = target.get('kind') in {'app'} | set(model.MODEL_KINDS) or target.get('kind') == 'rename' and edge.get('input') in ('name', 'extension')
+        internal = target.get('kind') in {'app', 'text_file'} | set(model.MODEL_KINDS) or target.get('kind') == 'rename' and edge.get('input') in ('name', 'extension')
         self._message('连接已断开，输入恢复使用节点内部值。' if internal else '连接已断开，请连接上游结果后运行。')
 
     def _mark_stale(self, node_id):
@@ -1541,20 +1542,23 @@ class CanvasPage(QtWidgets.QWidget):
             self._prune_removed_runtime()
 
     def _drop_files(self, paths, position):
+        from .text_files import TEXT_SUFFIXES
         groups = {}
         folders = [path for path in paths if os.path.isdir(path)]
         if folders:
-            label, accepted = QtWidgets.QInputDialog.getItem(self, '导入文件夹', '读取文件类型', ['图像', '视频', '音频'], 0, False)
-            if accepted:groups[{'图像': 'image', '视频': 'video', '音频': 'audio'}[label]] = folders
+            label, accepted = QtWidgets.QInputDialog.getItem(self, '导入文件夹', '读取文件类型', ['图像', '视频', '音频', '文本'], 0, False)
+            if accepted:groups[{'图像': 'image', '视频': 'video', '音频': 'audio', '文本': 'text_file'}[label]] = folders
         for path in paths:
             if not os.path.isfile(path):
                 continue
             extension = Path(path).suffix.lower()
             kind = next((kind for kind, suffixes in model.MEDIA_SUFFIXES.items() if extension in suffixes), None)
+            if kind is None and extension in TEXT_SUFFIXES:
+                kind = 'text_file'
             if kind is None:continue
             groups.setdefault(kind, []).append(path)
         if not groups:
-            self._message('请拖入支持的图像、视频、音频文件或素材文件夹。')
+            self._message('请拖入支持的图像、视频、音频、文本文件或素材文件夹。')
             return
         self._checkpoint()
         created, offset = [], 0
