@@ -3,6 +3,7 @@ from aetherloom_core.resources import DEFAULT_EXPAND_SYSTEM_PROMPT
 from aetherloom_core.resources import DEFAULT_POLISH_SYSTEM_PROMPT
 from aetherloom_core.resources import DEFAULT_IMAGE_REVERSE_PROMPT
 from aetherloom_core.autocomplete import completion_options
+from aetherloom_core.canvas.preferences import preferences_for
 from PyQt5 import QtCore, QtGui, QtWidgets
 from aetherloom_core.services.decoding import grc
 import os
@@ -68,6 +69,7 @@ class SettingsMixin:
                 'rh_retry_delay': int(getattr(self, 'rh_retry_delay', 5)),
                 'rh_retry_head_count': int(getattr(self, 'rh_retry_head_count', 1)),
                 'autocomplete': completion_options(getattr(self, 'settings', None)),
+                'canvas_preferences': preferences_for(self),
                 'local_mode': int(self.local_mode_group.checkedId()) if hasattr(self, 'local_mode_group') and self.local_mode_group is not None else None,
                 'window': win,
                 'theme_mode': getattr(self, '_theme_mode', 'dark')

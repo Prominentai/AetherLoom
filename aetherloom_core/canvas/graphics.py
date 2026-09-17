@@ -13,6 +13,14 @@ from .model import input_ports
 from . import model
 from . import preview_data
 from .appearance import tint, kind_color, draw_kind_icon, bypass_colors
+from .preferences import normalize_preferences
+
+
+PREVIEW_PROFILES = {
+    'economy': {'image_size': (256, 160), 'limit': 32, 'lod': .6},
+    'balanced': {'image_size': (512, 320), 'limit': 64, 'lod': .42},
+    'quality': {'image_size': (768, 480), 'limit': 96, 'lod': .35},
+}
 
 
 KIND_NAMES = {'app': 'APP', 'image': '图像', 'video': '视频', 'audio': '音频', 'text_file': '文本文件导入',
@@ -85,7 +93,7 @@ class _ThumbnailWorker(QtCore.QRunnable):
                 import imageio_ffmpeg
                 completed = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), '-nostdin', '-v', 'error',
                     '-threads', '1', '-i', os.path.abspath(self.key[0]), '-an', '-sn', '-dn', '-frames:v', '1',
-                    '-vf', 'scale=512:320:force_original_aspect_ratio=decrease', '-filter_threads', '1',
+                    '-vf', f'scale={self.image_size[0]}:{self.image_size[1]}:force_original_aspect_ratio=decrease', '-filter_threads', '1',
                     '-threads', '1', '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1'],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=12,
                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -112,7 +120,7 @@ class _ThumbnailWorker(QtCore.QRunnable):
 
 
 class ThumbnailCache(QtCore.QObject):
-    """Visible-only requests, two decoders, 64 small GUI-owned pixmaps."""
+    """Visible-only requests, two decoders and a bounded GUI-owned pixmap cache."""
     ready = QtCore.pyqtSignal()
 
     def __init__(self, parent=None, limit=64, image_size=(512, 320)):
@@ -132,10 +140,23 @@ class ThumbnailCache(QtCore.QObject):
         self.pending.discard(key)
         if self.closed:
             return
+        if key[4] != self.image_size:
+            self.ready.emit()
+            return
         self.entries[key] = decoded if isinstance(decoded,str) else QtGui.QPixmap.fromImage(decoded) if decoded is not None else None
         while len(self.entries) > self.limit:
             self.entries.popitem(last=False)
         self.ready.emit()
+
+    def configure(self, limit, image_size):
+        image_size = tuple(image_size)
+        if image_size != self.image_size:
+            self.image_size = image_size
+            self.entries.clear()
+            # Running decoders remain bounded; their old-size results are ignored.
+        self.limit = limit
+        while len(self.entries) > self.limit:
+            self.entries.popitem(last=False)
 
     def close(self):
         self.closed = True
@@ -147,7 +168,7 @@ class ThumbnailCache(QtCore.QObject):
             return None
         try:
             stat = os.stat(path)
-            key = (path, stat.st_size, stat.st_mtime_ns, kind)
+            key = (path, stat.st_size, stat.st_mtime_ns, kind, self.image_size)
         except (OSError, TypeError):
             return None
         if key in self.entries:
@@ -162,7 +183,7 @@ class ThumbnailCache(QtCore.QObject):
     def failed(self, path, kind):
         try:
             stat = os.stat(path)
-            key = (path, stat.st_size, stat.st_mtime_ns, kind)
+            key = (path, stat.st_size, stat.st_mtime_ns, kind, self.image_size)
             return key in self.entries and self.entries[key] is None
         except (OSError, TypeError):
             return True
@@ -254,7 +275,27 @@ class NodeItem(QtWidgets.QGraphicsObject):
         self.output = self.outputs.get('output', next(iter(self.outputs.values()), None))
         self.refresh_output_counts()
         self.setPos(float(node.get('x', 0)), float(node.get('y', 0)))
+        self.refresh_layout_lock()
         self.refresh_bypass()
+
+    def refresh_layout_lock(self):
+        locked = bool(self.node.get('layout_locked'))
+        self.setFlag(self.ItemIsMovable, not locked)
+        if locked:
+            if self._resize_start is not None:
+                self.finish_resize(cancel=True)
+            self._set_resize_hover(False)
+
+    def _paint_layout_lock(self, painter):
+        if not self.node.get('layout_locked'):
+            return
+        painter.save()
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.setPen(QtGui.QPen(QtGui.QColor(self.canvas_scene.colors['muted']), 1.3))
+        x, y = self.width - 18, self.height - 17
+        painter.drawArc(QtCore.QRectF(x + 2, y - 4, 7, 8), 0, 180 * 16)
+        painter.drawRoundedRect(QtCore.QRectF(x, y, 11, 8), 2, 2)
+        painter.restore()
 
     def refresh_bypass(self):
         ignored = bool(self.node.get('bypass'))
@@ -268,7 +309,8 @@ class NodeItem(QtWidgets.QGraphicsObject):
         self.setToolTip(hint + (issue['detail'] if issue else str(display_issue(self.node) or self.node.get('_input_issue') or self.node.get('error') or self.node.get('message') or ''))
                         + '\n当前节点进度\n' + progress_text(self.node.get('node_progress'))
                         + '\n' + run_hint + '双击标题、右键或 Alt+Enter 打开完整设置。'
-                        + '\n双击结果查看预览，拖动右下角调整大小。')
+                        + '\n双击结果查看预览。'
+                        + ('位置与大小已锁定；参数仍可编辑。' if self.node.get('layout_locked') else '拖动右下角调整大小。'))
 
     @classmethod
     def minimum_size(cls, node):
@@ -373,12 +415,13 @@ class NodeItem(QtWidgets.QGraphicsObject):
             self.unsetCursor()
 
     def hoverMoveEvent(self, event):
-        self._set_resize_hover(self.resize_rect().contains(event.pos()))
+        self._set_resize_hover(not self.node.get('layout_locked') and self.resize_rect().contains(event.pos()))
         self._hover_result(event.pos())
         super().hoverMoveEvent(event)
 
     def hoverEnterEvent(self, event):
         self._hovered=True;self.update()
+        self.canvas_scene.set_hover_connection(node_id=self.node['id'])
         self._hover_result(event.pos())
         super().hoverEnterEvent(event)
 
@@ -386,12 +429,16 @@ class NodeItem(QtWidgets.QGraphicsObject):
         from aetherloom_core.hover_preview import hover_player
         hover_player().stop(self)
         self._hovered=False;self.update()
+        self.canvas_scene.set_hover_connection()
         if self._resize_start is None:
             self._set_resize_hover(False)
         super().hoverLeaveEvent(event)
 
     def _hover_result(self, position):
         from aetherloom_core.hover_preview import animated_path, hover_player
+        if not self.canvas_scene.preferences['hover_playback']:
+            hover_player().stop(self)
+            return
         for index, rect in self.result_layout()[0]:
             path = preview_data.path_of(self.result_at(index))
             if rect.contains(position) and animated_path(path):
@@ -409,7 +456,8 @@ class NodeItem(QtWidgets.QGraphicsObject):
         self.update(self.content_rect())
 
     def _hover_result_visible(self, index, path):
-        if (not self.isVisible() or self.scene() is None or not 0 <= index < self.result_count()
+        if (not self.canvas_scene.preferences['hover_playback'] or not self.isVisible()
+                or self.scene() is None or not 0 <= index < self.result_count()
                 or preview_data.path_of(self.result_at(index)) != path):
             return False
         rect = next((rect for i, rect in self.result_layout()[0] if i == index), None)
@@ -627,7 +675,9 @@ class NodeItem(QtWidgets.QGraphicsObject):
     def paint(self, painter, option, widget=None):
         if self.node['kind'] == 'subgraph':
             from .subgraphs import paint
-            paint(self,painter);return
+            paint(self,painter)
+            self._paint_layout_lock(painter)
+            return
         p = self.canvas_scene.colors
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         selected = self.isSelected()
@@ -771,9 +821,12 @@ class NodeItem(QtWidgets.QGraphicsObject):
                          QtGui.QFontMetrics(font).elidedText(label,QtCore.Qt.ElideRight,int(self.width-59)))
         painter.setPen(QtGui.QPen(QtGui.QColor(p['accent'] if self._resize_hover or self._resize_start else p['muted']),
                                  1.5, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
-        for offset in (7, 12):
-            painter.drawLine(QtCore.QPointF(self.width - 6 - offset, self.height - 6),
-                             QtCore.QPointF(self.width - 6, self.height - 6 - offset))
+        if self.node.get('layout_locked'):
+            self._paint_layout_lock(painter)
+        else:
+            for offset in (7, 12):
+                painter.drawLine(QtCore.QPointF(self.width - 6 - offset, self.height - 6),
+                                 QtCore.QPointF(self.width - 6, self.height - 6 - offset))
         if (model.supports_local_decode(self.node) and self.node.get('decode_settings', {}).get('enabled')):
             painter.setPen(QtGui.QPen(QtGui.QColor(p['border']), 1))
             center_y = self.decode_rect().center().y()
@@ -802,7 +855,8 @@ class NodeItem(QtWidgets.QGraphicsObject):
                         self.update()
                     event.accept()
                     return
-        if event.button() == QtCore.Qt.LeftButton and self.resize_rect().contains(event.pos()):
+        if (event.button() == QtCore.Qt.LeftButton and not self.node.get('layout_locked')
+                and self.resize_rect().contains(event.pos())):
             if not self.isSelected():
                 if not event.modifiers() & QtCore.Qt.ControlModifier:
                     self.canvas_scene.clearSelection()
@@ -825,10 +879,12 @@ class NodeItem(QtWidgets.QGraphicsObject):
             self.canvas_scene.decode_requested.emit(self.node['id'])
             event.accept()
             return
-        self._start_positions = {item.node['id']: (item.pos().x(), item.pos().y())
-                                 for item in self.scene().selectedItems() if isinstance(item, NodeItem)}
-        self._start_positions[self.node['id']] = (self.pos().x(), self.pos().y())
         super().mousePressEvent(event)
+        self._start_positions = {item.node['id']: (item.pos().x(), item.pos().y())
+                                 for item in self.scene().selectedItems()
+                                 if isinstance(item, NodeItem) and not item.node.get('layout_locked')}
+        self._drag_origin = event.scenePos()
+        self._drag_started = False
 
     def mouseMoveEvent(self, event):
         if getattr(self,'_selection_click',False):
@@ -837,6 +893,28 @@ class NodeItem(QtWidgets.QGraphicsObject):
             origin, size = self._resize_start
             delta = event.scenePos() - origin
             self.set_size((size[0] + delta.x(), size[1] + delta.y()))
+            event.accept()
+            return
+        if (self._start_positions and not self.node.get('layout_locked')
+                and self.canvas_scene.preferences['snap_to_grid']
+                and event.buttons() & QtCore.Qt.LeftButton):
+            delta = event.scenePos() - self._drag_origin
+            scale = abs(self.scene().views()[0].transform().m11()) if self.scene().views() else 1
+            if not self._drag_started and delta.manhattanLength() * scale < QtWidgets.QApplication.startDragDistance():
+                event.accept()
+                return
+            self._drag_started = True
+            anchor = QtCore.QPointF(*self._start_positions[self.node['id']])
+            target = anchor + delta
+            step = self.canvas_scene.preferences['grid_size']
+            # Quantize one anchor and apply its delta to every unlocked selection.
+            # Runtime refreshes, automatic layout and initial positions never snap.
+            delta = QtCore.QPointF(round(target.x() / step) * step,
+                                  round(target.y() / step) * step) - anchor
+            for identity, position in self._start_positions.items():
+                item = self.canvas_scene.nodes.get(identity)
+                if item is not None and not item.node.get('layout_locked'):
+                    item.setPos(QtCore.QPointF(*position) + delta)
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -876,11 +954,28 @@ class NodeItem(QtWidgets.QGraphicsObject):
         self._start_positions = None
 
 
-def connection_path(start, end, direction=1):
+def connection_path(start, end, direction=1, style='curve'):
     distance = max(60, min(180, abs(end.x() - start.x()) * .5))
     path = QtGui.QPainterPath(start)
     offset = QtCore.QPointF(direction * distance, 0)
-    path.cubicTo(start + offset, end - offset, end)
+    if style == 'straight':
+        path.lineTo(end)
+    elif style == 'orthogonal':
+        if direction * (end.x() - start.x()) >= 40:
+            middle = (start.x() + end.x()) / 2
+            path.lineTo(middle, start.y())
+            path.lineTo(middle, end.y())
+        else:
+            middle = (start.y() + end.y()) / 2
+            if abs(start.y() - end.y()) < 40:
+                middle += 60
+            path.lineTo(start + offset)
+            path.lineTo(start.x() + offset.x(), middle)
+            path.lineTo(end.x() - offset.x(), middle)
+            path.lineTo(end - offset)
+        path.lineTo(end)
+    else:
+        path.cubicTo(start + offset, end - offset, end)
     return path
 
 
@@ -891,6 +986,8 @@ class EdgeItem(QtWidgets.QGraphicsPathItem):
         self.setFlag(self.ItemIsSelectable)
         self.setAcceptHoverEvents(True)
         self._hovered = False
+        self._branch_highlight = False
+        self._branch_dimmed = False
         self.setPen(QtGui.QPen(QtGui.QColor(scene.colors['muted']), 3))
         self._direction = None
         self.setZValue(-1)
@@ -915,7 +1012,8 @@ class EdgeItem(QtWidgets.QGraphicsPathItem):
         target=aliases.get((edge['target'],edge['input'],False)) or target
         if start_port is None:return
         start, end = start_port.scenePos(), target.scenePos()
-        path = connection_path(start, end)
+        path = connection_path(start, end, style=scene.preferences['link_style'])
+        self.setPen(QtGui.QPen(QtGui.QColor(scene.colors['muted']), scene.preferences['link_width'] + 1))
         self.setPath(path)
         fraction = min(.2, 20 / max(1, path.length()))
         self._endpoints = path.pointAtPercent(fraction), path.pointAtPercent(1 - fraction)
@@ -938,7 +1036,12 @@ class EdgeItem(QtWidgets.QGraphicsPathItem):
         return super().boundingRect().adjusted(-6, -6, 6, 6)
 
     def paint(self, painter, option, widget=None):
-        highlighted = self.isSelected() or self._hovered
+        direct = self.isSelected() or self._hovered
+        highlighted = direct or self._branch_highlight
+        preferences = self.canvas_scene.preferences
+        alpha = round(preferences['link_opacity'] * 2.55)
+        alpha = max(alpha, 225) if highlighted else round(alpha * .25) if self._branch_dimmed else alpha
+        width = preferences['link_width'] + (0.9 if highlighted else 0)
         painter.save()
         painter.setBrush(QtCore.Qt.NoBrush)
         p=self.canvas_scene.colors
@@ -946,14 +1049,13 @@ class EdgeItem(QtWidgets.QGraphicsPathItem):
         port=target.ports.get(self.edge['input']) if target else None
         color=p['accent'] if highlighted else kind_color(port.content_kind if port else 'any',p)
         if highlighted:
-            painter.setPen(QtGui.QPen(tint(color,30),8,QtCore.Qt.SolidLine,QtCore.Qt.RoundCap));painter.drawPath(self.path())
-        painter.setPen(QtGui.QPen(tint(color,255 if highlighted else 150),
-                                 2.7 if highlighted else 1.8,QtCore.Qt.SolidLine,QtCore.Qt.RoundCap))
+            painter.setPen(QtGui.QPen(tint(color,30),width+5,QtCore.Qt.SolidLine,QtCore.Qt.RoundCap));painter.drawPath(self.path())
+        painter.setPen(QtGui.QPen(tint(color,alpha),width,QtCore.Qt.SolidLine,QtCore.Qt.RoundCap))
         painter.drawPath(self.path())
-        if self._direction is not None and abs(painter.transform().m11())>.5:
-            painter.setPen(QtGui.QPen(tint(color,230),1.8,QtCore.Qt.SolidLine,QtCore.Qt.RoundCap,QtCore.Qt.RoundJoin))
+        if preferences['link_arrows'] and self._direction is not None and abs(painter.transform().m11())>.5:
+            painter.setPen(QtGui.QPen(tint(color,alpha),width,QtCore.Qt.SolidLine,QtCore.Qt.RoundCap,QtCore.Qt.RoundJoin))
             painter.drawPolyline(self._direction)
-        if highlighted:
+        if direct:
             painter.setBrush(QtGui.QColor(self.canvas_scene.colors['surface']))
             painter.setPen(QtGui.QPen(QtGui.QColor(self.canvas_scene.colors['accent']), 2))
             for point in self.endpoints():
@@ -967,11 +1069,13 @@ class EdgeItem(QtWidgets.QGraphicsPathItem):
 
     def hoverEnterEvent(self, event):
         self._hovered = True
+        self.canvas_scene.set_hover_connection(edge_id=self.edge['id'])
         self.update()
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
         self._hovered = False
+        self.canvas_scene.set_hover_connection()
         self.update()
         super().hoverLeaveEvent(event)
 
@@ -997,6 +1101,12 @@ class CanvasScene(QtWidgets.QGraphicsScene):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.nodes, self.edges = {}, {}
+        self.preferences = normalize_preferences({})
+        self.preview_profile = PREVIEW_PROFILES[self.preferences['preview_quality']]
+        self._connection_hover = (None, None)
+        self._upstream, self._downstream = {}, {}
+        self._building_document = False
+        self.selectionChanged.connect(self._refresh_connection_highlights)
         self._resizing_node = None
         self.colors = palette('dark')
         self.thumbnails = ThumbnailCache(self)
@@ -1014,7 +1124,93 @@ class CanvasScene(QtWidgets.QGraphicsScene):
         self._link_animation.timeout.connect(self._animate_link)
         self.setSceneRect(-20000, -20000, 40000, 40000)
 
+    def set_preferences(self, preferences):
+        previous = self.preferences
+        self.preferences = normalize_preferences(preferences)
+        self.preview_profile = PREVIEW_PROFILES[self.preferences['preview_quality']]
+        self.thumbnails.configure(self.preview_profile['limit'], self.preview_profile['image_size'])
+        if previous['hover_playback'] and not self.preferences['hover_playback']:
+            from aetherloom_core.hover_preview import hover_player
+            for item in self.nodes.values():
+                hover_player().stop(item)
+                item._hover_pixmap = None
+        if not self.preferences['tooltips']:
+            QtWidgets.QToolTip.hideText()
+        for edge in self.edges.values():
+            if previous['link_style'] != self.preferences['link_style'] or previous['link_width'] != self.preferences['link_width']:
+                edge.update_path()
+            edge.update()
+        self._refresh_connection_highlights()
+        self.invalidate(self.sceneRect(), self.BackgroundLayer)
+        for view in self.views():
+            if hasattr(view, '_cancel_tooltip'):
+                view._cancel_tooltip()
+            view.viewport().update()
+
+    def helpEvent(self, event):
+        if not self.preferences['tooltips']:
+            event.accept()
+            return
+        super().helpEvent(event)
+
+    def set_hover_connection(self, node_id=None, edge_id=None):
+        focus = (node_id, edge_id)
+        if focus != self._connection_hover:
+            self._connection_hover = focus
+            self._refresh_connection_highlights()
+
+    def _index_connections(self):
+        self._upstream, self._downstream = {}, {}
+        for identity, item in self.edges.items():
+            edge = item.edge
+            self._upstream.setdefault(edge['target'], []).append((edge['source'], identity))
+            self._downstream.setdefault(edge['source'], []).append((edge['target'], identity))
+        self._refresh_connection_highlights()
+
+    def _refresh_connection_highlights(self):
+        if self._building_document:
+            return
+        highlighted = set()
+        seeds = set()
+        if self.preferences['highlight_connections']:
+            node_id, edge_id = self._connection_hover
+            if node_id in self.nodes:
+                seeds.add(node_id)
+            if edge_id in self.edges:
+                highlighted.add(edge_id)
+                edge = self.edges[edge_id].edge
+                seeds.update((edge['source'], edge['target']))
+            for item in self.selectedItems():
+                if isinstance(item, NodeItem):
+                    seeds.add(item.node['id'])
+                    if item.node['kind'] == 'subgraph':
+                        seeds.update(item.node.get('members', []))
+                elif isinstance(item, EdgeItem):
+                    highlighted.add(item.edge['id'])
+                    seeds.update((item.edge['source'], item.edge['target']))
+            # Independent directed traversals do not leak through an ancestor
+            # into unrelated sibling branches. No traversal runs on mouse move.
+            for adjacency in (self._upstream, self._downstream):
+                visited, pending = set(seeds), list(seeds)
+                while pending:
+                    for neighbor, identity in adjacency.get(pending.pop(), ()):
+                        highlighted.add(identity)
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            pending.append(neighbor)
+        active = bool(seeds or highlighted)
+        for identity, item in self.edges.items():
+            state = (identity in highlighted, active and identity not in highlighted)
+            if state != (item._branch_highlight, item._branch_dimmed):
+                item._branch_highlight, item._branch_dimmed = state
+                item.update()
+
     def set_document(self, doc):
+        self._building_document = True
+        self._connection_hover = (None, None)
+        for view in self.views():
+            if hasattr(view, '_cancel_tooltip'):
+                view._cancel_tooltip()
         self.group_aliases={};self.group_owners={}
         model.sync_dynamic_inputs(doc)
         self.cancel_resize()
@@ -1033,6 +1229,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
             item = EdgeItem(edge, self)
             self.edges[edge['id']] = item
             self.addItem(item)
+        self._building_document = False
         self.refresh_ports()
 
     def refresh_ports(self):
@@ -1052,6 +1249,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
                 port.refresh_connection((node_id, key) in connected)
         from .subgraphs import sync
         sync(self)
+        self._index_connections()
 
     def sync_connections(self, doc):
         """Reconcile sockets and edges without destroying existing node widgets."""
@@ -1110,6 +1308,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
             item = self.nodes.get(node['id'])
             if item:
                 item.node = node
+                item.refresh_layout_lock()
                 item.refresh_output_counts()
                 if item.inline_proxy is not None:item.inline_proxy.widget().refresh()
                 if item._resize_start is None:
@@ -1136,10 +1335,20 @@ class CanvasScene(QtWidgets.QGraphicsScene):
 
     def drawBackground(self, painter, rect):
         painter.fillRect(rect, QtGui.QColor(self.colors['canvas']))
+        style = self.preferences['grid_style']
+        if style == 'none':
+            return
         scale = abs(painter.transform().m11()) or 1
-        step = 24 * (2 ** max(0,math.ceil(math.log2(18 / (24 * scale)))))
+        size = self.preferences['grid_size']
+        step = int(size * (2 ** max(0,math.ceil(math.log2(18 / (size * scale))))))
         left, top = math.floor(rect.left() / step) * step, math.floor(rect.top() / step) * step
         painter.setPen(QtGui.QPen(tint(self.colors['border'],150),0))
+        if style == 'lines':
+            for x in range(int(left), int(rect.right()) + step, step):
+                painter.drawLine(QtCore.QPointF(x, rect.top()), QtCore.QPointF(x, rect.bottom()))
+            for y in range(int(top), int(rect.bottom()) + step, step):
+                painter.drawLine(QtCore.QPointF(rect.left(), y), QtCore.QPointF(rect.right(), y))
+            return
         points = [QtCore.QPointF(x, y) for x in range(int(left), int(rect.right()) + step, step)
                   for y in range(int(top), int(rect.bottom()) + step, step)]
         if points:
@@ -1222,7 +1431,8 @@ class CanvasScene(QtWidgets.QGraphicsScene):
                                      and item.edge['input'] == port.key), None)
             if self._rewire_edge is not None:
                 self._rewire_edge.setOpacity(.25)
-            self._draft = self.addPath(QtGui.QPainterPath(), QtGui.QPen(QtGui.QColor(self.colors['accent']), 3, QtCore.Qt.DashLine, QtCore.Qt.RoundCap))
+            self._draft = self.addPath(QtGui.QPainterPath(), QtGui.QPen(QtGui.QColor(self.colors['accent']),
+                                      self.preferences['link_width'] + .9, QtCore.Qt.DashLine, QtCore.Qt.RoundCap))
             self._draft.setZValue(10)
             self._link_clock.start()
             self._link_animation.start()
@@ -1249,7 +1459,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
             start = anchor.scenePos()
             end = candidate.scenePos() if self._hover_valid else event.scenePos()
             direction = 1 if anchor.output else -1
-            self._draft.setPath(connection_path(start, end, direction))
+            self._draft.setPath(connection_path(start, end, direction, self.preferences['link_style']))
             pen = self._draft.pen()
             pen.setColor(QtGui.QColor(self.colors['danger'] if candidate is not None and not self._hover_valid else self.colors['accent']))
             self._draft.setPen(pen)
@@ -1274,7 +1484,7 @@ class CanvasScene(QtWidgets.QGraphicsScene):
             elif second is None and not any(isinstance(item, NodeItem) for item in self.items(event.scenePos())):
                 if old_edge:
                     self.disconnect_requested.emit(old_edge['id'])
-                else:
+                elif self.preferences['release_action'] == 'search':
                     context = {'node_id': first.node_item.node['id'], 'input': first.key, 'output': first.output}
                     self.add_requested.emit(event.scenePos(), context)
             event.accept()
@@ -1353,6 +1563,12 @@ class CanvasScene(QtWidgets.QGraphicsScene):
             ids=[node['id'] for node in selected]
             menu.addAction('运行选中节点及所需上游',lambda:self.run_selection_requested.emit(ids,False))
             menu.addAction('强制重跑选中节点及上游',lambda:self.run_selection_requested.emit(ids,True))
+            menu.addAction('查看运行原因', lambda:self.action_requested.emit('diagnostics'))
+            locked = all(node.get('layout_locked') for node in selected)
+            lock = menu.addAction('锁定位置与大小')
+            lock.setCheckable(True)
+            lock.setChecked(locked)
+            lock.triggered.connect(lambda checked:self.action_requested.emit('lock_layout' if checked else 'unlock_layout'))
             menu.addSeparator()
         menu.addAction('全选节点',lambda:self.action_requested.emit('select_all'))
         menu.addAction('复制选中节点', lambda: self.action_requested.emit('copy'))
@@ -1372,8 +1588,11 @@ class _CanvasSelectionStyle(QtWidgets.QProxyStyle):
         # Own a separate base style; never reparent the application's style.
         super().__init__(QtWidgets.QStyleFactory.create('Fusion'))
         self.setParent(view)
+        self._view = view
 
     def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QtWidgets.QStyle.SH_ToolTip_WakeUpDelay:
+            return self._view.scene().preferences['tooltip_delay']
         if hint == QtWidgets.QStyle.SH_RubberBand_Mask:
             # We paint a translucent interior, so invalidate the entire old
             # rectangle, not a platform-dependent border-only mask.
@@ -1403,6 +1622,7 @@ class CanvasView(QtWidgets.QGraphicsView):
 
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
+        self.preferences = scene.preferences
         self.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.TextAntialiasing | QtGui.QPainter.SmoothPixmapTransform)
         self.setViewportUpdateMode(self.BoundingRectViewportUpdate)
         self.setDragMode(self.RubberBandDrag)
@@ -1435,8 +1655,83 @@ class CanvasView(QtWidgets.QGraphicsView):
         self._inline_timer = QtCore.QTimer(self)
         self._inline_timer.setSingleShot(True)
         self._inline_timer.timeout.connect(self._sync_inline)
+        self._tooltip_timer = QtCore.QTimer(self)
+        self._tooltip_timer.setSingleShot(True)
+        self._tooltip_timer.timeout.connect(self._show_tooltip)
+        self._tooltip_target = None
+        self._tooltip_shown = False
         self.view_changed.connect(self.remember_view)
         self.centerOn(0, 0)
+        QtWidgets.QApplication.instance().installEventFilter(self)
+
+    def set_preferences(self, preferences):
+        self.scene().set_preferences(preferences)
+        self.preferences = self.scene().preferences
+        self.setRenderHint(QtGui.QPainter.SmoothPixmapTransform,
+                           self.preferences['preview_quality'] != 'economy')
+        self.viewport().update()
+
+    def eventFilter(self, watched, event):
+        # A view-owned timer also covers proxy editors, whose separate QWidget
+        # trees do not inherit the viewport's tooltip style or wake-up delay.
+        if event.type() == QtCore.QEvent.ToolTip:
+            widget = watched if isinstance(watched, QtWidgets.QWidget) else None
+            while widget is not None:
+                if widget is self or widget is self.viewport():
+                    return True
+                proxy = widget.graphicsProxyWidget()
+                if proxy is not None:
+                    return proxy.scene() is self.scene()
+                widget = widget.parentWidget()
+        return super().eventFilter(watched, event)
+
+    def _tooltip_at(self, position):
+        for item in self.items(position):
+            if isinstance(item, QtWidgets.QGraphicsProxyWidget) and item.widget() is not None:
+                root = item.widget()
+                local = item.mapFromScene(self.mapToScene(position)).toPoint()
+                widget = root.childAt(local) or root
+                while widget is not None:
+                    if widget.toolTip():
+                        return (id(item), id(widget), widget.toolTip())
+                    if widget is root:
+                        break
+                    widget = widget.parentWidget()
+            if item.toolTip():
+                return (id(item), 0, item.toolTip())
+        return None
+
+    def _queue_tooltip(self, event):
+        if event.buttons() or not self.scene().preferences['tooltips']:
+            self._cancel_tooltip()
+            return
+        target = self._tooltip_at(event.pos())
+        if target != self._tooltip_target:
+            self._cancel_tooltip()
+            self._tooltip_target = target
+        if target is not None and not self._tooltip_shown:
+            self._tooltip_timer.start(self.scene().preferences['tooltip_delay'])
+
+    def _show_tooltip(self):
+        if not self.scene().preferences['tooltips'] or not self.isVisible():
+            return
+        global_pos = QtGui.QCursor.pos()
+        position = self.viewport().mapFromGlobal(global_pos)
+        if (self.viewport().rect().contains(position) and self._tooltip_target is not None
+                and self._tooltip_at(position) == self._tooltip_target):
+            QtWidgets.QToolTip.showText(global_pos, self._tooltip_target[2], self.viewport())
+            self._tooltip_shown = True
+
+    def _cancel_tooltip(self):
+        self._tooltip_timer.stop()
+        self._tooltip_target = None
+        if self._tooltip_shown:
+            QtWidgets.QToolTip.hideText()
+            self._tooltip_shown = False
+
+    def leaveEvent(self, event):
+        self._cancel_tooltip()
+        super().leaveEvent(event)
 
     def available_rect(self):
         rect = QtCore.QRectF(self.viewport().rect()).adjusted(20, 20, -20, -20)
@@ -1585,6 +1880,7 @@ class CanvasView(QtWidgets.QGraphicsView):
         self.viewport().update(dirty.intersected(self.viewport().rect()))
 
     def wheelEvent(self, event):
+        self._cancel_tooltip()
         content_scroll = bool(event.modifiers() & QtCore.Qt.ShiftModifier)
         if self._scroll_node_content(event, only_scrollbar=not content_scroll) or content_scroll:
             # Never fall through to QGraphicsView's hidden scrollbars at a boundary.
@@ -1592,7 +1888,7 @@ class CanvasView(QtWidgets.QGraphicsView):
             return
         delta = event.angleDelta().y() or event.pixelDelta().y()
         current = self.transform().m11()
-        zoom = max(.12, min(3.5, current * 1.15 ** (max(-1200, min(1200, delta)) / 120)))
+        zoom = max(.12, min(3.5, current * self.scene().preferences['zoom_speed'] ** (max(-1200, min(1200, delta)) / 120)))
         if delta and zoom != current:
             self.scale(zoom / current, zoom / current)
             self.view_changed.emit()
@@ -1670,7 +1966,7 @@ class CanvasView(QtWidgets.QGraphicsView):
         if not self._inline_timer.isActive():self._inline_timer.start(0)
         # Large zoomed-out canvases use simple node bodies. In a large viewport
         # only the nearest 64 visible media nodes decode, preventing LRU churn.
-        if self.transform().m11() < .42:
+        if self.transform().m11() < self.scene().preview_profile['lod']:
             self.scene().thumbnail_nodes = set()
             self.scene().thumbnail_slots = {}
         else:
@@ -1678,7 +1974,7 @@ class CanvasView(QtWidgets.QGraphicsView):
             visible = [item for item in self.items(self.viewport().rect())
                        if isinstance(item, NodeItem) and item.result_count()]
             visible.sort(key=lambda item: (item.scenePos() - center).manhattanLength())
-            visible = visible[:64]
+            visible = visible[:self.scene().preview_profile['limit']]
             quota = max(1, self.scene().thumbnails.limit // max(1, len(visible)))
             self.scene().thumbnail_nodes = {item.node['id'] for item in visible}
             self.scene().thumbnail_slots = {
@@ -1700,11 +1996,13 @@ class CanvasView(QtWidgets.QGraphicsView):
         font=painter.font();font.setPixelSize(18);font.setBold(True);painter.setFont(font);painter.setPen(QtGui.QColor(p['text']))
         painter.drawText(QtCore.QRectF(area.left(),center.y()-12,area.width(),32),QtCore.Qt.AlignCenter,'开始搭建你的工作流')
         font.setPixelSize(12);font.setBold(False);painter.setFont(font);painter.setPen(QtGui.QColor(p['muted']))
-        painter.drawText(QtCore.QRectF(area.left()+8,center.y()+30,area.width()-16,52),QtCore.Qt.AlignHCenter|QtCore.Qt.TextWordWrap,
-                         '双击空白处或按 Tab 添加节点\n拖入素材 · 连接 App · 运行画布')
+        shortcut = self.scene().preferences['shortcuts']['add']
+        hint = '双击空白处' + (f'或按 {shortcut}' if shortcut else '') + '添加节点\n拖入素材 · 连接 App · 运行画布'
+        painter.drawText(QtCore.QRectF(area.left()+8,center.y()+30,area.width()-16,52),QtCore.Qt.AlignHCenter|QtCore.Qt.TextWordWrap, hint)
         painter.restore()
 
     def mousePressEvent(self, event):
+        self._cancel_tooltip()
         if event.button() == QtCore.Qt.MiddleButton or (self._space and event.button() == QtCore.Qt.LeftButton):
             self._pan = event.pos()
             self.setCursor(QtCore.Qt.ClosedHandCursor)
@@ -1716,6 +2014,7 @@ class CanvasView(QtWidgets.QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        self._queue_tooltip(event)
         self._last_scene_pos = self.mapToScene(event.pos())
         if self._pan is not None:
             delta = event.pos() - self._pan
@@ -1748,11 +2047,6 @@ class CanvasView(QtWidgets.QGraphicsView):
                 self.scene().cancel_resize()
             event.accept()
             return
-        if event.key() == QtCore.Qt.Key_Tab:
-            position = self._last_scene_pos or self.mapToScene(self.viewport().rect().center())
-            self.scene().add_requested.emit(position, None)
-            event.accept()
-            return
         if event.key() == QtCore.Qt.Key_Escape and self.scene()._link_port is not None:
             self.scene().cancel_link()
             event.accept()
@@ -1772,6 +2066,17 @@ class CanvasView(QtWidgets.QGraphicsView):
                 self.scene().action_requested.emit(action)
                 event.accept()
                 return
+        combination = QtGui.QKeySequence(int(event.modifiers()) | event.key())
+        for action, shortcut in self.scene().preferences['shortcuts'].items():
+            if shortcut and combination.matches(QtGui.QKeySequence(shortcut)) == QtGui.QKeySequence.ExactMatch:
+                if not event.isAutoRepeat():
+                    self.scene().action_requested.emit(action)
+                event.accept()
+                return
+        if event.key() == QtCore.Qt.Key_Tab:
+            # Rebinding Add must remove Tab's old action without moving focus.
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     def focusNextPrevChild(self, forward):
@@ -1786,6 +2091,7 @@ class CanvasView(QtWidgets.QGraphicsView):
         super().keyReleaseEvent(event)
 
     def focusOutEvent(self, event):
+        self._cancel_tooltip()
         self._space, self._pan = False, None
         if self._rubber_selecting:self._rubber_selecting=False;self.scene().selectionChanged.emit()
         self.scene().cancel_resize()
@@ -1794,6 +2100,7 @@ class CanvasView(QtWidgets.QGraphicsView):
         super().focusOutEvent(event)
 
     def hideEvent(self, event):
+        self._cancel_tooltip()
         self.scene().cancel_resize()
         self.scene().cancel_link()
         super().hideEvent(event)
@@ -1842,9 +2149,16 @@ class CanvasView(QtWidgets.QGraphicsView):
         else:super().dropEvent(event)
 
     def fit_nodes(self):
+        self._fit_items(self.scene().nodes.values())
+
+    def fit_selected(self):
+        self._fit_items(item for item in self.scene().selectedItems() if isinstance(item, NodeItem))
+
+    def _fit_items(self, items):
         rect = QtCore.QRectF()
-        for node in self.scene().nodes.values():
-            rect = rect.united(node.sceneBoundingRect())
+        for node in items:
+            if node.isVisible():
+                rect = rect.united(node.sceneBoundingRect())
         if not rect.isEmpty():
             rect = rect.adjusted(-50, -50, 50, 50)
             available = self.available_rect()

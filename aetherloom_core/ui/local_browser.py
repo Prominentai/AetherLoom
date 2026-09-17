@@ -418,19 +418,8 @@ class LocalBrowserMixin:
                 try:
                     for folder in directories:
                         self._open_folder_path(folder)
-                    # open the folder containing each selected file (reveal if possible)
-                    for path in paths:
-                        try:
-                            try:
-                                try:
-                                    folder = os.path.dirname(path)
-                                except Exception:
-                                    folder = path
-                                self._reveal_in_explorer(folder)
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
+                    if paths:
+                        self._reveal_in_explorer(paths)
                 except Exception as e:
                     self.log(f'打开所在目录失败: {e}')
             elif act == act_copy:
@@ -1999,68 +1988,11 @@ class LocalBrowserMixin:
 
 
     def _reveal_in_explorer(self, path):
-        """Reveal a file in the OS file manager (select the file when possible).
-        Accepts either a file path or a folder; if path is a file, try to select it.
-        """
-        try:
-            if not path:
-                return
-            p = path
-            # if directory passed, open it normally
-            if os.path.isdir(p):
-                if sys.platform.startswith('win'):
-                    os.startfile(p)
-                elif sys.platform == 'darwin':
-                    subprocess.Popen(['open', p])
-                else:
-                    subprocess.Popen(['xdg-open', p])
-                return
-            # prefer to reveal the file and select it when possible
-            if sys.platform.startswith('win'):
-                try:
-                    import ctypes
-                    p_norm = os.path.normpath(os.path.abspath(p))
-                    # Use ShellExecuteW for Unicode-safe reveal/select
-                    try:
-                        # params must be a single string; ensure proper escaping
-                        params = f'/select,"{p_norm}"'
-                        ctypes.windll.shell32.ShellExecuteW(None, 'open', 'explorer.exe', params, None, 1)
-                        return
-                    except Exception:
-                        # fallback to subprocess with normalized path
-                        try:
-                            subprocess.Popen(['explorer', f'/select,{p_norm}'])
-                            return
-                        except Exception:
-                            try:
-                                os.startfile(os.path.dirname(p_norm))
-                                return
-                            except Exception:
-                                return
-                except Exception:
-                    try:
-                        os.startfile(os.path.dirname(p))
-                        return
-                    except Exception:
-                        return
-            elif sys.platform == 'darwin':
-                try:
-                    subprocess.Popen(['open', '-R', p])
-                    return
-                except Exception:
-                    try:
-                        subprocess.Popen(['open', os.path.dirname(p)])
-                        return
-                    except Exception:
-                        return
-            else:
-                try:
-                    subprocess.Popen(['xdg-open', os.path.dirname(p)])
-                    return
-                except Exception:
-                    return
-        except Exception:
+        """Select one or more files in their folders; open directories normally."""
+        if not path:
             return
+        from aetherloom_core.platform_utils import reveal_in_file_manager_async
+        return reveal_in_file_manager_async(path, self, lambda error: self.log(f'打开文件位置失败: {error}'))
 
 
     def on_input_edit(self):

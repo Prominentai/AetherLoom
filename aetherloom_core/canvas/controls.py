@@ -54,6 +54,9 @@ class NodeLibrary(QtWidgets.QTreeWidget):
         self._leaves, self._folders = [], {}
         self._expanded = set(NODE_CATEGORIES)
         self._filtering = False
+        self.scope = 'all'
+        self._preferences = {}
+        self._ordered_scope = None
         self.itemExpanded.connect(lambda item:self._remember(item, True))
         self.itemCollapsed.connect(lambda item:self._remember(item, False))
 
@@ -87,9 +90,35 @@ class NodeLibrary(QtWidgets.QTreeWidget):
             folder.setExpanded(group in self._expanded)
         item = QtWidgets.QTreeWidgetItem(folder,[label])
         item.setData(0, QtCore.Qt.UserRole,(group,value));item.setToolTip(0,tooltip)
+        item.setData(0, QtCore.Qt.UserRole + 2, label)
         item.setSizeHint(0,QtCore.QSize(0,30));self._leaves.append(item)
 
+    def set_preferences(self, preferences):
+        self._preferences = preferences
+        favorites = set(preferences.get('favorites', []))
+        for item in self._leaves:
+            group, value = item.data(0, QtCore.Qt.UserRole)
+            label = item.data(0, QtCore.Qt.UserRole + 2)
+            item.setText(0, ('★ ' if str(group) + ':' + str(value) in favorites else '') + label)
+        self._order_choices()
+
+    def _order_choices(self):
+        favorites = set(self._preferences.get('favorites', []))
+        recent = {key: index for index, key in enumerate(self._preferences.get('recent', []))}
+        current = self.currentItem()
+        for folder in self._folders.values():
+            children = folder.takeChildren()
+            def rank(item):
+                group, value = item.data(0, QtCore.Qt.UserRole)
+                key = str(group) + ':' + str(value)
+                return (False if self.scope == 'recent' else key not in favorites,
+                        recent.get(key, 999), item.data(0, QtCore.Qt.UserRole + 2).casefold())
+            folder.addChildren(sorted(children, key=rank))
+        if current is not None:self.setCurrentItem(current)
+        self._ordered_scope = self.scope
+
     def filter(self, text):
+        if self._ordered_scope != self.scope:self._order_choices()
         text = text.strip().casefold();visible = []
         self._filtering = True
         try:
@@ -99,6 +128,9 @@ class NodeLibrary(QtWidgets.QTreeWidget):
                     item = folder.child(index)
                     value = item.data(0,QtCore.Qt.UserRole)[1]
                     match = text in (item.text(0)+' '+item.toolTip(0)+' '+str(value)).casefold()
+                    key = str(group) + ':' + str(value)
+                    if self.scope in ('favorites', 'recent'):
+                        match = match and key in self._preferences.get(self.scope, [])
                     item.setHidden(not match)
                     if match:visible.append(item);matches += 1
                 folder.setHidden(not matches)

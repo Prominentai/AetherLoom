@@ -1200,29 +1200,10 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                 self.log(f'打开文件失败: {e}')
         elif act == act_open_folder:
             try:
-                for name in targets:
-                    try:
-                        p = os.path.join(self.local_decode_dir, name)
-                        folder = os.path.dirname(p) if p else p
-                    except Exception:
-                        folder = None
-                    try:
-                        if folder:
-                            self._reveal_in_explorer(folder)
-                    except Exception:
-                        try:
-                            # fallback to platform open
-                            if folder:
-                                if sys.platform.startswith('win'):
-                                    os.startfile(folder)
-                                elif sys.platform == 'darwin':
-                                    subprocess.Popen(['open', folder])
-                                else:
-                                    subprocess.Popen(['xdg-open', folder])
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+                paths = [os.path.join(self.local_decode_dir, name) for name in targets if name]
+                self._reveal_in_explorer(paths)
+            except Exception as e:
+                self.log(f'打开文件位置失败: {e}')
         # Delete selected input files only (do not remove corresponding restored outputs)
         elif act == act_del:
             try:
@@ -1316,19 +1297,6 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                     self.log('剪贴板中没有可粘贴的图像或视频文件')
             except Exception as e:
                 self.log(f'粘贴失败: {e}')
-        elif act == act_open_folder:
-            # open parent folders for the selected entries
-            try:
-                abs_paths = [os.path.join(self.local_decode_dir, t) for t in targets]
-                for p in abs_paths:
-                    if not os.path.exists(p):
-                        continue
-                    try:
-                        self._reveal_in_explorer(p)
-                    except Exception:
-                        pass
-            except Exception as e:
-                self.log(f'打开所在目录失败: {e}')
 
 
     def _delete_input_only(self, fnames):
@@ -1811,21 +1779,10 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                 return
             if act == act_open_folder:
                 try:
-                    if not path:
-                        return
-                    try:
-                        try:
-                            folder = os.path.dirname(path)
-                        except Exception:
-                            folder = path
-                        try:
-                            self._reveal_in_explorer(folder)
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
+                    if path:
+                        self._reveal_in_explorer(path)
                 except Exception as e:
-                    self.log(f'打开所在目录失败: {e}')
+                    self.log(f'打开文件位置失败: {e}')
                 return
             if act == act_copy:
                 # try to copy image pixmap if available, else copy path

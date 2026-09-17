@@ -19,6 +19,7 @@ from .workflow_queue_panel import show_workflow_queue
 from .graphics import CanvasScene, CanvasView, NodeItem, EdgeItem, KIND_NAMES, STATUS_NAMES
 from .editors import Inspector, EdgeInspector
 from .controls import CanvasStatus
+from .page_preferences import CanvasPreferencesMixin, choice_key
 
 
 RUNTIME_FIELDS = ('results', 'result_signatures', 'fingerprint', 'status', 'progress', 'node_progress', 'message', 'error', 'generation', 'cached', 'stale', 'activated', 'bypassed', '_restored_missing_results', '_restored_positions_ambiguous')
@@ -61,12 +62,14 @@ class NodeSearchPopup(QtWidgets.QFrame):
     """A single searchable palette for Tab, double click and loose cable ends."""
     chosen = QtCore.pyqtSignal(object)
     disconnected = QtCore.pyqtSignal(str)
+    favorite_toggled = QtCore.pyqtSignal(str, str)
 
-    def __init__(self, choices, anchor=None, parent=None):
+    def __init__(self, choices, anchor=None, parent=None, preferences=None):
         super().__init__(parent, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
         self.setObjectName('canvasNodeSearch')
         self.setFont(QtGui.QFont('Microsoft YaHei UI', 9))
         self.choices = choices
+        self.preferences = preferences or {}
         self.setMinimumWidth(280)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(13, 12, 13, 12)
@@ -76,6 +79,8 @@ class NodeSearchPopup(QtWidgets.QFrame):
         layout.addWidget(title)
         self.category = RhEnumComboBox()
         self.category.addItem('全部分类', '')
+        self.category.addItem('收藏节点', '__favorites')
+        self.category.addItem('最近使用', '__recent')
         for key, label in model.NODE_CATEGORIES.items():self.category.addItem(label, key)
         self.category.currentIndexChanged.connect(lambda:self._filter(self.search.text()))
         self.search = QtWidgets.QLineEdit()
@@ -90,6 +95,10 @@ class NodeSearchPopup(QtWidgets.QFrame):
         self.listing.itemClicked.connect(self._choose)
         self.listing.itemActivated.connect(self._choose)
         layout.addWidget(self.listing, 1)
+        self.favorite_button = QtWidgets.QPushButton('☆ 收藏节点')
+        self.favorite_button.clicked.connect(self._toggle_current_favorite)
+        self.listing.currentItemChanged.connect(self._favorite_changed)
+        layout.addWidget(self.favorite_button)
         if anchor and anchor.get('remove_edge'):
             disconnect = QtWidgets.QPushButton('断开原连接，恢复内部值' if anchor.get('restore_internal', True) else '断开原连接')
             disconnect.clicked.connect(lambda: (self.disconnected.emit(anchor['remove_edge']), self.close()))
@@ -102,11 +111,21 @@ class NodeSearchPopup(QtWidgets.QFrame):
     def _filter(self, text):
         text = text.strip().casefold()
         self.listing.clear()
-        for choice in self.choices:
-            if self.category.currentData() and choice['group'] != self.category.currentData():continue
+        favorites, recent = self.preferences.get('favorites', []), self.preferences.get('recent', [])
+        scope = self.category.currentData()
+        order = {key: index for index, key in enumerate(recent)}
+        choices = sorted(self.choices, key=lambda c: (choice_key(c['group'], c['value']) not in favorites,
+                         order.get(choice_key(c['group'], c['value']), 999)))
+        if scope == '__recent':
+            choices.sort(key=lambda c: order.get(choice_key(c['group'], c['value']), 999))
+        for choice in choices:
+            key = choice_key(choice['group'], choice['value'])
+            if scope == '__favorites' and key not in favorites:continue
+            if scope == '__recent' and key not in recent:continue
+            if scope and not scope.startswith('__') and choice['group'] != scope:continue
             if text and text not in choice.get('search', choice['label']).casefold():
                 continue
-            item = QtWidgets.QListWidgetItem(choice['label'])
+            item = QtWidgets.QListWidgetItem(('★ ' if key in favorites else '') + choice['label'])
             item.setData(QtCore.Qt.UserRole, choice)
             item.setToolTip(choice.get('description', choice['label']))
             item.setSizeHint(QtCore.QSize(320, 35))
@@ -117,6 +136,20 @@ class NodeSearchPopup(QtWidgets.QFrame):
             item = QtWidgets.QListWidgetItem('没有匹配节点，请尝试其他名称')
             item.setFlags(QtCore.Qt.NoItemFlags)
             self.listing.addItem(item)
+
+    def _favorite_changed(self, *unused):
+        item = self.listing.currentItem()
+        choice = item.data(QtCore.Qt.UserRole) if item else None
+        self.favorite_button.setEnabled(bool(choice))
+        favorite = choice and choice_key(choice['group'], choice['value']) in self.preferences.get('favorites', [])
+        self.favorite_button.setText('★ 取消收藏' if favorite else '☆ 收藏节点')
+
+    def _toggle_current_favorite(self):
+        item = self.listing.currentItem()
+        choice = item.data(QtCore.Qt.UserRole) if item else None
+        if choice:
+            self.favorite_toggled.emit(choice['group'], choice['value'])
+            self._filter(self.search.text())
 
     def _choose(self, item):
         choice = item.data(QtCore.Qt.UserRole) if item else None
@@ -176,7 +209,7 @@ class NodeSearchPopup(QtWidgets.QFrame):
         self.search.setFocus(QtCore.Qt.PopupFocusReason)
 
 
-class CanvasPage(QtWidgets.QWidget):
+class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
     """One editing surface; the engine keeps other open/running canvases alive."""
 
     def __init__(self, owner, service, prepare_app=None, store=None):
@@ -184,6 +217,7 @@ class CanvasPage(QtWidgets.QWidget):
         self.owner, self.service = owner, service
         self.store = store or CanvasStore()
         self.settings = getattr(owner, 'settings', {})
+        self._init_preferences()
         self._prepare = prepare_app or getattr(owner, '_canvas_prepare_app', None)
         existing_queue = getattr(owner, '_canvas_workflow_queue', None)
         engine = existing_queue.engine if existing_queue is not None else CanvasEngine(service, self._prepare_node, self.store, owner)
@@ -225,6 +259,7 @@ class CanvasPage(QtWidgets.QWidget):
         self._autosave.setSingleShot(True)
         self._autosave.setInterval(700)
         self._autosave.timeout.connect(lambda: self.save(automatic=True))
+        self._apply_preferences(self.canvas_preferences)
         self._workflow_watcher = QtCore.QFileSystemWatcher(self)
         self._workflow_watcher.directoryChanged.connect(self._workflow_directory_changed)
         self._workflow_cleanup = QtCore.QTimer(self)
@@ -371,9 +406,19 @@ class CanvasPage(QtWidgets.QWidget):
         self.search.setPlaceholderText('搜索节点名称或分类')
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._filter_library)
-        library_layout.addWidget(self.search)
+        library_search = QtWidgets.QHBoxLayout()
+        library_search.addWidget(self.search, 1)
+        self.library_scope = RhEnumComboBox()
+        for title, value in [('全部', 'all'), ('收藏', 'favorites'), ('最近', 'recent')]:
+            self.library_scope.addItem(title, value)
+        self.library_scope.setMaximumWidth(85)
+        self.library_scope.currentIndexChanged.connect(self._filter_library)
+        library_search.addWidget(self.library_scope)
+        library_layout.addLayout(library_search)
         from .controls import NodeLibrary
         self.library_list = NodeLibrary()
+        self.library_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.library_list.customContextMenuRequested.connect(self._library_context_menu)
         self.library_list.setWordWrap(False);self.library_list.setTextElideMode(QtCore.Qt.ElideRight)
         self.library_list.itemActivated.connect(self._library_add)
         self.search.returnPressed.connect(lambda:self._library_add(self.library_list.currentItem()))
@@ -475,7 +520,7 @@ class CanvasPage(QtWidgets.QWidget):
         self.splitter.setStretchFactor(2, 0)
         layout.addWidget(self.splitter, 1)
         footer = QtWidgets.QHBoxLayout()
-        self.status_label = CanvasStatus('双击 / Tab 添加节点 · 中键 / 空格拖动画布')
+        self.status_label = CanvasStatus('双击 / ' + self.canvas_preferences['shortcuts']['add'] + ' 添加节点 · 中键 / 空格拖动画布')
         self.status_label.setObjectName('canvasMuted')
         self.status_label.setWordWrap(False)
         footer.addWidget(self.status_label, 1)
@@ -485,6 +530,7 @@ class CanvasPage(QtWidgets.QWidget):
         footer.addWidget(self.zoom_label)
         layout.addLayout(footer)
         self._empty_inspector()
+        self._build_preference_actions()
         self._shortcuts = []
         for sequence, callback in [('Ctrl+S', self.save), ('Ctrl+Shift+S', self.save_as), ('Ctrl+N', self.new_canvas), ('Ctrl+O', self.open_canvas)]:
             shortcut = QtWidgets.QShortcut(QtGui.QKeySequence(sequence), self)
@@ -546,7 +592,7 @@ class CanvasPage(QtWidgets.QWidget):
             group = GROUPS[backend(app)]
             self.library_list.add_choice(app['name'], group, app_id,
                                          model.NODE_CATEGORIES[group] + ' · ' + app['name'] + '\n' + app_id)
-        self._filter_library()
+        self._refresh_library_preferences()
         self._refresh_missing_apps()
         if self._selection_identity and self._inspector is not None:
             self._selection_changed(force=self._inspector is not None)
@@ -694,6 +740,7 @@ class CanvasPage(QtWidgets.QWidget):
             self._refresh_missing_apps()
 
     def _filter_library(self):
+        self.library_list.scope = self.library_scope.currentData()
         visible = self.library_list.filter(self.search.text())
         self.library_add_button.setEnabled(bool(visible))
         self.library_count.setText(f'{len(visible)} 个可用节点' if visible else '没有匹配的节点')
@@ -833,10 +880,11 @@ class CanvasPage(QtWidgets.QWidget):
             self._node_search.close()
             self._node_search.deleteLater()
         position = QtCore.QPointF(position)
-        popup = NodeSearchPopup(self._search_choices(anchor), anchor, self)
+        popup = NodeSearchPopup(self._search_choices(anchor), anchor, self, self.canvas_preferences)
         self._node_search = popup
         popup.chosen.connect(lambda choice: self._insert_choice(choice, position, anchor))
         popup.disconnected.connect(self._disconnect_edge)
+        popup.favorite_toggled.connect(self._toggle_favorite)
         point = self.view.viewport().mapToGlobal(self.view.mapFromScene(position))
         popup.show_at(point, self.scene.colors)
 
@@ -864,6 +912,7 @@ class CanvasPage(QtWidgets.QWidget):
         self._mark_stale(anchor['node_id'] if anchor and not anchor['output'] else node['id'])
         self._edited(rebuild=True, select=node['id'])
         self.view.reveal_nodes([node['id']])
+        self._remember_choice(choice)
 
     def _prepare_node(self, node, rh_nodes):
         model.app_reference(node.get('app') or {})
@@ -899,6 +948,7 @@ class CanvasPage(QtWidgets.QWidget):
             self._message(f'记录当前画布失败：{error}')
         self.name_edit.setText(str(doc.get('name', '未命名画布')))
         self._undo, self._redo = [], []
+        self._history_weights = {}
         self._removed_runtime = {}
         self._selection_identity = None
         self.scene.set_document(doc)
@@ -996,8 +1046,8 @@ class CanvasPage(QtWidgets.QWidget):
             return
         self._last_edit_path = edit_path
         self._undo.append(self._edit_snapshot())
-        del self._undo[:-40]
         self._redo.clear()
+        self._trim_history()
         self._prune_removed_runtime()
 
     def _prune_removed_runtime(self):
@@ -1053,12 +1103,16 @@ class CanvasPage(QtWidgets.QWidget):
             self._edited()
 
     def _move_nodes(self, positions):
+        positions = dict(positions)
+        locked = {node['id'] for node in self.document['nodes'] if node.get('layout_locked')}
+        positions = {key: value for key, value in positions.items() if key not in locked}
+        if not positions:return
         self._checkpoint()
         for group in self.document['nodes']:
             if group['id'] in positions and group['kind']=='subgraph':
                 dx,dy=positions[group['id']][0]-group.get('x',0),positions[group['id']][1]-group.get('y',0)
                 for member in self.document['nodes']:
-                    if member['id'] in group.get('members',[]) and member['id'] not in positions:
+                    if member['id'] in group.get('members',[]) and member['id'] not in positions and member['id'] not in locked:
                         positions[member['id']]=(member.get('x',0)+dx,member.get('y',0)+dy)
                         if member['id'] in self.scene.nodes:self.scene.nodes[member['id']].setPos(*positions[member['id']])
         for node in self.document['nodes']:
@@ -1067,6 +1121,9 @@ class CanvasPage(QtWidgets.QWidget):
         self._edited()
 
     def _resize_nodes(self, sizes):
+        locked = {node['id'] for node in self.document['nodes'] if node.get('layout_locked')}
+        sizes = {key: value for key, value in sizes.items() if key not in locked}
+        if not sizes:return
         self._checkpoint()
         for node in self.document['nodes']:
             if node['id'] in sizes:
@@ -1401,6 +1458,7 @@ class CanvasPage(QtWidgets.QWidget):
         self._edited(rebuild=True, select=node_id)
 
     def _action(self, action):
+        if self._preference_action(action):return
         method = {'copy': self.copy_nodes, 'paste': self.paste_nodes, 'delete': self.delete_selected, 'clear': self.clear_canvas, 'undo': self.undo, 'redo': self.redo,'select_all':self.select_all_nodes}.get(action)
         if method:
             method()
@@ -1533,12 +1591,14 @@ class CanvasPage(QtWidgets.QWidget):
         if self._undo:
             self._redo.append(self._edit_snapshot())
             self._restore_edit(self._undo.pop())
+            self._trim_history()
             self._prune_removed_runtime()
 
     def redo(self):
         if self._redo:
             self._undo.append(self._edit_snapshot())
             self._restore_edit(self._redo.pop())
+            self._trim_history()
             self._prune_removed_runtime()
 
     def _drop_files(self, paths, position):

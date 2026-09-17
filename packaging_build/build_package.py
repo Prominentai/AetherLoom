@@ -78,6 +78,7 @@ CORE_MODULE_FILES = (
     'canvas/cache_cleanup.py',
     'canvas/run_outputs.py', 'canvas/inline_text.py', 'canvas/inline_controls.py', 'canvas/node_form.py',
     'canvas/selection.py',
+    'canvas/preferences.py', 'canvas/page_preferences.py', 'canvas/workspace_tools.py',
     'canvas/graphics.py', 'canvas/appearance.py', 'canvas/controls.py', 'canvas/editors.py', 'canvas/page.py', 'canvas/workflow_queue.py', 'canvas/workflow_queue_panel.py',
 )
 API_MODULE_FILES = (

@@ -4447,7 +4447,7 @@ class MainLayoutMixin:
                                                                     act_image_reverse = None
                                                                 act_clear = menu.addAction('清空')
                                                                 act_paste = menu.addAction('粘贴')
-                                                                
+
 
                                                                 # clipboard inspection for paste
                                                                 cb = QtWidgets.QApplication.clipboard()
@@ -4562,14 +4562,7 @@ class MainLayoutMixin:
                                                                 elif action == act_open_folder:
                                                                     try:
                                                                         if pth and os.path.exists(pth):
-                                                                            try:
-                                                                                try:
-                                                                                    folder = os.path.dirname(pth) if pth else pth
-                                                                                except Exception:
-                                                                                    folder = pth
-                                                                                self._reveal_in_explorer(folder)
-                                                                            except Exception:
-                                                                                pass
+                                                                            self._reveal_in_explorer(pth)
                                                                     except Exception:
                                                                         pass
                                                                 elif action == act_copy:
@@ -5773,7 +5766,7 @@ class MainLayoutMixin:
                                                 except Exception:
                                                     idx = 0
                                                 try:
-                                                
+
                                                     idx = (idx + delta) % len(outputs)
                                                 except Exception:
                                                     idx = max(0, min(len(outputs) - 1, idx + delta))
@@ -5983,7 +5976,7 @@ class MainLayoutMixin:
                                                     title_lbl.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
                                                 except Exception:
                                                     pass
-                                                
+
                                                 hdr_w = QtWidgets.QWidget()
                                                 try:
                                                     hdr_layout = QtWidgets.QHBoxLayout(hdr_w)
@@ -6316,14 +6309,7 @@ class MainLayoutMixin:
                                                                     def _handler_open_folder():
                                                                         try:
                                                                             if pth and os.path.exists(pth):
-                                                                                try:
-                                                                                    folder = os.path.dirname(pth)
-                                                                                except Exception:
-                                                                                    folder = pth
-                                                                                try:
-                                                                                    self._reveal_in_explorer(folder)
-                                                                                except Exception:
-                                                                                    pass
+                                                                                self._reveal_in_explorer(pth)
                                                                         except Exception:
                                                                             pass
                                                                     act_open_folder.triggered.connect(_handler_open_folder)
@@ -7338,20 +7324,7 @@ class MainLayoutMixin:
                                         pass
                                 if act == act_open_local:
                                     try:
-                                        # open containing folder for the json file (do not try to select)
-                                        try:
-                                            folder = os.path.dirname(fpath) if fpath else fpath
-                                        except Exception:
-                                            folder = fpath
-                                        try:
-                                            if sys.platform.startswith('win'):
-                                                os.startfile(folder)
-                                            elif sys.platform == 'darwin':
-                                                subprocess.Popen(['open', folder])
-                                            else:
-                                                subprocess.Popen(['xdg-open', folder])
-                                        except Exception:
-                                            pass
+                                        self._reveal_in_explorer(fpath)
                                     except Exception:
                                         pass
                                 elif act == act_fav:
