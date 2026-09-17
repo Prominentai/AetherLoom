@@ -2974,12 +2974,11 @@ class MainLayoutMixin:
                                     back_btn.setObjectName('rhSecondaryButton')
                                     back_btn.setToolTip('返回应用列表 · Esc')
                                     back_btn.setFixedHeight(36)
-                                    title_label = QtWidgets.QLabel(parsed.get('title') or wid)
+                                    from aetherloom_core.rh_output_groups import ResultTitle
+                                    title_label = ResultTitle(parsed.get('title') or wid)
                                     title_label.setObjectName('rhPageTitle')
                                     from aetherloom_core.ui import design
                                     design.title(title_label)
-                                    title_label.setWordWrap(True)
-                                    title_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
                                     title_label.setToolTip(str(parsed.get('title') or wid))
                                     header.addWidget(back_btn)
                                     header.addSpacing(8)
@@ -3003,8 +3002,6 @@ class MainLayoutMixin:
                                     btn_reset.setObjectName('rhSecondaryButton')
                                     btn_reset.setFixedHeight(36)
                                     from aetherloom_core.rh_connections import SiteSwitchButton, open_connection_settings
-                                    connection_actions = QtWidgets.QVBoxLayout()
-                                    connection_actions.setSpacing(6)
                                     connection_row = QtWidgets.QHBoxLayout()
                                     connection_row.setSpacing(8)
                                     app_page._rh_site_switch = SiteSwitchButton(self)
@@ -3014,9 +3011,8 @@ class MainLayoutMixin:
                                     app_page._rh_connection_button.clicked.connect(lambda: open_connection_settings(self))
                                     connection_row.addWidget(app_page._rh_site_switch)
                                     connection_row.addWidget(app_page._rh_connection_button)
-                                    connection_actions.addLayout(connection_row)
-                                    connection_actions.addWidget(btn_reset, 0, Qt.AlignRight)
-                                    header.addLayout(connection_actions)
+                                    connection_row.addWidget(btn_reset)
+                                    header.addLayout(connection_row)
                                     app_layout.addWidget(design.header(header))
 
                                     # scroll area for nodes
@@ -4992,10 +4988,10 @@ class MainLayoutMixin:
                                         preview_heading = QtWidgets.QLabel('生成结果')
                                         preview_heading.setObjectName('rhSectionTitle')
                                         preview_heading_row.addWidget(preview_heading)
-                                        preview_heading_row.addStretch(1)
                                         preview_count_label = QtWidgets.QLabel('0 项')
                                         preview_count_label.setObjectName('rhMuted')
                                         preview_heading_row.addWidget(preview_count_label)
+                                        preview_heading_row.addStretch(1)
                                         preview_layout.addLayout(preview_heading_row)
                                         preview_hint = QtWidgets.QLabel('查看生成内容，双击预览可在本地打开。')
                                         preview_hint.setObjectName('rhMuted')
@@ -5041,7 +5037,7 @@ class MainLayoutMixin:
                                                 decode_scope_hint.setWordWrap(True)
                                                 sidebar_layout.addWidget(decode_scope_hint)
                                                 # enable checkbox (created here but placed beside the toggle button)
-                                                local_cb = QtWidgets.QCheckBox('启用本地解码')
+                                                local_cb = QtWidgets.QCheckBox('本地解码')
                                                 local_cb.setToolTip('用于之后发起的任务，不修改现有任务的解码配置')
                                                 local_cb.setChecked(False)
                                                 # decode mode selector (GRC/SST)
@@ -5269,13 +5265,14 @@ class MainLayoutMixin:
                                             except Exception:
                                                 pass
 
-                                            # small toggle button above previews to show/hide sidebar
+                                            # Keep decode controls in the result heading, not a full-page row.
                                             try:
                                                 toggle_row = QtWidgets.QHBoxLayout()
                                                 toggle_row.setContentsMargins(0, 0, 0, 0)
                                                 toggle_row.setSpacing(6)
                                                 toggle_btn = QtWidgets.QToolButton()
-                                                toggle_btn.setText('本地解码设置')
+                                                toggle_btn.setText('设置')
+                                                toggle_btn.setAccessibleName('本地解码设置')
                                                 toggle_btn.setObjectName('rhSecondaryButton')
                                                 toggle_btn.setMinimumHeight(32)
                                                 toggle_btn.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
@@ -5310,20 +5307,19 @@ class MainLayoutMixin:
                                                     toggle_btn.blockSignals(False)
                                                 except Exception:
                                                     pass
-                                                toggle_row.addStretch(1)
                                                 # place the local decode enable checkbox to the left of the toggle
                                                 try:
                                                     toggle_row.addWidget(local_cb)
                                                 except Exception:
                                                     pass
                                                 toggle_row.addWidget(toggle_btn)
-                                                app_layout.insertLayout(1, toggle_row)
+                                                preview_heading_row.addLayout(toggle_row)
                                             except Exception:
                                                 pass
 
                                         # add the preview scroll area and the sidebar into the container
                                         try:
-                                            if has_local_decode:app_layout.insertWidget(2, sidebar_frame)
+                                            if has_local_decode:app_layout.insertWidget(1, sidebar_frame)
                                             pc_h.addWidget(preview_stack, 1)
                                         except Exception:
                                             try:
@@ -6887,7 +6883,8 @@ class MainLayoutMixin:
                                         splitter.setHandleWidth(10)
                                         splitter.addWidget(parameter_panel)
                                         splitter.addWidget(preview_frame)
-                                        preview_frame.setMinimumWidth(300)
+                                        # Leave room for the result heading and its decode controls.
+                                        preview_frame.setMinimumWidth(340 if has_local_decode else 300)
                                         app_page._rh_splitter = splitter
                                         splitter.setStretchFactor(0, 3)
                                         splitter.setStretchFactor(1, 7)
