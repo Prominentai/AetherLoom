@@ -39,7 +39,7 @@ RUNTIME_FILES = (
     'requirements.txt', 'THIRD_PARTY_NOTICES.txt',
 )
 CORE_MODULE_FILES = (
-    'rh_model_apps.py', 'rh_model_runtime.py', 'rh_model_app_ui.py', 'rh_llm_execution.py',
+    'rh_model_apps.py', 'rh_model_runtime.py', 'rh_model_errors.py', 'rh_model_app_ui.py', 'rh_llm_execution.py',
     'rh_multi_inputs.py', 'rh_multi_input_ui.py',
     'rh_standard_catalog.json', 'RH_MODEL_CATALOG_LICENSE.txt',
     '__init__.py', 'api_credentials.py', 'api_manager.py', 'api_manager_ui.py',

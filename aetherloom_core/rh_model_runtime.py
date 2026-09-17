@@ -10,6 +10,7 @@ import requests
 
 from api_calls import call_rh
 from .rh_model_apps import endpoint_path, official_site
+from .rh_model_errors import accepted_model_task_id, classify_model_error
 
 
 def llm_base(base_url):
@@ -103,20 +104,19 @@ class StandardAdapter:
                                  json=request['body'], timeout=timeout, allow_redirects=False)
         try:
             try:data = response.json()
-            except ValueError:
-                response.raise_for_status();raise call_rh.RunningHubResponseError('标准模型返回无效 JSON')
-            if not isinstance(data, dict):raise call_rh.RunningHubResponseError('标准模型返回无效结果')
-            task_id = call_rh.accepted_task_id(data)
+            except ValueError:data = None
+            task_id = accepted_model_task_id(data)
             if task_id:
                 return dict(code=0, data=dict(taskId=task_id, taskStatus=str(data.get('status') or 'QUEUED').upper()))
-            if response.status_code == 429:return dict(code=421)
-            if response.status_code in (401, 403):return dict(code=802)
-            # A server/transport fault is ambiguous even when it contains text.
-            if response.status_code >= 500:response.raise_for_status()
-            error = data.get('errorCode') or data.get('error_code')
-            if str(error or '') not in ('', '0') or response.status_code in (400, 404, 422):
-                return dict(code=301, model_error_code=str(error or response.status_code),
-                            msg=call_rh._safe_message(data.get('errorMessage') or '模型拒绝请求', key))
+            error = classify_model_error(data, response.status_code, key)
+            if error:
+                if error['kind'] == 'busy':
+                    return dict(code=421, model_error_code=error['code'], msg=error['message'])
+                if error['kind'] == 'rejected':
+                    return dict(code=802 if response.status_code in (401, 403) else 301,
+                                model_error_code=error['code'], msg=error['message'])
+                suffix = ' (code=' + error['code'] + ')' if error['code'] else ''
+                raise call_rh.RunningHubResponseError('标准模型返回错误' + suffix + '：' + error['message'])
             response.raise_for_status()
             raise call_rh.RunningHubResponseError('标准模型未返回 taskId，不能确认是否已受理')
         finally:response.close()
