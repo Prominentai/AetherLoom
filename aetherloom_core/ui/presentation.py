@@ -4,7 +4,7 @@ from PyQt5.QtCore import Qt
 from PyQt5 import QtCore, QtGui, QtWidgets
 from aetherloom_core.platform_utils import _set_native_titlebar_dark
 from aetherloom_core.platform_utils import _svg_to_icon
-from aetherloom_core.paths import current_dir, SOURCE_ROOT
+from aetherloom_core.paths import current_dir, SOURCE_ROOT, resource_path
 import os
 
 
@@ -638,7 +638,7 @@ class PresentationMixin:
             mode = 'dark'
         self._theme_mode = mode
         from aetherloom_core.ui.themed_icons import refresh_navigation
-        refresh_navigation(self, current_dir, mode)
+        refresh_navigation(self, mode)
         if hasattr(self, '_decode_page'):
             self._decode_page.apply_theme()
         if hasattr(self, '_rh_dashboard'):
@@ -736,7 +736,7 @@ class PresentationMixin:
         try:
             if not hasattr(self, 'theme_toggle_btn') or self.theme_toggle_btn is None:
                 return
-            icon_dir = os.path.join(current_dir, 'icons')
+            icon_dir = resource_path('icons')
             candidates = []
             if mode == 'dark':
                 candidates.extend([

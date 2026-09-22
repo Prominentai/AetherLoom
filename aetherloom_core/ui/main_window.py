@@ -35,6 +35,62 @@ from aetherloom_core.ui.settings import SettingsMixin
 
 
 class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, SettingsMixin, QtWidgets.QMainWindow):
+    @property
+    def local_decode_dir(self):
+        """Manual decode materials follow the configured input directory."""
+        return os.path.join(self.input_dir, 'decoding')
+
+    @property
+    def decoded_output_dir(self):
+        """Manual decode results follow output; App tasks keep their own folders."""
+        return os.path.join(self.output_dir, 'decoded')
+
+    def _set_input_directory(self, directory):
+        return self._set_media_directory('input', directory)
+
+    def _set_output_directory(self, directory):
+        return self._set_media_directory('output', directory)
+
+    def _set_media_directory(self, kind, directory):
+        attribute = kind + '_dir'
+        old_directory = getattr(self, attribute)
+        field = getattr(self, kind + '_label')
+        try:
+            directory = os.path.abspath(os.path.expanduser(str(directory).strip()))
+            os.makedirs(os.path.join(directory, 'decoding' if kind == 'input' else 'decoded'), exist_ok=True)
+        except (OSError, ValueError) as exc:
+            field.setText(old_directory)
+            self.log(f'无法设置目录: {exc}')
+            return False
+        setattr(self, attribute, directory)
+        self.settings[attribute] = directory
+        field.setText(directory)
+        changed = os.path.normcase(os.path.abspath(old_directory)) != os.path.normcase(directory)
+        if changed and kind == 'input':
+            # Old filenames must never be resolved against the new input folder
+            # while its asynchronous scan is still pending.
+            with QtCore.QSignalBlocker(self.file_list):
+                self.file_list.clear()
+            self._pending_preview_orig = None
+            self._pending_preview_output = None
+            self._pending_info_paths = {'orig': None, 'output': None}
+            for mapping_name in ('_current_paths', '_current_pixmaps', '_orig_paths_by_mode', '_orig_pixmaps_by_mode'):
+                mapping = getattr(self, mapping_name, {})
+                for key in mapping:
+                    mapping[key] = None
+            for view in (self.orig_view_grc, self.orig_view_sst, self.output_view):
+                view.clear()
+            self.file_info_label.clear()
+            self._update_output_play_button_visibility(False)
+            self.load_folder(self.local_decode_dir)
+        elif changed:
+            self.on_file_selected()
+        if changed:
+            setattr(self, '_local_snapshot_' + kind, None)
+            self._refresh_local_list()
+        self._save_settings()
+        return True
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f'AetherLoom v{__version__}')
@@ -121,7 +177,6 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         # use local input/output folders inside the GUI directory by default
         default_input = os.path.join(current_dir, 'input')
         default_output = os.path.join(current_dir, 'output')
-        default_local_decode = os.path.join(current_dir, 'decoding')
 
         # load settings if exist
         self.settings = self._load_settings() or {}
@@ -203,9 +258,9 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                 pass
         except Exception:
             pass
-        self.input_dir = self.settings.get('input_dir', default_input)
-        self.output_dir = self.settings.get('output_dir', default_output)
-        self.local_decode_dir = self.settings.get('local_decode_dir', default_local_decode)
+        self.input_dir = self.settings.get('input_dir') or default_input
+        self.output_dir = self.settings.get('output_dir') or default_output
+        self._decode_result_paths = {}
         raw_custom_cache = self.settings.get('custom_api_settings', {}) if isinstance(self.settings, dict) else {}
         self.api_custom_cache = raw_custom_cache if isinstance(raw_custom_cache, dict) else {}
         raw_provider_profiles = self.settings.get('api_provider_profiles', {}) if isinstance(self.settings, dict) else {}
@@ -340,6 +395,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         os.makedirs(self.input_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.local_decode_dir, exist_ok=True)
+        os.makedirs(self.decoded_output_dir, exist_ok=True)
 
         self._themes = self._build_theme_palettes()
         self._theme_mode = self.settings.get('theme_mode', 'dark') if isinstance(self.settings, dict) else 'dark'
@@ -613,14 +669,11 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
     def _connect_signals(self):
         self.input_btn.clicked.connect(self.select_input_folder)
         self.output_btn.clicked.connect(self.select_output_folder)
-        self.local_decode_btn.clicked.connect(self.select_local_decode_folder)
         self.theme_toggle_btn.clicked.connect(self._toggle_theme_mode)
         self.input_open_btn.clicked.connect(lambda: self._open_folder_path(self.input_label.text(), create=True))
         self.output_open_btn.clicked.connect(lambda: self._open_folder_path(self.output_label.text(), create=True))
-        self.local_decode_open_btn.clicked.connect(lambda: self._open_folder_path(self.local_decode_label.text(), create=True))
         self.input_label.editingFinished.connect(self.on_input_edit)
         self.output_label.editingFinished.connect(self.on_output_edit)
-        self.local_decode_label.editingFinished.connect(self.on_local_decode_edit)
         self.file_list.itemSelectionChanged.connect(self.on_file_selected)
         # context menu for left file list
         self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1011,27 +1064,31 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
             return None
 
 
-    def _find_restored_output(self, input_filename):
-        """Return the first restored output path matching the input basename, ignoring extension."""
-        try:
-            name, _ = os.path.splitext(os.path.basename(input_filename))
-            base = f"{name}_restored"
-            if not os.path.isdir(self.output_dir):
-                return None
+    def _find_restored_output(self, input_filename, *, output_dir=None, input_dir=None):
+        """Find the actual result, including outputs created before a path change."""
+        source = os.path.normcase(os.path.abspath(os.path.join(input_dir or self.local_decode_dir, input_filename)))
+        if output_dir is None:
+            known = self._decode_result_paths.get(source)
+            if known and os.path.isfile(known):
+                return known
+            # Keep old output-root results discoverable without moving user files.
+            folders = (self.decoded_output_dir, self.output_dir)
+        else:
+            folders = (output_dir,)
+        name, extension = os.path.splitext(os.path.basename(input_filename))
+        base = name + '_restored'
+        for folder in folders:
+            expected = os.path.join(folder, base + extension)
+            if os.path.isfile(expected):
+                return expected
             try:
-                for fname in sorted(os.listdir(self.output_dir)):
-                    try:
-                        stem, _ext = os.path.splitext(fname)
-                        if stem == base:
-                            return os.path.join(self.output_dir, fname)
-                    except Exception:
-                        continue
-            except Exception:
-                return None
-            return None
-        except Exception:
-            return None
-
+                with os.scandir(folder) as entries:
+                    for entry in entries:
+                        if os.path.splitext(entry.name)[0] == base and entry.is_file():
+                            return entry.path
+            except OSError:
+                continue
+        return None
 
     def on_file_selected(self):
         items = self.file_list.selectedItems()
@@ -1481,9 +1538,8 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                     p_in = os.path.join(self.local_decode_dir, fname)
                     if os.path.exists(p_in):
                         paths.append(p_in)
-                    name, ext = os.path.splitext(fname)
-                    p_out = os.path.join(self.output_dir, f"{name}_restored{ext}")
-                    if os.path.exists(p_out):
+                    p_out = self._find_restored_output(fname)
+                    if p_out and os.path.isfile(p_out):
                         paths.append(p_out)
                 except Exception:
                     pass
@@ -1603,7 +1659,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                 grc.grid_rows = int(grc.grid_cols) + 2
         except Exception:
             pass
-        self.worker = Worker(files, self.local_decode_dir, self.output_dir, keep_audio=True, decode_mode=mode_key, overwrite=self.overwrite_cb.isChecked(), password=pwd_val, grid_cols=self.grid_spin.value())
+        self.worker = Worker(files, self.local_decode_dir, self.decoded_output_dir, keep_audio=True, decode_mode=mode_key, overwrite=self.overwrite_cb.isChecked(), password=pwd_val, grid_cols=self.grid_spin.value())
         # configure progress bar: if single file, show indeterminate busy state;
         # if multiple files, use determinate 0-100
         if len(files) == 1:
@@ -2326,7 +2382,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
             pwd_val = self.sst_pwd_edit.text() if mode_key == 'sst' else ''
         except Exception:
             pwd_val = ''
-        self.worker = Worker(items, self.local_decode_dir, self.output_dir, keep_audio=True, decode_mode=mode_key, overwrite=self.overwrite_cb.isChecked(), password=pwd_val, grid_cols=self.grid_spin.value())
+        self.worker = Worker(items, self.local_decode_dir, self.decoded_output_dir, keep_audio=True, decode_mode=mode_key, overwrite=self.overwrite_cb.isChecked(), password=pwd_val, grid_cols=self.grid_spin.value())
         # configure progress bar: if single file, show indeterminate busy state;
         # since this is batch, use determinate range
         if len(items) == 1:
@@ -2372,7 +2428,15 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
 
 
     def on_worker_finished(self):
-        canceled = bool(self.worker and self.worker._is_cancelled)
+        worker = self.worker
+        canceled = bool(worker and worker._is_cancelled)
+        if worker is not None:
+            for filename, result_path in worker.results.items():
+                source = os.path.normcase(os.path.abspath(os.path.join(worker.input_dir, filename)))
+                self._decode_result_paths[source] = result_path
+            # This is only a session lookup, not a second task history.
+            while len(self._decode_result_paths) > 2048:
+                self._decode_result_paths.pop(next(iter(self._decode_result_paths)))
         self.batch_btn.setEnabled(True)
         self.preview_btn.setEnabled(True)
         # restore determinate range and mark complete
@@ -2386,10 +2450,11 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         # if we have a list of files processed, show output preview for first file if exists
         output_found = False
         try:
-            files = getattr(self, 'current_worker_files', None)
+            files = worker.files if worker is not None else []
             if files and len(files) > 0:
                 first = files[0]
-                output_path = self._find_restored_output(first)
+                output_path = worker.results.get(first) or self._find_restored_output(
+                    first, input_dir=worker.input_dir, output_dir=worker.output_dir)
                 if output_path and os.path.exists(output_path):
                     self.show_image_in_label(output_path, self.output_view, show_grid=False)
                     output_found = True

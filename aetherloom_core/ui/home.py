@@ -15,6 +15,7 @@ import requests
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from aetherloom_core import __version__
+from aetherloom_core.paths import resource_path
 from . import design
 
 REPOSITORY = 'https://github.com/Prominentai/AetherLoom'
@@ -338,7 +339,7 @@ class HomePage(QtWidgets.QWidget):
         self.hero.setSpacing(16)
         self.logo = QtWidgets.QLabel()
         self.logo.setFixedSize(48, 48)
-        self.logo.setPixmap(QtGui.QIcon(str(Path(directory) / 'icons' / 'home_emblem.svg')).pixmap(48, 48))
+        self.logo.setPixmap(QtGui.QIcon(resource_path('icons', 'home_emblem.svg')).pixmap(48, 48))
         self.hero.addWidget(self.logo)
         heading = QtWidgets.QVBoxLayout()
         heading.setSpacing(4)

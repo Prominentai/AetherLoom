@@ -1948,8 +1948,15 @@ class CanvasView(QtWidgets.QGraphicsView):
         for item in retained:
             proxy=item.inline_proxy
             focused=self.scene().focusItem() is proxy
+            was_visible = proxy.isVisible()
             proxy.setVisible(item in visible or focused)
-            item.layout_inline()
+            if proxy.isVisible():
+                item.layout_inline()
+                # Apply changes deferred while culled only after the full form
+                # is visible again, using its normal geometry rather than the
+                # compact fallback painted for offscreen/zoomed-out nodes.
+                if not was_visible and hasattr(proxy.widget(), '_geometry_timer'):
+                    proxy.widget()._geometry_timer.start(0)
         # Preserve focused editors, open model pickers and text-tool jobs.
         excess=max(0,len(retained)-48)
         for item in retained:

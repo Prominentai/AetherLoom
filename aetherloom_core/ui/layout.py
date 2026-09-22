@@ -14,7 +14,7 @@ from PyQt5.QtCore import Qt
 from PyQt5 import QtCore, QtGui, QtWidgets
 from aetherloom_core.rh_parameters import RhEnumComboBox
 from aetherloom_core.rh_parameters import RhNumberSpinBox
-from aetherloom_core.paths import current_dir, SOURCE_ROOT
+from aetherloom_core.paths import current_dir, SOURCE_ROOT, resource_path
 from aetherloom_core.ui.widgets import ThumbnailDelegate
 from aetherloom_core.ui.responsive import make_responsive, SidebarScroll
 from moviepy.editor import VideoFileClip
@@ -84,22 +84,9 @@ class MainLayoutMixin:
         api_icon = self.style().standardIcon(QtWidgets.QStyle.SP_DriveNetIcon)
         runninghub_icon = self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton)
 
-        # try loading custom sidebar icons from ./icons
+        # Load bundled static icons; never create resources in the user directory.
         try:
-            icon_dir = os.path.join(current_dir, 'icons')
-            os.makedirs(icon_dir, exist_ok=True)
-            # persist inline SVGs into icons/ so they behave like other icons and can be customized
-            try:
-                emblem_path = os.path.join(icon_dir, 'home_emblem.svg')
-                icon_path = os.path.join(icon_dir, 'home_icon.svg')
-                if not os.path.exists(emblem_path):
-                    with open(emblem_path, 'w', encoding='utf-8') as wf:
-                        wf.write(PLAY_BUTTON_SVG)
-                if not os.path.exists(icon_path):
-                    with open(icon_path, 'w', encoding='utf-8') as wf:
-                        wf.write(HOME_ICON_SVG)
-            except Exception:
-                pass
+            icon_dir = resource_path('icons')
             # prefer SVG, fallback to provided JPEGs if present
             candidates = {
                 'decode': [
@@ -141,7 +128,7 @@ class MainLayoutMixin:
         try:
             # prefer an on-disk icon if present (icons/home_icon.svg), else render from inline SVG
             try:
-                icon_file = os.path.join(current_dir, 'icons', 'home_icon.svg')
+                icon_file = resource_path('icons', 'home_icon.svg')
             except Exception:
                 icon_file = None
             home_svg_icon = None
@@ -160,9 +147,9 @@ class MainLayoutMixin:
         self.local_btn = _make_sidebar_button('本地文件', '浏览输入/输出素材', folder_icon)
         self.api_btn = _make_sidebar_button('API管理', '模型与接口管理', api_icon)
         self.runninghub_btn = _make_sidebar_button('RH应用', 'RunningHub 应用', runninghub_icon)
-        models_icon = QtGui.QIcon(os.path.join(current_dir, 'icons', 'rh_models.svg'))
+        models_icon = QtGui.QIcon(resource_path('icons', 'rh_models.svg'))
         self.rh_models_btn = _make_sidebar_button('RH模型库', '模型检索与本地收藏', models_icon)
-        canvas_icon = QtGui.QIcon(os.path.join(current_dir, 'icons', 'canvas.svg'))
+        canvas_icon = QtGui.QIcon(resource_path('icons', 'canvas.svg'))
         self.canvas_btn = _make_sidebar_button('画布', '画布与应用工作流', canvas_icon)
         self.settings_btn = _make_sidebar_button('设置中心', '参数与目录管理', settings_icon)
 
@@ -195,7 +182,7 @@ class MainLayoutMixin:
         except Exception:
             pass
         try:
-            theme_icon_dir = os.path.join(current_dir, 'icons')
+            theme_icon_dir = resource_path('icons')
             theme_icon = None
             for candidate in (
                 os.path.join(theme_icon_dir, 'theme_toggle.svg'),
@@ -5080,16 +5067,26 @@ class MainLayoutMixin:
                                                 delete_orig_cb.setToolTip('解码完成后删除未解码的原输出文件')
                                                 delete_orig_cb.setChecked(True)
                                                 sidebar_layout.addWidget(delete_orig_cb)
-                                                # open local decode folder button
+                                                # Open the task's captured folder even if the global output path changed.
                                                 open_row = QtWidgets.QHBoxLayout()
-                                                open_btn = QtWidgets.QPushButton('打开本地解码目录')
-                                                try:
-                                                    open_btn.clicked.connect(lambda: self._reveal_in_explorer(self.local_decode_dir) if hasattr(self, '_reveal_in_explorer') else os.startfile(self.local_decode_dir))
-                                                except Exception:
-                                                    try:
-                                                        open_btn.clicked.connect(lambda: os.startfile(self.local_decode_dir))
-                                                    except Exception:
-                                                        pass
+                                                open_btn = QtWidgets.QPushButton('打开应用结果目录')
+                                                open_btn.setToolTip('打开最近任务的实际结果目录；尚未运行时打开当前应用的默认结果目录')
+                                                def _open_app_results(_checked=False, _wid=str(wid), _definition=parsed):
+                                                    from aetherloom_core.rh_storage import app_output_directories
+                                                    directory = None
+                                                    service = getattr(self, '_rh_execution_service', None)
+                                                    if service is not None:
+                                                        headers = service.record_headers(_wid)
+                                                        if headers:
+                                                            latest = max(headers, key=lambda item: float(item.get('created_at') or 0))
+                                                            record = service.get(latest['run_id']) or {}
+                                                            directory = (record.get('snapshot') or {}).get('output_dir')
+                                                    if not directory:
+                                                        title = str(_definition.get('title') or _definition.get('name')
+                                                                    or _definition.get('webappName') or _wid)
+                                                        directory, _ = app_output_directories(self.output_dir, title, _wid)
+                                                    self._open_folder_path(directory, create=True)
+                                                open_btn.clicked.connect(_open_app_results)
                                                 open_row.addStretch(1)
                                                 open_row.addWidget(open_btn)
                                                 sidebar_layout.addLayout(open_row)
@@ -6464,10 +6461,7 @@ class MainLayoutMixin:
                                                                             if not pth or not os.path.exists(pth):
                                                                                 self.log('当前无可加入解码队列的文件')
                                                                                 return
-                                                                            decode_dir = getattr(self, 'local_decode_dir', None)
-                                                                            if not decode_dir:
-                                                                                current_dir = SOURCE_ROOT
-                                                                                decode_dir = os.path.join(current_dir, 'decoding')
+                                                                            decode_dir = self.local_decode_dir
                                                                             os.makedirs(decode_dir, exist_ok=True)
                                                                             base = os.path.basename(pth)
                                                                             dst = os.path.join(decode_dir, base)
@@ -7970,24 +7964,18 @@ class MainLayoutMixin:
             card_layout.addLayout(field_row)
             cards_column.addWidget(card)
 
-        # input/output/local rows rendered as compact cards
+        # input/output rows rendered as compact cards
         self.input_label = QtWidgets.QLineEdit(self.input_dir)
         self.input_label.setPlaceholderText('例如: D:/ComfyUI/input')
         self.input_btn = QtWidgets.QPushButton('浏览输入目录')
         self.input_open_btn = QtWidgets.QPushButton('打开文件夹')
-        _build_folder_card('输入目录', '拖入的文件默认保存到此目录', self.input_label, self.input_btn, self.input_open_btn)
+        _build_folder_card('输入目录', '拖入文件保存到此目录；待解码素材保存到 decoding 子目录', self.input_label, self.input_btn, self.input_open_btn)
 
         self.output_label = QtWidgets.QLineEdit(self.output_dir)
         self.output_label.setPlaceholderText('例如: D:/ComfyUI/output')
         self.output_btn = QtWidgets.QPushButton('浏览输出目录')
         self.output_open_btn = QtWidgets.QPushButton('打开文件夹')
-        _build_folder_card('输出目录', '生成的文件会保存到此目录', self.output_label, self.output_btn, self.output_open_btn)
-
-        self.local_decode_label = QtWidgets.QLineEdit(self.local_decode_dir)
-        self.local_decode_label.setPlaceholderText('例如: D:/ComfyUI/local_decode')
-        self.local_decode_btn = QtWidgets.QPushButton('浏览本地目录')
-        self.local_decode_open_btn = QtWidgets.QPushButton('打开文件夹')
-        _build_folder_card('本地解码目录', '待解码文件目录', self.local_decode_label, self.local_decode_btn, self.local_decode_open_btn)
+        _build_folder_card('输出目录', '生成文件保存到此目录；本地解码页的结果保存到 decoded 子目录', self.output_label, self.output_btn, self.output_open_btn)
 
         # thumbnail cache controls
         cache_card = QtWidgets.QFrame()

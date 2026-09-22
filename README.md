@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="icons/home_emblem.svg" width="112" alt="AetherLoom">
+  <img src="assets/readme/app_icon.ico" width="112" alt="AetherLoom">
 </p>
 
 <h1 align="center">AetherLoom</h1>
@@ -12,7 +12,7 @@
 
 AetherLoom 是一款 Windows 桌面客户端，通过 API 调用云端模型与 ComfyUI 工作流，在本地编辑参数、组织画布、查看和管理结果，无需部署生成模型。
 
-**当前版本：0.2** · Built with Python / PyQt5
+**当前版本：0.2.0** · Built with Python / PyQt5
 
 ## 主要功能
 

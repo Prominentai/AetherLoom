@@ -1,5 +1,6 @@
 """Shared API/settings presentation without changing configuration storage."""
 from pathlib import Path
+from aetherloom_core.paths import resource_path
 
 from PyQt5 import QtCore, QtWidgets
 
@@ -192,7 +193,7 @@ class SettingsSections(QtCore.QObject):
 
     def select(self, index):
         for position, card in enumerate(self.cards):
-            group = 0 if position < 3 else 1 if position < 6 else 2
+            group = 0 if position < 2 else 1 if position < 5 else 2
             card.setVisible(group == index)
         self.window.settings_page.verticalScrollBar().setValue(0)
 
@@ -214,8 +215,8 @@ def configure_settings(window, layout, column, hero):
         tabs.addTab(title)
     layout.insertWidget(1, tabs)
     window._settings_tabs = tabs
-    # Prompt cards start at index six; preserve the existing category mapping.
-    column.insertWidget(6, _completion_card(window))
+    # Two directory cards and three task/performance cards precede prompts.
+    column.insertWidget(5, _completion_card(window))
     expand_card = window.expand_system_prompt_edit.parentWidget()
     column.insertWidget(column.indexOf(expand_card) + 1, _polish_prompt_card(window))
     window.image_prompt_fields = {}
@@ -224,10 +225,10 @@ def configure_settings(window, layout, column, hero):
     cards = [column.itemAt(i).widget() for i in range(column.count()) if column.itemAt(i).widget()]
     window._settings_cards = cards
     folder_rows = []
-    for card, field, browse, open_button in zip(cards[:3],
-            (window.input_label, window.output_label, window.local_decode_label),
-            (window.input_btn, window.output_btn, window.local_decode_btn),
-            (window.input_open_btn, window.output_open_btn, window.local_decode_open_btn)):
+    for card, field, browse, open_button in zip(cards[:2],
+            (window.input_label, window.output_label),
+            (window.input_btn, window.output_btn),
+            (window.input_open_btn, window.output_open_btn)):
         row = card.layout().itemAt(2).layout()
         while row.count():
             row.takeAt(0)
@@ -256,8 +257,8 @@ def configure_settings(window, layout, column, hero):
     for card in cards:
         card.layout().setContentsMargins(16, 16, 16, 16)
         card.layout().setSpacing(10)
-    cards[3].findChild(QtWidgets.QLabel, 'settingsHint').setText('限制磁盘缩略图缓存占用；达到上限后自动清理较旧的缓存。')
-    cards[4].findChild(QtWidgets.QLabel, 'settingsHint').setText('保留最近访问的 RH 应用页面，减少再次打开时的加载。')
+    cards[2].findChild(QtWidgets.QLabel, 'settingsHint').setText('限制磁盘缩略图缓存占用；达到上限后自动清理较旧的缓存。')
+    cards[3].findChild(QtWidgets.QLabel, 'settingsHint').setText('保留最近访问的 RH 应用页面，减少再次打开时的加载。')
     # Keep control instances and their original signal connections intact.
     for spin, suffix in ((window.thumb_cache_spin, ' MB'), (window.app_cache_spin, ' 个'),
                          (window.rh_retry_max_spin, ' 次'), (window.rh_retry_delay_spin, ' 秒')):
@@ -266,10 +267,10 @@ def configure_settings(window, layout, column, hero):
         spin.setMinimumHeight(38)
         spin.setSuffix(suffix)
         window._install_combo_wheel_blocker(spin)
-    for card, text in ((cards[3], '缓存上限'), (cards[4], '保留页面')):
+    for card, text in ((cards[2], '缓存上限'), (cards[3], '保留页面')):
         row = card.layout().itemAt(2).layout()
         row.itemAt(0).widget().setText(text)
-    rh_layout = cards[5].layout()
+    rh_layout = cards[4].layout()
     old_row = rh_layout.takeAt(2).layout()
     while old_row.count():
         item = old_row.takeAt(0)
@@ -339,7 +340,7 @@ def configure_api(window, layout, hero):
 
 def stylesheet(root, mode):
     p = palette(mode)
-    icons = Path(__file__).resolve().parents[2] / 'icons'
+    icons = Path(resource_path('icons'))
     theme = 'light' if mode == 'light' else 'dark'
     down = (icons / f'ui-chevron-down-{theme}.svg').as_posix()
     up = (icons / f'ui-chevron-up-{theme}.svg').as_posix()

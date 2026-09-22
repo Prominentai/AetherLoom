@@ -2,6 +2,7 @@
 from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtSvg
 from aetherloom_core.rh_ui import palette
+from aetherloom_core.paths import resource_path
 
 
 class StrokeIcon(QtGui.QIconEngine):
@@ -29,7 +30,7 @@ class StrokeIcon(QtGui.QIconEngine):
         return pixmap
 
 
-def refresh_navigation(owner, root, mode):
+def refresh_navigation(owner, mode):
     colors = palette(mode)
     colors = {key: colors[key] for key in ('muted', 'text', 'accent')}
     for name, file in [('home_btn', 'home_icon'), ('runninghub_btn', 'runninghub'),
@@ -37,7 +38,7 @@ def refresh_navigation(owner, root, mode):
                        ('decode_btn', 'local_decoding'), ('local_btn', 'local_files'),
                        ('api_btn', 'api'), ('settings_btn', 'setting')]:
         button = getattr(owner, name, None)
-        path = Path(root) / 'icons' / (file + '.svg')
+        path = Path(resource_path('icons', file + '.svg'))
         if button is not None and path.is_file():
             button.setIcon(QtGui.QIcon(StrokeIcon(path.read_text(encoding='utf8'), colors)))
     reveal = getattr(owner, 'navigation_reveal', None)

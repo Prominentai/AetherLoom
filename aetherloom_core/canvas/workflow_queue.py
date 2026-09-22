@@ -386,7 +386,7 @@ class WorkflowQueue(QtCore.QObject):
                      task_ids=[], run_ids=[])
                 for node_id in order if node_id in scope and by_id[node_id]['kind'] in {'app'} | set(model.MODEL_KINDS)]
 
-    def enqueue(self, document, target=None, force=False, batch_count=None, prepare_app=None):
+    def enqueue(self, document, target=None, force=False, batch_count=None, prepare_app=None, *, document_saved=False):
         if self._closed:
             raise ValueError('客户端正在关闭')
         if self._load_error:
@@ -400,8 +400,14 @@ class WorkflowQueue(QtCore.QObject):
             frozen.get('batch_count', 1) if batch_count is None else batch_count)
         nodes = self._scope_nodes(frozen, target)
         captured = self.engine.capture_prepared(frozen, target, prepare_app)
-        # A deliberate Run may create a new workflow. Dispatch never may.
-        self.engine.save_document(document, explicit=True)
+        # The page saves immediately before enqueue. Recheck its authority here
+        # without rewriting the workflow and runtime snapshot a second time.
+        if document_saved:
+            if not self.store.workflow_matches(document):
+                raise ValueError('画布 JSON 已被删除或外部修改，请重新打开后运行')
+        else:
+            # A deliberate Run may create a new workflow. Dispatch never may.
+            self.engine.save_document(document, explicit=True)
         group_id = uuid.uuid4().hex
         group = dict(id=group_id, canvas_id=frozen['id'], name=frozen.get('name', '画布'),
                      order=self._order + 1,

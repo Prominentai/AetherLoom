@@ -106,7 +106,7 @@ def build(dialog,path,mask):
     mask_controls.extend([blend,opacity_title,opacity])
     settings.addStretch()
     dialog.status=QtWidgets.QLabel();layout.addWidget(dialog.status)
-    hint=QtWidgets.QLabel('Ctrl + 滚轮缩放 · 空格 / 中键平移 · Alt + 右键拖动调整笔刷\n运行时保存 RGBA 遮罩图像（MASK = 1 − Alpha）与绘画层；保留软边缘，旋转、镜像同步作用于所有图层。')
+    hint=QtWidgets.QLabel('Ctrl+Z 撤销 · Ctrl+Y / Ctrl+Shift+Z 重做\nCtrl + 滚轮缩放 · 空格 / 中键平移 · Alt + 右键拖动调整笔刷\n运行时保存 RGBA 遮罩图像（MASK = 1 − Alpha）与绘画层；保留软边缘，旋转、镜像同步作用于所有图层。')
     hint.setWordWrap(True);layout.addWidget(hint)
     footer=QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save|QtWidgets.QDialogButtonBox.Cancel)
     footer.button(footer.Save).setText('保存并使用');footer.button(footer.Cancel).setText('取消')

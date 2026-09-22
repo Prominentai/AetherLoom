@@ -26,7 +26,7 @@ def group_selected(page):
  page._checkpoint()
  # Flatten existing groups rather than create recursive visual ownership.
  page.document['nodes']=[n for n in page.document['nodes'] if n['kind']!='subgraph' or not set(n.get('members',[]))&ids]
- group=model.new_node('subgraph',members=[n['id'] for n in selected],params={'collapsed':True,'expose_unconnected':False},
+ group=model.new_node('subgraph',members=[n['id'] for n in selected],params={'collapsed':True},
   x=min(n.get('x',0) for n in selected)-340,y=min(n.get('y',0) for n in selected))
  page.document['nodes'].append(group);page._edited(rebuild=True,select=group['id'])
 
@@ -71,8 +71,6 @@ def build(panel,node):
   button=QtWidgets.QPushButton(text);button.clicked.connect(fn);row.addWidget(button)
  panel.form.addLayout(row)
  button=QtWidgets.QPushButton('保存为组合节点模板');button.clicked.connect(lambda:export_group(page,node));panel.form.addWidget(button)
- expose=QtWidgets.QCheckBox('暴露未连接的输入端口');expose.setChecked(node.get('params',{}).get('expose_unconnected',False))
- expose.toggled.connect(lambda v:page._node_changed(node['id'],'params.expose_unconnected',v));panel.form.addWidget(expose)
  from aetherloom_core.rh_parameters import RhEnumComboBox
  combo=RhEnumComboBox();panel.form.addWidget(combo)
  selected=[n for n in page.document['nodes'] if n['id'] in node.get('members',[]) and n['kind']!='subgraph']
@@ -105,16 +103,22 @@ def sync(scene):
   if not group.get('params',{}).get('collapsed',True):
    for port in old.values():scene.removeItem(port);port.setParentItem(None)
    continue
-  ids=set(group.get('members',[]));sockets=[];occupied={(e['target'],e['input']) for e in document['edges']}
+  member_ids=group.get('members',[]);ids=set(member_ids);sockets=[]
+  internal_inputs=set();internal_sources=set();external_outputs=set()
   for edge in document['edges']:
-   if edge['target'] in ids and edge['source'] not in ids:sockets.append((edge['target'],edge['input'],False))
-   if edge['source'] in ids and edge['target'] not in ids:sockets.append((edge['source'],edge.get('output','output'),True))
-  for identity in ids:
+   if edge['source'] in ids and edge['target'] in ids:
+    internal_inputs.add((edge['target'],edge['input']));internal_sources.add(edge['source'])
+   elif edge['source'] in ids:
+    external_outputs.add((edge['source'],edge.get('output','output')))
+  # The group boundary must remain connectable after folding or disconnecting.
+  # Ignore the legacy expose_unconnected flag: only internally wired inputs
+  # are private. Iterate member/field order so external wiring cannot move rows.
+  for identity in member_ids:
    member=scene.nodes.get(identity)
    if member is None:continue
-   if group.get('params',{}).get('expose_unconnected'):
-    sockets.extend((identity,k,False) for k in member.ports if (identity,k) not in occupied)
-   if not any(e['source']==identity and e['target'] in ids for e in document['edges']):sockets.extend((identity,k,True) for k in member.outputs)
+   sockets.extend((identity,key,False) for key in member.ports if (identity,key) not in internal_inputs)
+   sockets.extend((identity,key,True) for key in member.outputs
+                  if identity not in internal_sources or (identity,key) in external_outputs)
   counts={False:0,True:0}
   for identity,key,output in dict.fromkeys(sockets):
    member=scene.nodes[identity];original=(member.outputs if output else member.ports).get(key)

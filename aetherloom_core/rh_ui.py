@@ -1,6 +1,7 @@
 """Shared presentation for the RunningHub workspace, without task behavior."""
 
 from pathlib import Path
+from aetherloom_core.paths import resource_path
 
 
 def palette(mode='dark'):
@@ -46,7 +47,7 @@ def navigation_button_stylesheet(mode='dark', active=False, status=None):
 def app_stylesheet(mode='dark'):
     """Styles stay below rhAppPage so other tools retain their own layout."""
     p = palette(mode)
-    icon_dir = Path(__file__).resolve().parents[1] / 'icons'
+    icon_dir = Path(resource_path('icons'))
     icon_theme = 'light' if mode == 'light' else 'dark'
     up_arrow = (icon_dir / f'ui-chevron-up-{icon_theme}.svg').as_posix()
     down_arrow = (icon_dir / f'ui-chevron-down-{icon_theme}.svg').as_posix()

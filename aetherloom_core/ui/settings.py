@@ -15,7 +15,10 @@ class SettingsMixin:
             import json
             if os.path.exists(self.settings_path):
                 with open(self.settings_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        data.pop('local_decode_dir', None)
+                    return data
         except Exception:
             pass
         return None
@@ -55,7 +58,6 @@ class SettingsMixin:
             data = {
                 'input_dir': self.input_dir,
                 'output_dir': self.output_dir,
-                'local_decode_dir': self.local_decode_dir,
                 'splitter_sizes': self.settings.get('splitter_sizes') if isinstance(getattr(self, 'settings', None), dict) else None,
                 'grid_cols': int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else None,
                 'decode_mode': self._current_decode_mode(),
@@ -290,9 +292,9 @@ class SettingsMixin:
                         fields['editor'].setPlainText(value['system_prompt'])
                         fields['merge'].setChecked(value['merge_system_prompt'])
             # input/output already applied earlier in __init__ but keep fields in sync
-            self.input_dir = settings.get('input_dir', self.input_dir)
-            self.output_dir = settings.get('output_dir', self.output_dir)
-            self.local_decode_dir = settings.get('local_decode_dir', self.local_decode_dir)
+            self.input_dir = settings.get('input_dir') or self.input_dir
+            self.output_dir = settings.get('output_dir') or self.output_dir
+            self.settings.pop('local_decode_dir', None)
             try:
                 self.rh_local_decode_settings = settings.get('rh_local_decode_settings', {}) if isinstance(settings, dict) else {}
                 if not isinstance(self.rh_local_decode_settings, dict):
@@ -303,6 +305,7 @@ class SettingsMixin:
                 pass
             try:
                 os.makedirs(self.local_decode_dir, exist_ok=True)
+                os.makedirs(self.decoded_output_dir, exist_ok=True)
             except Exception:
                 pass
             if settings.get('theme_mode') and settings.get('theme_mode') in getattr(self, '_themes', {}):
@@ -312,8 +315,6 @@ class SettingsMixin:
                 self.input_label.setText(self.input_dir)
             if hasattr(self, 'output_label'):
                 self.output_label.setText(self.output_dir)
-            if hasattr(self, 'local_decode_label'):
-                self.local_decode_label.setText(self.local_decode_dir)
             # parameters
             if 'grid_cols' in settings and hasattr(self, 'grid_spin'):
                 try:

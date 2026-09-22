@@ -1,49 +1,11 @@
-"""Local decoder loading and the importable multiprocessing entry point."""
-import importlib.util
+"""Built-in decoders and the importable multiprocessing entry point."""
 import os
-import shutil
-import sys
-from aetherloom_core.paths import current_dir
-
-LOCAL_GRC_MODULE = 'Grid_Reversal_Dec_local'
-LOCAL_GRC_FILENAME = f'{LOCAL_GRC_MODULE}.py'
-LOCAL_GRC_PATH = os.path.join(current_dir, LOCAL_GRC_FILENAME)
-
-def _ensure_local_grc_copy():
-    """Ensure a local copy of the *local* GRC module exists by copying
-    it from the PyInstaller _MEIPASS bundled files if available.
-    Do NOT fall back to any parent-directory Grid_Reversal_Dec file.
-    """
-    try:
-        if os.path.exists(LOCAL_GRC_PATH):
-            return
-        meipass = getattr(sys, '_MEIPASS', None)
-        if meipass:
-            bundled_path = os.path.join(meipass, LOCAL_GRC_FILENAME)
-            if os.path.exists(bundled_path):
-                shutil.copy2(bundled_path, LOCAL_GRC_PATH)
-                return
-    except Exception:
-        pass
 
 
 def _load_grc_module():
-    """Load only the local Grid_Reversal_Dec_local module.
-    Do not attempt to import or read a sibling parent 'Grid_Reversal_Dec.py'.
-    """
-    try:
-        return importlib.import_module(LOCAL_GRC_MODULE)
-    except Exception:
-        pass
-
-    # Try to ensure a bundled copy exists and load from the local file path.
-    _ensure_local_grc_copy()
-    if not os.path.exists(LOCAL_GRC_PATH):
-        raise ImportError(f'无法找到 {LOCAL_GRC_MODULE} 模块，请确保 {LOCAL_GRC_FILENAME} 存在于应用目录或打包资源中。')
-    spec = importlib.util.spec_from_file_location(LOCAL_GRC_MODULE, LOCAL_GRC_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    """Use the normal module import so PyInstaller includes GRC in its archive."""
+    import Grid_Reversal_Dec_local
+    return Grid_Reversal_Dec_local
 
 
 grc = _load_grc_module()
@@ -238,7 +200,7 @@ def _file_process_worker(queue, src, dst, is_image, keep_audio, decode_mode, gri
             if is_image:
                 ok = dec.reverse_image_grid(src, dst)
             else:
-                ok = dec.restore_video_cv2(src, dst)
+                ok = dec.restore_video_cv2(src, dst, keep_audio=keep_audio)
         queue.put(('OK' if ok else 'FAIL', out_path_final if ok else ''))
     except Exception as e:
         try:

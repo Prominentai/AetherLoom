@@ -1,11 +1,12 @@
 """Theme-scoped styling for the public model gallery and version cards."""
 from .rh_ui import palette
+from aetherloom_core.paths import resource_path
 
 
 def stylesheet(mode):
     p = palette(mode)
     from pathlib import Path
-    check = (Path(__file__).resolve().parent.parent / 'icons' / 'ui-check.svg').as_posix()
+    check = Path(resource_path('icons', 'ui-check.svg')).as_posix()
     return f'''
         QDialog#rhModelPicker {{ background: {p['canvas']}; }}
         QDialog#rhModelPicker QWidget {{ color: {p['text']}; font-size: 13px; }}

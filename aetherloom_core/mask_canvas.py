@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from PyQt5 import QtCore,QtGui
-from .mask_editor import MaskCanvas, _qimage, mask_alpha, HISTORY_BYTES
+from .mask_editor import MaskCanvas, _qimage, mask_alpha
 
 
 def pil(image):
@@ -107,28 +107,25 @@ class AdvancedMaskCanvas(MaskCanvas):
             self.redo_stack.clear();self._trim_history()
         self._before=self._last=None;self._overlay=None;self.changed.emit();self.update()
 
-    def _trim_history(self):
-        def size(value):
-            if isinstance(value,QtGui.QImage):return value.byteCount()
-            if isinstance(value,Image.Image):return value.width*value.height*len(value.getbands())
-            if isinstance(value,(tuple,list)):return sum(size(item) for item in value)
-            return 0
-        while len(self.undo_stack)>30 or size(self.undo_stack+self.redo_stack)>HISTORY_BYTES:
-            if self.undo_stack:self.undo_stack.pop(0)
-            elif self.redo_stack:self.redo_stack.pop(0)
-            else:break
-
     def _restore(self,stack,destination,after):
         self.finish_stroke()
         if not stack:return
-        entry=stack.pop();rect,before,later=entry[:3];layer=entry[3] if len(entry)>3 else 'mask';value=later if after else before
+        from .mask_history import restore
+        entry=stack[-1];rect,before,later=entry[:3];layer=entry[3] if len(entry)>3 else 'mask'
+        try:value=restore(later if after else before)
+        except (OSError,MemoryError) as error:
+            self.history_warning='无法读取撤销记录：'+str(error);self.changed.emit();return
         if layer=='all':
             self.rgb,self.mask,self.paint_layer,self.orientation=value[0].copy(),value[1].copy(),value[2].copy(),value[3]
             self._refresh_base();self.fit()
         else:
             target=self.paint_layer if layer=='paint' else self.mask
-            painter=QtGui.QPainter(target);painter.setCompositionMode(QtGui.QPainter.CompositionMode_Source);painter.drawImage(rect.topLeft(),value);painter.end()
-        destination.append(entry);self._overlay=None;self.changed.emit();self.update()
+            if rect==target.rect():
+                if layer=='paint':self.paint_layer=value.copy()
+                else:self.mask=value.copy()
+            else:
+                painter=QtGui.QPainter(target);painter.setCompositionMode(QtGui.QPainter.CompositionMode_Source);painter.drawImage(rect.topLeft(),value);painter.end()
+        stack.pop();destination.append(entry);self.history_warning='';self._overlay=None;self.changed.emit();self.update()
 
     def transform_mask(self,invert=False):
         self.finish_stroke();self._stroke_layer='mask';super().transform_mask(invert);self._overlay=None

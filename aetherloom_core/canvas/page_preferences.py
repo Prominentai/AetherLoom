@@ -23,7 +23,6 @@ class CanvasPreferencesMixin:
         values = normalize_preferences(values)
         self.canvas_preferences = values
         self.view.set_preferences(values)
-        self._autosave.setInterval(values['autosave_delay'])
         self._trim_history()
         self._prune_removed_runtime()
         self._refresh_library_preferences()

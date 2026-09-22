@@ -9,6 +9,7 @@ import uuid
 import time
 from PIL import Image, ImageOps
 from PyQt5 import QtCore, QtGui, QtWidgets, sip
+from . import __version__
 from .mask_assets import MAX_PIXELS, atomic_png
 
 LIMIT = 32 * 1024 * 1024
@@ -43,7 +44,7 @@ def _read_url(url):
         if len(body)>LIMIT*2:raise ValueError('导入图像超过 32 MB')
         data=base64.b64decode(body,validate=True) if ';base64' in header else urllib.parse.unquote_to_bytes(body)
     else:
-        request=urllib.request.Request(url,headers={'User-Agent':'AetherLoom/0.2','Accept':'image/*,video/*,audio/*'})
+        request=urllib.request.Request(url,headers={'User-Agent':'AetherLoom/' + __version__,'Accept':'image/*,video/*,audio/*'})
         with urllib.request.urlopen(request,timeout=15) as response:
             if urllib.parse.urlsplit(response.url).scheme not in ('https','http'):raise ValueError('不支持此图像地址')
             chunks=[];length=0;deadline=time.monotonic()+30

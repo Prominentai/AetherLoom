@@ -53,6 +53,9 @@ class MaskCanvas(QtWidgets.QWidget):
         self._before = None
         self._dirty = QtCore.QRect()
         self.undo_stack, self.redo_stack = [], []
+        self.history_warning = ''
+        undo, redo = self.undo_stack, self.redo_stack
+        self.destroyed.connect(lambda: (undo.clear(), redo.clear()))
         self.setMinimumSize(280, 220)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setMouseTracking(True)
@@ -124,19 +127,23 @@ class MaskCanvas(QtWidgets.QWidget):
         self.changed.emit();self.update()
 
     def _trim_history(self):
-        def size():return sum(a.byteCount()+b.byteCount() for _, a, b in self.undo_stack + self.redo_stack)
-        while len(self.undo_stack)>30 or size()>HISTORY_BYTES:
-            if self.undo_stack:self.undo_stack.pop(0)
-            elif self.redo_stack:self.redo_stack.pop(0)
-            else:break
+        from .mask_history import trim
+        self.history_warning = trim(self.undo_stack, self.redo_stack, HISTORY_BYTES)
 
     def _restore(self, stack, destination, after):
         self.finish_stroke()
         if not stack:return
-        patch = stack.pop();rect, before, later = patch
-        painter = QtGui.QPainter(self.mask);painter.setCompositionMode(QtGui.QPainter.CompositionMode_Source)
-        painter.drawImage(rect.topLeft(), later if after else before);painter.end()
-        destination.append(patch);self.changed.emit();self.update()
+        patch = stack[-1];rect, before, later = patch
+        from .mask_history import restore
+        try:value = restore(later if after else before)
+        except (OSError, MemoryError) as error:
+            self.history_warning = '无法读取撤销记录：' + str(error)
+            self.changed.emit();return
+        if rect == self.mask.rect():self.mask = value.copy()
+        else:
+            painter = QtGui.QPainter(self.mask);painter.setCompositionMode(QtGui.QPainter.CompositionMode_Source)
+            painter.drawImage(rect.topLeft(), value);painter.end()
+        stack.pop();destination.append(patch);self.history_warning = '';self.changed.emit();self.update()
 
     def undo(self):self._restore(self.undo_stack, self.redo_stack, False)
     def redo(self):self._restore(self.redo_stack, self.undo_stack, True)
@@ -212,14 +219,14 @@ class MaskEditor(QtWidgets.QDialog):
         QtCore.QTimer.singleShot(0,self.canvas.fit)
 
     def apply_theme(self, mode):
-        from .paths import current_dir
+        from aetherloom_core.paths import resource_path
         from .rh_ui import palette as theme_palette
         dark = mode != 'light'
         colors = theme_palette(mode)
         bg,base,text,border,hover = (colors[key] for key in ('canvas','input','text','border','hover'))
         mode='dark' if dark else 'light'
-        up=(Path(current_dir)/'icons'/f'ui-chevron-up-{mode}.svg').as_posix()
-        down=(Path(current_dir)/'icons'/f'ui-chevron-down-{mode}.svg').as_posix()
+        up=Path(resource_path('icons', f'ui-chevron-up-{mode}.svg')).as_posix()
+        down=Path(resource_path('icons', f'ui-chevron-down-{mode}.svg')).as_posix()
         palette=self.palette();palette.setColor(QtGui.QPalette.Base,QtGui.QColor(base));self.canvas.setPalette(palette)
         self.canvas.background=QtGui.QColor(base)
         self.setStyleSheet(f'QDialog#maskEditor {{background:{bg};color:{text};}} QDialog#maskEditor QLabel {{color:{text};background:transparent;}} '
@@ -238,7 +245,12 @@ class MaskEditor(QtWidgets.QDialog):
 
     def refresh(self):
         self.undo_button.setEnabled(bool(self.canvas.undo_stack));self.redo_button.setEnabled(bool(self.canvas.redo_stack))
-        self.status.setText(f'{self.canvas.mask.width()} × {self.canvas.mask.height()}  ·  {self.canvas.scale*100:.0f}%')
+        undo_count, redo_count = len(self.canvas.undo_stack), len(self.canvas.redo_stack)
+        self.undo_button.setToolTip(f'撤销上一步 · Ctrl+Z\n可撤销 {undo_count} 步（遮罩与绘画共用）')
+        self.redo_button.setToolTip(f'重做 · Ctrl+Y / Ctrl+Shift+Z\n可重做 {redo_count} 步')
+        status = f'{self.canvas.mask.width()} × {self.canvas.mask.height()}  ·  {self.canvas.scale*100:.0f}%  ·  撤销 {undo_count} / 重做 {redo_count}'
+        if self.canvas.history_warning:status += '  ·  ' + self.canvas.history_warning
+        self.status.setText(status)
         if hasattr(self,'brush_sliders'):
             with QtCore.QSignalBlocker(self.size):self.size.setValue(self.canvas.diameter)
             with QtCore.QSignalBlocker(self.brush_sliders['hardness']):self.brush_sliders['hardness'].setValue(round(self.canvas.hardness*100))
@@ -250,7 +262,7 @@ class MaskEditor(QtWidgets.QDialog):
         try:
             self.result_mask=draft(mask_alpha(self.canvas.mask),self.source_path,rgb=self.canvas.rgb)
             if hasattr(self.canvas,'settings'):self.canvas.settings(self.result_mask)
-            from .paths import current_dir
+            from aetherloom_core.paths import current_dir
             owner=self.parentWidget().window() if self.parentWidget() else None
             directory=Path(getattr(owner,'input_dir',Path(current_dir)/'input'))/'masks'
             self.result_mask['path']=str(directory/(self.result_mask['sha256']+'.png'))

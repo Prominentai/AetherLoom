@@ -180,6 +180,9 @@ class InlineControls(QtWidgets.QScrollArea):
 
     def _sync_geometry(self):
         if self._building or self.page._closed or self.item.inline_proxy is None:return
+        # Culling uses a compact painted fallback. Its layout must not resize
+        # the node back into the viewport and repeatedly show/hide this form.
+        if not self.item.inline_proxy.isVisible():return
         self.inspector.layout().activate()
         if self.inspector.layout() is not None:
             height = max(self.inspector.sizeHint().height(),
@@ -216,8 +219,8 @@ class InlineControls(QtWidgets.QScrollArea):
             palette.setColor(role, QtGui.QColor(colors[key]))
         self.setPalette(palette)
         from pathlib import Path
-        from aetherloom_core.paths import current_dir
-        arrow = (Path(current_dir) / 'icons' / ('ui-chevron-down-' + self._theme_mode + '.svg')).as_posix()
+        from aetherloom_core.paths import resource_path
+        arrow = Path(resource_path('icons', 'ui-chevron-down-' + self._theme_mode + '.svg')).as_posix()
         self.setStyleSheet(
             'QWidget{color:'+colors['text']+';font-family:"Microsoft YaHei UI";font-size:12px;}'
             'QScrollArea,QScrollArea>QWidget>QWidget{background:'+colors['surface']+';border:none;}'

@@ -14,8 +14,9 @@ class _CatalogModel(QtCore.QAbstractListModel):
         if role == QtCore.Qt.DisplayRole:
             detail = item['error'] or f"{item['nodes']} 个节点 · {item['edges']} 条连线 · " + datetime.fromtimestamp(item['modified']).strftime('%Y-%m-%d %H:%M')
             if item.get('snapshot') and not item['error']:detail += ' · 有运行快照'
+            if item.get('session_edit'):detail += ' · 本次会话未保存'
             return item['name'] + '\n' + detail
-        if role == QtCore.Qt.ToolTipRole:return item['path'] + ('\n' + item['error'] if item['error'] else '')
+        if role == QtCore.Qt.ToolTipRole:return item['path'] + ('\n' + item['error'] if item['error'] else '') + ('\n未保存修改仅保留在本次会话，运行或手动保存后写入文件。' if item.get('session_edit') else '')
         if role == QtCore.Qt.SizeHintRole:return QtCore.QSize(320, 68)
     def replace(self, entries):self.beginResetModel();self.entries = entries;self.endResetModel()
 
@@ -81,6 +82,9 @@ class WorkflowLibrary(QtWidgets.QDialog):
 
     def loaded(self, entries, error):
         self._loading = False;self.reload_button.setEnabled(True)
+        by_id = {entry['id']: entry for entry in entries}
+        by_id.update(getattr(self.page, '_session_edits', {}))
+        entries = list(by_id.values())
         self.model.replace(entries);self.reorder()
         self.status.setText('读取失败：' + error if error else f'共 {len(entries)} 张画布' if entries else '还没有已保存的画布，可从 JSON 文件导入。')
         if self.proxy.rowCount():self.listing.setCurrentIndex(self.proxy.index(0, 0))

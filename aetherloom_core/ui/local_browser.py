@@ -488,10 +488,7 @@ class LocalBrowserMixin:
             elif act == act_enqueue:
                 try:
                     # ensure decode directory exists
-                    decode_dir = getattr(self, 'local_decode_dir', None)
-                    if not decode_dir:
-                        current_dir = SOURCE_ROOT
-                        decode_dir = os.path.join(current_dir, 'decoding')
+                    decode_dir = self.local_decode_dir
                     os.makedirs(decode_dir, exist_ok=True)
                     copied = 0
                     errors = []
@@ -1896,6 +1893,11 @@ class LocalBrowserMixin:
 
     def _on_files_dropped(self, paths):
         """Handle files dropped onto file_list or preview: copy into the local decoding folder and refresh list."""
+        try:
+            os.makedirs(self.local_decode_dir, exist_ok=True)
+        except OSError as exc:
+            self.log(f'无法创建待解码素材目录: {exc}')
+            return
         copied = 0
         new_names = []
         for p in paths:
@@ -1938,29 +1940,13 @@ class LocalBrowserMixin:
     def select_input_folder(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, '选择输入文件夹', self.input_dir)
         if d:
-            self.input_dir = d
-            self.input_label.setText(d)
-            self._save_settings()
-            self.load_folder(self.local_decode_dir)
+            self._set_input_directory(d)
 
 
     def select_output_folder(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, '选择输出文件夹', self.output_dir)
         if d:
-            self.output_dir = d
-            self.output_label.setText(d)
-            self._save_settings()
-
-
-    def select_local_decode_folder(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, '选择本地解码文件夹', self.local_decode_dir)
-        if d:
-            self.local_decode_dir = d
-            self.local_decode_label.setText(d)
-            os.makedirs(self.local_decode_dir, exist_ok=True)
-            self._save_settings()
-            QtCore.QTimer.singleShot(50, lambda: self.load_folder(self.local_decode_dir))
-            QtCore.QTimer.singleShot(50, lambda: self._refresh_local_list())
+            self._set_output_directory(d)
 
 
     def _open_folder_path(self, path, create=False):
@@ -1998,28 +1984,13 @@ class LocalBrowserMixin:
     def on_input_edit(self):
         d = self.input_label.text().strip()
         if d:
-            self.input_dir = d
-            os.makedirs(self.input_dir, exist_ok=True)
-            self._save_settings()
-            self.load_folder(self.local_decode_dir)
+            self._set_input_directory(d)
 
 
     def on_output_edit(self):
         d = self.output_label.text().strip()
         if d:
-            self.output_dir = d
-            os.makedirs(self.output_dir, exist_ok=True)
-            self._save_settings()
-
-
-    def on_local_decode_edit(self):
-        d = self.local_decode_label.text().strip()
-        if d:
-            self.local_decode_dir = d
-            os.makedirs(self.local_decode_dir, exist_ok=True)
-            self._save_settings()
-            QtCore.QTimer.singleShot(50, lambda: self.load_folder(self.local_decode_dir))
-            QtCore.QTimer.singleShot(50, lambda: self._refresh_local_list())
+            self._set_output_directory(d)
 
 
     def load_folder(self, folder, selected_names=None):

@@ -40,6 +40,11 @@ __pycache__/
 build/
 dist/
 specs/
+packaging_build/product/
+packaging_build/product-manifest.json
+packaging_build/.product-manifest-*
+packaging_build/.product-stage-*/
+packaging_build/.product-old-*/
 *.spec
 *.exe
 *.zip

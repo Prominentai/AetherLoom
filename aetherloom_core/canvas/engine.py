@@ -87,7 +87,7 @@ class CanvasEngine(QtCore.QObject):
             self._worker_round.value = None
 
     def _runtime_document(self, document):
-        """Use committed configuration while a GUI edit is awaiting autosave."""
+        """Keep unsaved editor changes out of the persisted execution snapshot."""
         baseline = self._persisted_documents.get(document['id'])
         if baseline is None:
             return copy.deepcopy(document)
@@ -180,7 +180,7 @@ class CanvasEngine(QtCore.QObject):
                     elif (not item.get('task_id') and item.get('status') in ('LOCAL_WAIT', 'PAUSED')
                           and not record):
                         item['status'] = 'PENDING'
-            self._publish_locked(current, save=bool(run))
+            self._publish_locked(current, save=False)
         for record in records:
             self._on_record(record)
         with self._condition:
@@ -250,7 +250,7 @@ class CanvasEngine(QtCore.QObject):
                         [{key: item for key, item in node.items() if key not in model.RUNTIME_FIELDS}
                          for node in value.get('nodes', [])])
             if settings(document) != settings(baseline):
-                return False  # Never discard an edit waiting for its autosave.
+                return False  # Never discard an unsaved session edit.
             ids = {item.get('run_id') for state in run.get('nodes', {}).values() for item in state.get('items', [])}
             self._halt_cancellations.difference_update(ids)
             self._documents.pop(canvas_id, None)
@@ -263,7 +263,7 @@ class CanvasEngine(QtCore.QObject):
         with self._condition:
             canvas_id = document['id']
             if canvas_id in self._forgotten and not explicit:
-                raise FileNotFoundError('画布文件已删除，自动保存已停止')
+                raise FileNotFoundError('画布文件已删除，请手动保存重新建立')
             self.update_document(document)
             current = self._document_locked(canvas_id)
             previous_token = self._workflow_tokens.get(canvas_id)

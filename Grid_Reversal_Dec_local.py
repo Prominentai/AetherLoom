@@ -66,8 +66,8 @@ def reverse_image_grid(input_path, output_path):
         print(f"✗ 处理失败 {os.path.basename(input_path)}: {e}")
         return False
 
-def restore_video_cv2(input_path, output_path):
-    """处理视频或GIF，不保留音频（GIF不支持音频）"""
+def restore_video_cv2(input_path, output_path, keep_audio=True):
+    """Restore video/GIF tiles, optionally preserving the original audio."""
     try:
         start_time = time.time()
         _, ext = os.path.splitext(input_path)
@@ -171,65 +171,47 @@ def restore_video_cv2(input_path, output_path):
             cap.release()
             out.release()
 
-            # 尝试保留音频
+            # Keep all MoviePy resources and temporary audio within this
+            # output job. The worker's keep_audio setting must reach the muxer.
+            orig_clip = video_clip = render_clip = None
+            audio_retained = False
+            mux_error = None
+            temporary_audio = output_path + ".audio.m4a"
             try:
-                orig_clip = VideoFileClip(input_path)
-                video_clip = VideoFileClip(temp_video)
-                if orig_clip.audio is not None:
-                    video_clip = video_clip.set_audio(orig_clip.audio)
-                video_clip.write_videofile(output_path, codec='libx264', audio_codec='aac')
-                os.remove(temp_video)
-                print(f"✓ 修复后视频已保留原音频: {output_path}")
-            except Exception as e:
-                shutil.move(temp_video, output_path)
-                print(f"✗ 音频合成失败，仅保存无音频视频: {output_path}, 错误: {e}")
-
-                print(f"处理视频: {os.path.basename(input_path)}")
-                print(f"    视频尺寸: {width}x{height}")
-                print(f"    每个网格: {tile_width}x{tile_height}")
-                print(f"    去除水印，修复后尺寸: {width}x{tile_height * grid_cols}")
-                print(f"    帧率: {fps}")
-                print(f"    总帧数: {frame_count}")
-
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                temp_video = output_path + ".tmp.mp4"
-                out = cv2.VideoWriter(temp_video, fourcc, fps, (width, tile_height * grid_cols))
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    pil_img = Image.fromarray(img)
-                    restored_img = Image.new('RGB', (width, tile_height * grid_cols))
-                    for row in range(grid_cols):
-                        for col in range(grid_cols):
-                            reversed_row = grid_rows - 1 - row
-                            reversed_col = grid_cols - 1 - col
-                            left = reversed_col * tile_width
-                            upper = reversed_row * tile_height
-                            right = left + tile_width
-                            lower = upper + tile_height
-                            tile = pil_img.crop((left, upper, right, lower))
-                            restore_x = col * tile_width
-                            restore_y = row * tile_height
-                            restored_img.paste(tile, (restore_x, restore_y))
-                    out_frame = cv2.cvtColor(np.array(restored_img), cv2.COLOR_RGB2BGR)
-                    out.write(out_frame)
-                cap.release()
-                out.release()
-
-                # 尝试保留音频
-                try:
+                video_clip = VideoFileClip(temp_video, audio=False)
+                if keep_audio:
                     orig_clip = VideoFileClip(input_path)
-                    video_clip = VideoFileClip(temp_video)
-                    if orig_clip.audio is not None:
-                        video_clip = video_clip.set_audio(orig_clip.audio)
-                    video_clip.write_videofile(output_path, codec='libx264', audio_codec='aac')
-                    os.remove(temp_video)
-                    print(f"✓ 修复后视频已保留原音频: {output_path}")
-                except Exception as e:
-                    shutil.move(temp_video, output_path)
-                    print(f"✗ 音频合成失败，仅保存无音频视频: {output_path}, 错误: {e}")
+                    audio_retained = orig_clip.audio is not None
+                render_clip = video_clip.set_audio(orig_clip.audio) if audio_retained else video_clip
+                render_clip.write_videofile(output_path, codec='libx264',
+                    audio=audio_retained, audio_codec='aac',
+                    temp_audiofile=temporary_audio, remove_temp=True,
+                    logger=None)
+            except Exception as error:
+                mux_error = error
+            finally:
+                closed = set()
+                for clip in (render_clip, video_clip, orig_clip):
+                    if clip is not None and id(clip) not in closed:
+                        closed.add(id(clip))
+                        try:
+                            clip.close()
+                        except Exception:
+                            pass
+                if os.path.isfile(temporary_audio):
+                    try:
+                        os.remove(temporary_audio)
+                    except OSError:
+                        pass
+            if mux_error is None:
+                os.remove(temp_video)
+                print(f"Restored video saved (audio={'kept' if audio_retained else 'off'}): {output_path}")
+            else:
+                # The decoded silent video is already complete. Do not retry
+                # frame reads on the released capture or overwrite it with an
+                # empty second pass after an audio/muxing failure.
+                os.replace(temp_video, output_path)
+                print(f"Audio/muxing failed; saved decoded silent video: {output_path}, error: {mux_error}")
 
         end_time = time.time()
         print(f"    解码耗时: {end_time - start_time:.2f} 秒")

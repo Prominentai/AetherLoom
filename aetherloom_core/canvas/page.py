@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from aetherloom_core.paths import current_dir
+from aetherloom_core.paths import current_dir, resource_path
 from aetherloom_core.prompt_history import TextSnapshot
 from aetherloom_core.rh_ui import palette
 from aetherloom_core.rh_parameters import collect_node_values, RhEnumComboBox
@@ -228,6 +228,9 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         self.engine.output_root = lambda: str(owner.output_dir)
         self.engine.input_root = lambda: str(owner.input_dir)
         self.store = self.engine.store
+        self._session_edits = getattr(owner, '_canvas_session_edits', None)
+        if self._session_edits is None:
+            self._session_edits = owner._canvas_session_edits = {}
         self.document = model.new_document()
         self.apps = {}
         self.histories = {}
@@ -255,10 +258,10 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self.setMinimumSize(0, 0)
         self._build_ui()
-        self._autosave = QtCore.QTimer(self)
-        self._autosave.setSingleShot(True)
-        self._autosave.setInterval(700)
-        self._autosave.timeout.connect(lambda: self.save(automatic=True))
+        # Undo coalescing only; editing never schedules a disk save.
+        self._edit_group_timer = QtCore.QTimer(self)
+        self._edit_group_timer.setSingleShot(True)
+        self._edit_group_timer.setInterval(700)
         self._apply_preferences(self.canvas_preferences)
         self._workflow_watcher = QtCore.QFileSystemWatcher(self)
         self._workflow_watcher.directoryChanged.connect(self._workflow_directory_changed)
@@ -327,7 +330,7 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
             toolbar.widgetForAction(action).setPopupMode(QtWidgets.QToolButton.InstantPopup)
         add_menu(package_menu)
         toolbar.addAction('打开', self.open_canvas).setToolTip('打开本地画布或工作流 JSON · Ctrl+O')
-        toolbar.addAction('保存', self.save).setToolTip('保存当前画布 · Ctrl+S；编辑后也会自动保存')
+        toolbar.addAction('保存', self.save).setToolTip('保存当前画布 · Ctrl+S；点击运行时也会保存')
         self.add_node_action=toolbar.addAction('＋ 添加节点',self._quick_add_node)
         self.add_node_action.setToolTip('按分类搜索并添加节点 · 画布内按 Tab')
         toolbar.widgetForAction(self.add_node_action).setObjectName('canvasAddNodeButton')
@@ -930,8 +933,16 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         return self._prepare(node, rh_nodes)
 
     def _set_document(self, doc):
+        session_edit = doc['id'] in self._session_edits
+        if session_edit:
+            try:
+                doc = self.engine.view_document(doc['id'])
+                self._last_runtime_revision = doc.pop('_view_revision')
+            except (KeyError, RuntimeError):
+                self._session_edits.pop(doc['id'], None)
+                session_edit = False
         self._document_epoch = getattr(self, '_document_epoch', 0) + 1
-        self._autosave.stop()
+        self._edit_group_timer.stop()
         if self._node_search is not None:
             self._node_search.close()
         self._updating = True
@@ -943,7 +954,8 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
             self._persisted_ids.add(doc['id'])
             self._deleted_ids.discard(doc['id'])
         try:
-            self.store.set_active(doc['id'])
+            if self.store.path_for(doc['id']).is_file():
+                self.store.set_active(doc['id'])
         except (OSError, ValueError) as error:
             self._message(f'记录当前画布失败：{error}')
         self.name_edit.setText(str(doc.get('name', '未命名画布')))
@@ -956,15 +968,15 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         view = doc.get('view') or {}
         self.view.restore_view(view)
         zoom = self.view.transform().m11()
-        self._updating, self._dirty = False, False
-        attached = self.engine.attach(doc)
+        self._updating, self._dirty = False, session_edit
+        attached = None if session_edit else self.engine.attach(doc)
         if attached:
             self.document = self.engine.view_document(doc['id'])
             self._last_runtime_revision = self.document.pop('_view_revision')
             self.scene.refresh_nodes(self.document)
         self._sync_actions()
         self._refresh_missing_apps()
-        self.save_state.setText('已保存' if self.store.path_for(doc['id']).exists() else '尚未保存')
+        self.save_state.setText('未保存 · 运行时保存' if session_edit else '已保存' if self.store.path_for(doc['id']).exists() else '尚未保存')
         self.save_state.setToolTip(str(self.store.path_for(doc['id'])))
         self.zoom_label.setText(f'{int(zoom * 100)}%')
         self._schedule_selected_recovery()
@@ -1011,6 +1023,7 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         return canvas_id in self._deleted_ids or (canvas_id in self._persisted_ids and not self.store.path_for(canvas_id).is_file())
 
     def _mark_workflow_deleted(self, canvas_id):
+        self._session_edits.pop(canvas_id, None)
         if canvas_id not in self._deleted_ids:
             self._deleted_ids.add(canvas_id)
             try:
@@ -1024,7 +1037,7 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
             # the snapshot open; the watcher/startup cleanup can retry later.
             pass
         if canvas_id == self.document['id']:
-            self._autosave.stop()
+            self._edit_group_timer.stop()
             self.save_state.setText('工作流已删除')
             self._sync_actions()
 
@@ -1042,7 +1055,7 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         self._watch_workflow_directory()
 
     def _checkpoint(self, edit_path=None):
-        if edit_path is not None and edit_path == self._last_edit_path and self._autosave.isActive():
+        if edit_path is not None and edit_path == self._last_edit_path and self._edit_group_timer.isActive():
             return
         self._last_edit_path = edit_path
         self._undo.append(self._edit_snapshot())
@@ -1068,12 +1081,15 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         model.sync_dynamic_inputs(self.document)
         self._dirty = True
         deleted = self._is_deleted(self.document['id'])
-        self.save_state.setText('工作流已删除 · 手动保存可重新建立' if deleted else '待自动保存')
+        self.save_state.setText('工作流已删除 · 手动保存可重新建立' if deleted else '未保存 · 运行时保存')
+        self.save_state.setToolTip('修改仅保留在本次会话，退出后舍弃；点击运行或按 Ctrl+S 保存。')
         if not deleted:
-            self._autosave.start()
+            self._edit_group_timer.start()
         update = getattr(self.engine, 'update_document', None)
         if update and not deleted:
             self.document = update(self.document)
+        if not deleted:
+            self._remember_session_edit()
         if connections:
             self._updating = True
             try:
@@ -1475,7 +1491,7 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         if reply!=QtWidgets.QMessageBox.Yes:return
         try:
             self.workflow_queue.cancel_canvas(canvas_id)
-            self._autosave.stop();self.store.delete(canvas_id);self._mark_workflow_deleted(canvas_id)
+            self._edit_group_timer.stop();self.store.delete(canvas_id);self._mark_workflow_deleted(canvas_id)
             self._set_document(model.new_document())
             self._message('画布已删除；仍被任务读取的临时文件会在释放后清理。')
         except (OSError,ValueError,RuntimeError) as error:self._message('删除画布失败：'+str(error))
@@ -1547,6 +1563,8 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         self._edited(rebuild=True)
 
     def _restore_edit(self, restored):
+        self._last_edit_path = None
+        self._edit_group_timer.stop()
         selected={item.node['id'] for item in self.scene.selectedItems() if isinstance(item,NodeItem)}
         live_nodes={node['id']:node for node in self.document['nodes']}
         restored_ids = {node['id'] for node in restored['nodes']}
@@ -1642,7 +1660,7 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
 
     def save(self, *unused, automatic=False, validation_scope=None):
         if not automatic and not self._flush_editors(validation_scope):return False
-        self._autosave.stop()
+        self._edit_group_timer.stop()
         canvas_id = self.document['id']
         if self._is_deleted(canvas_id):
             self._mark_workflow_deleted(canvas_id)
@@ -1662,6 +1680,8 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
             self._deleted_ids.discard(canvas_id)
             self._watch_workflow_directory()
             self._dirty = False
+            self._session_edits.pop(canvas_id, None)
+            self.store.set_active(canvas_id)
             self._refresh_missing_apps()
             self.save_state.setText('已保存 · ' + QtCore.QTime.currentTime().toString('HH:mm:ss'))
             self.save_state.setToolTip(str(self.store.path_for(canvas_id)))
@@ -1695,6 +1715,16 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         if not path or self._package_busy:return
         path = Path(path).resolve()
         if not self._save_before_switch():return
+        if path.parent == self.store.root and path.stem in self._session_edits:
+            try:
+                draft = self.engine.view_document(path.stem)
+            except (KeyError, RuntimeError):
+                # An edit undone back to its saved baseline may be evicted by
+                # the idle queue. Fall back to that saved file, not stale metadata.
+                self._session_edits.pop(path.stem, None)
+            else:
+                self._set_document(draft)
+                return
         self._start_package('open', lambda: self.store.load(path) if path.parent == self.store.root else self.store.import_workflow(path))
 
     def save_as(self):
@@ -1784,11 +1814,24 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         self._rename()
         return True
 
+    def _remember_session_edit(self):
+        # Only lightweight catalog metadata is duplicated; the engine already
+        # holds the editable document separately from its saved run baseline.
+        import time
+        doc = self.document
+        self._session_edits[doc['id']] = dict(
+            id=doc['id'], name=doc.get('name', '未命名画布'),
+            path=str(self.store.path_for(doc['id'])), modified=time.time(),
+            nodes=len(doc['nodes']), edges=len(doc['edges']), error='',
+            snapshot=bool(doc.get('run')), session_edit=True)
+
     def _save_before_switch(self):
         if not self._flush_editors():return False
         if self._dirty and self._is_deleted(self.document['id']):
             self._message('当前画布文件已被删除；请先手动保存或保存副本，以保留当前编辑。');return False
-        return self.save(automatic=True) if self._dirty else True
+        if self._dirty:
+            self._remember_session_edit()
+        return True
 
     def _record_run_texts(self, target):
         from .input_requirements import plan
@@ -1872,7 +1915,7 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
                 return
             batches = 1 if target else self.document.get('batch_count', 1)
             self.workflow_queue.enqueue(self.document, target=target, force=force, batch_count=batches,
-                                        prepare_app=self._prepare_node)
+                                        prepare_app=self._prepare_node, document_saved=True)
             self._sync_actions()
             self._message(f'已加入工作流队列，共 {batches} 批、{len(scope)} 个节点。'
                           + (f' {len(input_plan["issues"])} 个节点缺少输入，对应分支本次跳过，旧预览保留。' if input_plan['issues'] else ''))
@@ -2051,7 +2094,7 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         mode = getattr(self.owner, '_theme_mode', 'dark')
         from .appearance import canvas_palette
         p = canvas_palette(palette(mode))
-        arrow_root = Path(current_dir) / 'icons'
+        arrow_root = Path(resource_path('icons'))
         up_arrow = (arrow_root / f'ui-chevron-up-{mode}.svg').as_posix()
         down_arrow = (arrow_root / f'ui-chevron-down-{mode}.svg').as_posix()
         check_icon = (arrow_root / 'ui-check.svg').as_posix()
@@ -2184,14 +2227,13 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
             return
         self._commit_valid_text_drafts()
         self._rename()
-        if self._dirty:
-            self.save(automatic=True)
+        # Editing stays in memory. Only Run and explicit Save commit it.
         self._prune_workflows()
         self._closed = True
         self._selection_timer.stop()
         if getattr(self.engine, '_view_canvas', None) == self.document['id']:
             self.engine.set_view_canvas('')
-        self._autosave.stop()
+        self._edit_group_timer.stop()
         self._workflow_cleanup.stop()
         self.scene.thumbnails.close()
         # The owner holds the execution FIFO and engine. Closing an editing

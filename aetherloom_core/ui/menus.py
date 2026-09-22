@@ -2,6 +2,7 @@
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from pathlib import Path
+from aetherloom_core.paths import resource_path
 
 
 def colors(mode):
@@ -16,7 +17,7 @@ def colors(mode):
 
 def stylesheet(mode, font=None):
     p = colors(mode)
-    check = (Path(__file__).resolve().parents[2] / 'icons' / 'ui-check.svg').as_posix()
+    check = Path(resource_path('icons', 'ui-check.svg')).as_posix()
     font_css = ''
     if font is not None:
         family = font.family().replace('\\', '\\\\').replace('"', '\\"')

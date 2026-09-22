@@ -4,7 +4,7 @@ from functools import partial
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from aetherloom_core.rh_parameters import RhEnumComboBox, RhNumberSpinBox
-from aetherloom_core.paths import current_dir
+from aetherloom_core.paths import resource_path
 from pathlib import Path
 from aetherloom_core.ui.responsive import make_responsive
 from aetherloom_core.ui.widgets import DropLabel, DropListWidget
@@ -187,7 +187,7 @@ class DecodePage(QtWidgets.QWidget):
         actions.addWidget(owner.batch_btn)
         actions.addWidget(owner.cancel_btn)
         actions.addStretch(1)
-        actions.addWidget(self.button('打开结果目录', lambda: owner._open_folder_path(owner.output_dir, create=True)))
+        actions.addWidget(self.button('打开结果目录', lambda: owner._open_folder_path(owner.decoded_output_dir, create=True)))
         execution_layout.addLayout(actions)
         right.addWidget(execution)
 
@@ -357,7 +357,7 @@ class DecodePage(QtWidgets.QWidget):
         from aetherloom_core.rh_ui import palette
         background = palette('dark' if dark else 'light')['canvas']
         selected = '#193951' if dark else '#dcebf9'
-        check = (Path(current_dir) / 'icons' / 'ui-check.svg').as_posix()
+        check = Path(resource_path('icons', 'ui-check.svg')).as_posix()
         self.setStyleSheet(f'''
             QWidget#decodePage QWidget {{ font-size: 13px; }}
             QWidget#decodeContent {{ background: {background}; }}

@@ -3,7 +3,7 @@ import os
 import sys
 from PyQt5 import QtCore, QtGui, QtWidgets
 from aetherloom_core import __version__
-from aetherloom_core.paths import current_dir
+from aetherloom_core.paths import resource_path
 from aetherloom_core.resources import PLAY_BUTTON_SVG
 from aetherloom_core.platform_utils import _svg_to_icon
 from aetherloom_core.ui.main_window import MainWindow
@@ -29,16 +29,7 @@ def main():
 
     # Prefer an explicit app icon so Windows taskbar shows the correct icon.
     try:
-        icon_candidates = []
-        if getattr(sys, 'frozen', False):
-            exe_dir = os.path.dirname(sys.executable)
-            icon_candidates.append(os.path.join(exe_dir, 'app_icon.ico'))
-            meipass = getattr(sys, '_MEIPASS', None)
-            if meipass:
-                icon_candidates.append(os.path.join(meipass, 'app_icon.ico'))
-        else:
-            icon_candidates.append(os.path.join(current_dir, 'app_icon.ico'))
-            icon_candidates.append(os.path.join(current_dir, 'app_icon.png'))
+        icon_candidates = [resource_path('app_icon.ico')]
 
         set_icon = False
         for p in icon_candidates:

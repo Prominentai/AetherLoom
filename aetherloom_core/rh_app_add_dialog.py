@@ -7,6 +7,7 @@ from PyQt5 import QtCore, QtWidgets
 from .rh_app_reference import application_reference
 from .rh_connections import ensure_connections
 from .rh_ui import palette
+from aetherloom_core.paths import resource_path
 
 
 def _label(text, name='rhAddMuted'):
@@ -202,7 +203,7 @@ class AddAppDialog(QtWidgets.QDialog):
     def stylesheet(self):
         mode = getattr(self.owner, '_theme_mode', 'dark')
         p = palette(mode)
-        icons = Path(__file__).resolve().parents[1] / 'icons'
+        icons = Path(resource_path('icons'))
         up = (icons / f'ui-chevron-up-{mode}.svg').as_posix()
         down = (icons / f'ui-chevron-down-{mode}.svg').as_posix()
         return f'''

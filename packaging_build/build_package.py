@@ -2,22 +2,30 @@
 Build script to package the AetherLoom app using Python + PyInstaller.
 - Uses the current Python interpreter by default; override with PACK_PYTHON.
 - Produces a windowed (no console) one-file executable with icon `app_icon.ico`.
-- Places build outputs, logs, and specs under `packaging_build/`.
-- Tries to auto-install PyInstaller and retry on ModuleNotFoundError if possible.
+- Assembles the EXE and external resources into `packaging_build/product/`.
+- Build intermediates and logs stay under `packaging_build/`.
+- Excludes heavyweight AI libraries and audits the finished EXE before release.
+- Missing application dependencies are reported, never auto-installed from error text.
 
 Usage (from project root):
     python packaging_build/build_package.py
 
-Note: run this from Windows. The script streams PyInstaller output and attempts up to 3 retries.
+Note: run this from Windows. A failed build or dependency audit preserves the previous product.
 """
 
 import os
 import sys
 import subprocess
-import shutil
+import tempfile
 import time
 import re
 from pathlib import Path
+if __package__:
+    from .release_product import assemble_product, product_resources, bundled_icon_resources, check_product_destination
+    from .bundle_policy import exclusion_options
+else:
+    from release_product import assemble_product, product_resources, bundled_icon_resources, check_product_destination
+    from bundle_policy import exclusion_options
 
 # === User-editable defaults ===
 DEFAULT_PYTHON = sys.executable
@@ -29,13 +37,13 @@ SPEC_DIR = PACK_DIR / 'specs'
 LOG_FILE = PACK_DIR / 'pack_build.log'
 ENTRY_SCRIPT = PROJECT_ROOT / 'AetherLoom.py'
 ICON_FILE = PROJECT_ROOT / 'app_icon.ico'
-MAX_RETRIES = 3
+MAX_RETRIES = 1
 # Only distributable runtime resources belong in the executable. User settings,
 # API keys, caches, backups, test files, and local environments are never inputs.
 RUNTIME_FILES = (
-    'AetherLoom.py', 'Duck_Dec_local.py', 'Grid_Reversal_Dec_local.py',
+    'AetherLoom.py', 'Duck_Dec_local.py',
     'get_apps.py',
-    'app_icon.ico', 'app_icon.png', 'README.md', 'autocomplete.txt',
+    'README.md', 'autocomplete.txt',
     'requirements.txt', 'THIRD_PARTY_NOTICES.txt',
 )
 CORE_MODULE_FILES = (
@@ -45,7 +53,8 @@ CORE_MODULE_FILES = (
     '__init__.py', 'api_credentials.py', 'api_manager.py', 'api_manager_ui.py',
     'api_model_capabilities.py', 'api_model_probe.py', 'decode_browser.py',
     'local_browser_ui.py', 'local_media.py', 'local_preview.py', 'media_limits.py',
-    'prompt_history.py', 'rh_outputs.py', 'rh_parameters.py', 'rh_result_actions.py',
+    'hover_preview.py', 'image_input_preview.py', 'video_compat.py', 'video_preview.py',
+    'prompt_history.py', 'selection_text_tools.py', 'rh_outputs.py', 'rh_parameters.py', 'rh_result_actions.py',
     'rh_storage.py', 'rh_submission_queue.py', 'rh_tasks.py', 'rh_ui.py',
     'thumbnail_resources.py', 'autocomplete.py', 'application.py',
     'paths.py', 'resources.py', 'platform_utils.py',
@@ -54,6 +63,7 @@ CORE_MODULE_FILES = (
     'rh_progress.py', 'rh_dashboard.py', 'ui/design.py', 'ui/popups.py', 'ui/responsive.py', 'ui/navigation.py', 'ui/themed_icons.py', 'tasks/__init__.py', 'tasks/media.py', 'tasks/decoding.py',
     'services/__init__.py', 'services/decoding.py',
     'rh_execution.py', 'rh_execution_ui.py', 'rh_output_groups.py', 'rh_connections.py', 'rh_connection_panel.py', 'rh_app_install.py',
+    'rh_app_add_dialog.py', 'rh_app_reference.py', 'rh_app_thumbnails.py',
     'task_documents.py', 'rh_task_details.py', 'rh_model_picker.py',
     'rh_model_cards.py', 'rh_model_style.py', 'rh_model_thumbnails.py',
     'rh_model_favorites.py', 'rh_model_favorite_editor.py', 'rh_model_library.py',
@@ -61,7 +71,7 @@ CORE_MODULE_FILES = (
     'rh_model_bases.py', 'rh_model_http.py', 'rh_model_dialogs.py',
     'api_provider_editor.py', 'api_model_selector.py', 'translation.py',
     'agent_catalog.py', 'agent_auth.py', 'agent_client.py', 'agent_ui.py', 'agent_search.py', 'image_prompts.py',
-    'image_model_catalog.py', 'mask_editor.py', 'mask_assets.py', 'mask_canvas.py', 'mask_panel.py', 'image_import.py', 'media_import.py',
+    'image_model_catalog.py', 'mask_editor.py', 'mask_history.py', 'mask_assets.py', 'mask_canvas.py', 'mask_panel.py', 'image_import.py', 'media_import.py',
     'canvas/__init__.py', 'canvas/model.py', 'canvas/storage.py', 'canvas/engine.py',
     'canvas/model_nodes.py', 'canvas/model_editor.py',
     'canvas/collections.py', 'canvas/collection_editor.py',
@@ -85,23 +95,8 @@ API_MODULE_FILES = (
     '__init__.py', 'call_llm.py', 'call_rh.py', 'call_translate.py',
     'call_vision.py', 'call_images.py', 'translators.py', 'provider_client.py',
 )
-ICON_SUFFIXES = {'.svg', '.png', '.ico', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'}
 
-# Helpful: make sure directories exist
-for p in (PACK_DIR, DIST_DIR, BUILD_DIR, SPEC_DIR):
-    p.mkdir(parents=True, exist_ok=True)
-
-PYEXE = DEFAULT_PYTHON
-# allow override via env var
-PYEXE = os.environ.get('PACK_PYTHON', PYEXE)
-
-if not Path(PYEXE).exists():
-    print(f"Warning: specified Python executable not found: {PYEXE}")
-    print("You can set PACK_PYTHON env var to a valid python.exe path.")
-
-if not ENTRY_SCRIPT.exists():
-    print(f"Error: entry script not found: {ENTRY_SCRIPT}")
-    sys.exit(2)
+PYEXE = os.environ.get('PACK_PYTHON', DEFAULT_PYTHON)
 
 # Build PyInstaller base command generator
 
@@ -122,11 +117,8 @@ def gather_data_entries(root: Path):
         if path.is_file():
             destination = (Path('aetherloom_core') / Path(name).parent).as_posix()
             entries.append(f"{path};{destination}")
-    icon_dir = root / 'icons'
-    if icon_dir.is_dir():
-        for path in sorted(icon_dir.iterdir()):
-            if path.is_file() and path.suffix.lower() in ICON_SUFFIXES:
-                entries.append(f"{path};icons")
+    for path, relative in bundled_icon_resources(root):
+        entries.append(f"{path};{relative.parent.as_posix()}")
     return entries
 
 
@@ -153,21 +145,49 @@ def ensure_pyinstaller(python_exe):
         return False
 
 
-# Run the packaging with retries and simple auto-fix for ModuleNotFoundError
+def audit_built_bundle(python_exe, executable):
+    """Use the build interpreter's PyInstaller to inspect the actual EXE archive."""
+    command = [str(python_exe), '-B', str(Path(__file__).with_name('bundle_policy.py')),
+               str(executable)]
+    try:
+        audit_env = dict(os.environ, PYTHONIOENCODING='utf-8')
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                encoding='utf-8', errors='replace', timeout=120, env=audit_env)
+        output = result.stdout or ''
+        print(output, end='' if output.endswith('\n') else '\n')
+        with open(LOG_FILE, 'a', encoding='utf-8') as logf:
+            logf.write('\n-- Bundle dependency audit --\n' + output)
+        if result.returncode != 0:
+            print('Bundle audit rejected this build. Product will not be replaced.')
+            return False
+        return True
+    except (OSError, subprocess.SubprocessError) as exc:
+        print('Cannot verify bundle dependencies; refusing to publish:', exc)
+        return False
 
-def run_packaging(python_exe, attempts=MAX_RETRIES):
+
+# Run the build with a fixed exclusion policy and a mandatory artifact audit.
+
+def run_packaging(python_exe, attempts=MAX_RETRIES, output_dir=None):
+    output_dir = Path(output_dir) if output_dir is not None else DIST_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
     data_entries = gather_data_entries(PROJECT_ROOT)
     # windowed / no console
     pyinst_opts = [
         "--noconsole",
         "--onefile",
+        "--noconfirm",
+        "--hidden-import=Grid_Reversal_Dec_local",
+        # imageio reads its distribution version while importing MoviePy.
+        "--copy-metadata=imageio",
         f"--icon={str(ICON_FILE) if ICON_FILE.exists() else ''}",
-        f"--distpath={str(DIST_DIR)}",
+        f"--distpath={str(output_dir)}",
         f"--workpath={str(BUILD_DIR)}",
         f"--specpath={str(SPEC_DIR)}",
         # ensure local imports are found
         f"--paths={str(PROJECT_ROOT)}",
     ]
+    pyinst_opts.extend(exclusion_options())
     add_data_opts = []
     for e in data_entries:
         add_data_opts.extend(["--add-data", e])
@@ -175,7 +195,6 @@ def run_packaging(python_exe, attempts=MAX_RETRIES):
 
     # command will be written to log after we choose the python executable
 
-    last_err = None
     # If the current interpreter environment contains launcher-zip entries,
     # create an isolated venv to run PyInstaller to avoid referencing launcher zips.
     try:
@@ -251,7 +270,7 @@ def run_packaging(python_exe, attempts=MAX_RETRIES):
         try:
             same_exec = False
             try:
-                same_exec = Path(python_exe).resolve() == Path(sys.executable).resolve()
+                same_exec = Path(python_for_pyi).resolve() == Path(sys.executable).resolve()
             except Exception:
                 same_exec = False
             if same_exec:
@@ -283,7 +302,7 @@ def run_packaging(python_exe, attempts=MAX_RETRIES):
                             m = re.search(r"ModuleNotFoundError: No module named '([\w_.-]+)'", line)
                             if m:
                                 missing_modules.add(m.group(1))
-                ret = 0 if (DIST_DIR.exists() and any(DIST_DIR.iterdir())) else 1
+                ret = 0 if (output_dir / 'AetherLoom.exe').is_file() else 1
             else:
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, text=True, env=env)
                 with proc.stdout:
@@ -296,69 +315,65 @@ def run_packaging(python_exe, attempts=MAX_RETRIES):
                         if m:
                             missing_modules.add(m.group(1))
                 ret = proc.wait()
+        except SystemExit as e:
+            ret = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+            print('PyInstaller exited with:', ret)
         except Exception as e:
             print('Exception while running PyInstaller programmatically or subprocess:', e)
             ret = 1
+        if ret == 0 and not (output_dir / 'AetherLoom.exe').is_file():
+            print('Build completed without producing AetherLoom.exe.')
+            ret = 1
         if ret == 0:
-            print("Packaging succeeded.")
+            if not audit_built_bundle(python_for_pyi, output_dir / 'AetherLoom.exe'):
+                return False
+            print("Packaging and dependency audit succeeded.")
             return True
 
         print(f"Packaging failed on attempt {attempt} (exit {ret}).")
-        last_err = ret
-
-        # try auto-fix: install missing modules
         if missing_modules:
-            print("Detected missing modules:", ', '.join(missing_modules))
-            installed_any = False
-            # special-case known pseudo-module packaging.licenses -> install packaging
-            if 'packaging.licenses' in missing_modules:
-                try:
-                    print("Installing 'packaging' package to satisfy packaging.licenses...")
-                    subprocess.check_call([python_exe, "-m", "pip", "install", "--upgrade", "packaging"], stderr=subprocess.STDOUT)
-                    installed_any = True
-                except Exception as e:
-                    print("Failed to install 'packaging':", e)
-            for mod in missing_modules:
-                if mod == 'packaging.licenses':
-                    continue
-                try:
-                    print(f"Attempting to install missing module: {mod}")
-                    subprocess.check_call([python_exe, "-m", "pip", "install", mod], stderr=subprocess.STDOUT)
-                    installed_any = True
-                except Exception as e:
-                    print(f"Failed to install {mod}: {e}")
-            if installed_any:
-                print("Re-running packaging after installing missing modules...")
-                time.sleep(2)
-                continue
-
-        # If PyInstaller missing or other error, try to (re)install PyInstaller
-        if not ensure_pyinstaller(python_exe):
-            print("Could not ensure PyInstaller. Aborting further retries.")
-            break
-
-        # no automatic resolution; break and let user inspect logs
-        print("No automatic fix detected. See log at:", str(LOG_FILE))
-        break
+            print('Missing modules:', ', '.join(sorted(missing_modules)))
+            print('Application dependencies will not be installed automatically. '
+                  'Check requirements.txt and the bundle exclusion policy.')
+        print('Build stopped. See log at:', LOG_FILE)
+        return False
 
     print("Packaging failed after attempts. See log for details:", str(LOG_FILE))
     return False
 
 
+def main():
+    print('Project root:', PROJECT_ROOT)
+    print('Release product:', PACK_DIR / 'product')
+    if not ENTRY_SCRIPT.is_file():
+        print('Entry script not found:', ENTRY_SCRIPT)
+        return 2
+    try:
+        # Validate external resources before installing tools or starting a build.
+        product_resources(PROJECT_ROOT)
+        bundled_icon_resources(PROJECT_ROOT)
+        for name in ('Grid_Reversal_Dec_local.py', 'aetherloom_core/rh_standard_catalog.json'):
+            if not (PROJECT_ROOT / name).is_file():
+                raise FileNotFoundError(f'Missing bundled module/resource: {PROJECT_ROOT / name}')
+        check_product_destination(PROJECT_ROOT)
+        for directory in (PACK_DIR, DIST_DIR, BUILD_DIR, SPEC_DIR):
+            directory.resolve().relative_to(PROJECT_ROOT.resolve())
+            directory.mkdir(parents=True, exist_ok=True)
+        if not ensure_pyinstaller(PYEXE):
+            print('PyInstaller unavailable. Exiting.')
+            return 3
+        # An old EXE in dist must never be mistaken for this build's output.
+        with tempfile.TemporaryDirectory(prefix='release-dist-', dir=BUILD_DIR) as staging:
+            if not run_packaging(PYEXE, output_dir=Path(staging)):
+                print('Packaging failed. See:', LOG_FILE)
+                return 4
+            product = assemble_product(PROJECT_ROOT, Path(staging) / 'AetherLoom.exe')
+        print('Done. Distribute the whole directory:', product)
+        return 0
+    except (OSError, ValueError) as exc:
+        print('Release packaging failed:', exc)
+        return 4
+
+
 if __name__ == '__main__':
-    print("Project root:", PROJECT_ROOT)
-    print("Output dist:", DIST_DIR)
-    ok = ensure_pyinstaller(PYEXE)
-    if not ok:
-        print("PyInstaller unavailable. Exiting.")
-        sys.exit(3)
-    success = run_packaging(PYEXE)
-    if success:
-        print('\nDone. Built artifacts are in: ', DIST_DIR)
-        # list outputs
-        for f in DIST_DIR.iterdir():
-            print(' -', f.name)
-        sys.exit(0)
-    else:
-        print('\nPackaging did not complete successfully. Check', LOG_FILE)
-        sys.exit(4)
+    sys.exit(main())

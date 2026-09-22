@@ -12,7 +12,7 @@ DEFAULTS = {
     'zoom_speed': 1.15, 'release_action': 'search',
     'tooltips': True, 'tooltip_delay': 600,
     'preview_quality': 'balanced', 'hover_playback': True,
-    'autosave_delay': 700, 'undo_limit': 40,
+    'undo_limit': 40,
     'shortcuts': {
         'run': 'Ctrl+Return', 'stop': 'Ctrl+Alt+Return', 'find': 'Ctrl+F',
         'fit_selected': '.', 'preferences': 'Ctrl+,', 'add': 'Tab',
@@ -29,7 +29,7 @@ _ENUMS = {
 _NUMBERS = {
     'grid_size': (8, 96, int), 'link_width': (1., 4., float),
     'link_opacity': (15, 100, int), 'zoom_speed': (1.03, 1.4, float),
-    'tooltip_delay': (200, 2000, int), 'autosave_delay': (300, 5000, int),
+    'tooltip_delay': (200, 2000, int),
     'undo_limit': (10, 100, int),
 }
 _SHORTCUT_NAMES = {
@@ -220,7 +220,6 @@ class PreferencesDialog(QtWidgets.QDialog):
 
         saving = self._tab('保存与快捷键')
         form = self._section(saving, '编辑记录')
-        self._number(form, 'autosave_delay', '停止编辑后自动保存', 300, 5000, step=100, suffix=' ms')
         self._number(form, 'undo_limit', '保留撤销步骤', 10, 100, step=10, suffix=' 步')
         form = self._section(saving, '快捷键')
         for key, label in _SHORTCUT_NAMES.items():
@@ -382,11 +381,11 @@ class PreferencesDialog(QtWidgets.QDialog):
 
     def _apply_theme(self, colors):
         from pathlib import Path
-        from aetherloom_core.paths import current_dir
+        from aetherloom_core.paths import resource_path
         from aetherloom_core.rh_ui import palette
         p = dict(palette(), **colors)
         mode = 'light' if QtGui.QColor(p['canvas']).lightness() > 128 else 'dark'
-        icon_root = Path(current_dir) / 'icons'
+        icon_root = Path(resource_path('icons'))
         up_arrow = (icon_root / f'ui-chevron-up-{mode}.svg').as_posix()
         down_arrow = (icon_root / f'ui-chevron-down-{mode}.svg').as_posix()
         check_icon = (icon_root / 'ui-check.svg').as_posix()
