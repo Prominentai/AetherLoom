@@ -3,8 +3,58 @@ import copy
 import io
 import shutil
 from pathlib import Path
-from PIL import Image, PngImagePlugin
+from PIL import Image, ImageOps, PngImagePlugin
 from aetherloom_core import mask_assets
+
+
+def prepare_editor_input(original, draft_mask, input_dir, temporary):
+    """Keep NovelAI's image and mask separate, including the image's own alpha.
+
+    RH transports its mask in image alpha. Reusing that transport here and
+    dropping alpha also exposed hidden RGB in transparent input pixels.
+    """
+    with Image.open(original) as source:
+        if source.width * source.height > mask_assets.MAX_PIXELS:
+            raise ValueError('输入图像超过 3200 万像素')
+        if getattr(source, 'n_frames', 1) != 1:
+            raise ValueError('请先导出需要使用的静态图像帧')
+        mode = 'RGBA' if 'A' in source.getbands() or 'transparency' in source.info else 'RGB'
+        base = ImageOps.exif_transpose(source).convert(mode)
+    mask = paint = None
+    try:
+        orientation = int(draft_mask.get('orientation', 0))
+        if not 0 <= orientation <= 7:
+            raise ValueError('图像方向设置无效')
+        if orientation:
+            rotated = base.transpose(Image.Transpose(orientation - 1))
+            base.close()
+            base = rotated
+        mask = mask_assets.read(draft_mask, base.size)
+        # The durable editor asset follows the existing inverse-alpha format;
+        # it is never used as the image uploaded to NovelAI.
+        with base.convert('RGB').convert('RGBA') as asset:
+            asset.putalpha(ImageOps.invert(mask))
+            mask_asset = mask_assets.store_asset(asset, Path(input_dir) / 'masks')
+        persistent = {key: value for key, value in draft_mask.items() if key not in ('png', 'paint_png')}
+        persistent.update(version=2, encoding='rgba-alpha', path=mask_asset,
+                          sha256=Path(mask_asset).stem, width=base.width, height=base.height)
+        paint = mask_assets.read_paint(draft_mask, base.size)
+        if paint is not None:
+            persistent['paint_path'] = mask_assets.store_asset(paint, Path(input_dir) / 'paintings')
+            persistent['paint_sha256'] = Path(persistent['paint_path']).stem
+            with base.convert('RGBA') as rgba:
+                composited = Image.alpha_composite(rgba, paint).convert(mode)
+            base.close()
+            base = composited
+        image_path = mask_assets.atomic_png(base, Path(temporary) / 'novelai-input.png')
+        mask_path = mask_assets.atomic_png(mask, Path(temporary) / 'novelai-mask.png')
+        return image_path, mask_path, persistent
+    finally:
+        base.close()
+        if mask is not None:
+            mask.close()
+        if paint is not None:
+            paint.close()
 
 
 def prepare(snapshot, draft_mask, input_dir, temporary):
@@ -15,18 +65,20 @@ def prepare(snapshot, draft_mask, input_dir, temporary):
     persistent_mask = None
     if original:
         if draft_mask and mask_assets.matches(draft_mask, original):
-            path, assets = mask_assets.input_image(original, draft_mask, input_dir, temporary)
-            options['image_path'] = path
-            options['mask_path'] = assets['mask_path']
-            persistent_mask = {key: value for key, value in draft_mask.items() if key not in ('png', 'paint_png')}
-            persistent_mask['path'] = assets.get('mask_asset_path', persistent_mask.get('path', ''))
-            if assets.get('paint_path'):
-                persistent_mask['paint_path'] = assets['paint_path']
+            options['image_path'], options['mask_path'], persistent_mask = prepare_editor_input(
+                original, draft_mask, input_dir, temporary)
         elif options.get('action') == 'infill' and not options.get('mask_path'):
-            path, assets = mask_assets.input_image(original, None, input_dir, temporary)
-            if not assets.get('_mask_nonempty'):
-                raise ValueError('请先绘制或导入遮罩，再进行局部重绘。')
-            options['image_path'], options['mask_path'] = path, assets['mask_path']
+            with Image.open(original) as source:
+                if source.width * source.height > mask_assets.MAX_PIXELS:
+                    raise ValueError('输入图像超过 3200 万像素')
+                if getattr(source, 'n_frames', 1) != 1:
+                    raise ValueError('请先导出需要使用的静态图像帧')
+                with ImageOps.exif_transpose(source) as image, mask_assets.image_mask(image) as mask:
+                    if not mask.getbbox():
+                        raise ValueError('请先绘制或导入遮罩，再进行局部重绘。')
+                    options['mask_path'] = mask_assets.atomic_png(mask, Path(temporary) / 'novelai-mask.png')
+            # Infer an edit mask from transparency without erasing the original
+            # transparency or exposing RGB hidden below it in the upload image.
     # Freeze actual file contents as well as Qt settings before any paid request.
     paths = [(options, 'image_path')] if needs_image else []
     if action == 'infill':
