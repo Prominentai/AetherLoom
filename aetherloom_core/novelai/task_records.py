@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import tempfile
 import threading
 import time
@@ -173,15 +172,18 @@ def _asset_mask(mask, path):
 
 
 class Acknowledgement:
-    def __init__(self):
+    def __init__(self, operation='保存'):
         self.event = threading.Event()
         self.error = None
+        self.operation = operation
 
     def wait(self, timeout=15):
         if not self.event.wait(timeout):
+            if self.operation == '删除':
+                raise OSError('任务记录删除仍在排队，任务已保留，请稍后重试。')
             raise OSError('任务记录保存超时，未提交生成请求。')
         if self.error:
-            raise OSError('任务记录保存失败：' + self.error)
+            raise OSError('任务记录' + self.operation + '失败：' + self.error)
 
 
 class RecordWriter:
@@ -208,16 +210,22 @@ class RecordWriter:
         return ack
 
     def delete(self, identity, path):
+        ack = Acknowledgement('删除')
         with self._condition:
             self._deleted.add(identity)
             previous = self._pending.pop(identity, None)
+            waiting = []
             if previous:
-                for ack in previous[4]:
-                    ack.error = '任务记录已清除。'
-                    ack.event.set()
-            self._pending[identity] = ('delete', Path(path), None, 0, [])
+                if previous[0] == 'delete':
+                    waiting = previous[4]
+                else:
+                    for prior in previous[4]:
+                        prior.error = '任务记录已清除。'
+                        prior.event.set()
+            self._pending[identity] = ('delete', Path(path), None, 0, waiting + [ack])
             self._ensure_thread()
             self._condition.notify()
+        return ack
 
     def _ensure_thread(self):
         if self._thread is None or not self._thread.is_alive():
@@ -271,13 +279,19 @@ class RecordWriter:
         match = _NAME.fullmatch(path.name)
         if not match or path.parent.name != 'novelai' or path.parent.parent.name != 'task_records':
             raise ValueError('拒绝清理任务记录目录以外的路径。')
-        path.unlink(missing_ok=True)
-        folder = (path.parent / 'assets' / match[2]).resolve()
-        expected = (path.parent / 'assets').resolve()
-        if folder.parent != expected:
+        owned = path.parent.resolve()
+        assets = path.parent / 'assets'
+        folder = assets / match[2]
+        if assets.resolve() != owned / 'assets' or folder.resolve() != owned / 'assets' / match[2]:
             raise ValueError('任务附件路径不在允许范围内。')
-        if folder.exists():
-            shutil.rmtree(folder)
+        if folder.is_dir():
+            # No recursion: only files produced by _asset_mask belong to us.
+            for asset in folder.iterdir():
+                if re.fullmatch(r'[a-f0-9]{64}\.png', asset.name) and not asset.is_dir():
+                    asset.unlink(missing_ok=True)
+            if not any(folder.iterdir()):
+                folder.rmdir()
+        path.unlink(missing_ok=True)
 
     def flush(self, timeout=5):
         deadline = time.monotonic() + timeout

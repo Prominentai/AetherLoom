@@ -128,6 +128,36 @@ def update_history(directory, additions=(), removed=()):
         return merged
 
 
+def delete_result_files(records):
+    """Delete only explicitly referenced result files; keep every input intact.
+
+    A failed batch can be retried with the original records: missing files are
+    already complete, and duplicate paths are processed only once. Nested
+    settings, masks, references, and directories are never traversed.
+    """
+    paths, errors = {}, []
+    for record in records:
+        value = record.get('path') if isinstance(record, dict) else None
+        if not isinstance(value, str) or not value.strip():
+            errors.append('结果记录缺少有效的本地文件路径。')
+            continue
+        try:
+            # Normalize spelling without resolving a file symlink to its target.
+            path = Path(os.path.abspath(value))
+            paths.setdefault(os.path.normcase(str(path)), path)
+        except (OSError, ValueError) as error:
+            errors.append(f'结果文件路径无效：{error}')
+    for path in paths.values():
+        try:
+            if path.is_dir():
+                raise OSError('结果路径是目录，拒绝删除目录。')
+            path.unlink(missing_ok=True)
+        except (OSError, ValueError) as error:
+            errors.append(f'{path}：{error}')
+    if errors:
+        raise OSError('部分结果文件删除失败，任务已保留，可重试；已删除的文件不会恢复。\n' + '\n'.join(errors))
+
+
 class SaveError(OSError):
     def __init__(self, message, saved, pending):
         super().__init__(message)

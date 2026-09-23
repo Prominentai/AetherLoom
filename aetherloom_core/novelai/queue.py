@@ -158,6 +158,42 @@ class QueueService(QtCore.QObject):
     def get_task(self, task_id):
         return self._by_id.get(task_id) or self._historical.get(task_id)
 
+    def can_remove_task(self, identity):
+        """Only terminal tasks with fully released workers may be removed."""
+        if self._closed or not isinstance(identity, str):
+            return False
+        task = self.get_task(identity)
+        return bool(task is not None and task.get('state') in TERMINAL
+                    and identity != self._stage_id and identity not in self._run_jobs
+                    and identity not in self._contexts)
+
+    def remove_task(self, identity, *, delete_files=False):
+        """Remove one finished task, optionally deleting its local results.
+
+        Return the original result references for the caller's history cleanup.
+        Failures retain the task and its references so a partial deletion can be
+        retried. The record writer serializes deletion behind in-flight writes.
+        """
+        task = self.get_task(identity)
+        if task is None:
+            raise ValueError('找不到此任务，可能已经删除。')
+        if not self.can_remove_task(identity):
+            raise ValueError('只能删除已结束且后台线程已释放的任务。')
+        records = copy.deepcopy(task.get('results', []))
+        if delete_files:
+            storage.delete_result_files(records)
+        path = self._record_paths.get(identity) or task.get('record_path')
+        if path:
+            self._record_writer.delete(identity, path).wait(timeout=2)
+        self.tasks[:] = [item for item in self.tasks if item.get('id') != identity]
+        self._by_id.pop(identity, None)
+        self._historical.pop(identity, None)
+        self._record_states.pop(identity, None)
+        self._record_paths.pop(identity, None)
+        self._save_failed_ids.discard(identity)
+        self.changed.emit()
+        return records
+
     def enqueue(self, snapshot, draft, token, output_dir, input_dir, data_dir, *, billing=None, account_evidence=None, batch=None, source=None):
         if self._closed:
             raise RuntimeError('任务队列已经关闭。')

@@ -182,6 +182,8 @@ class PopupTheme(QtCore.QObject):
 
     def refresh(self):
         QtWidgets.QToolTip.hideText()
+        font = QtGui.QFont(self.owner.font()); font.setPixelSize(12)
+        QtWidgets.QToolTip.setFont(font)
         QtWidgets.QToolTip.setPalette(themed_palette(self.owner._theme_mode, self.owner.palette()))
         for widget in self.owner.findChildren(QtWidgets.QDialog):
             self.apply(widget)
@@ -207,6 +209,9 @@ class PopupTheme(QtCore.QObject):
             if text != getattr(tip, '_popup_hint_rendered', None):
                 # Paths and model names are plain text, including '<' and '&'.
                 tip._popup_hint_plain = text[:4000] + ('…' if len(text) > 4000 else '')
+            # Native tooltips are top-level labels and do not inherit the shell font.
+            font = QtGui.QFont(self.owner.font()); font.setPixelSize(12)
+            tip.setFont(font)
             tip.setPalette(themed_palette(self.owner._theme_mode, tip.palette()))
             tip.setStyleSheet(f'QToolTip, QLabel {{ background: {p["surface"]}; color: {p["text"]}; '
                              f'border: 1px solid {p["border"]}; border-radius: 6px; padding: 7px 9px; font-size: 12px; }}')

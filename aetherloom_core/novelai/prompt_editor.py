@@ -4,7 +4,7 @@ import math
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from aetherloom_core.ui.widgets import CompletionTextEdit
-from aetherloom_core.prompt_tokens import completion_suffix, completion_token
+from aetherloom_core.prompt_tokens import completion_token
 
 
 class NovelAIPromptEdit(CompletionTextEdit):
@@ -260,43 +260,12 @@ class NovelAIPromptEdit(CompletionTextEdit):
         self._popup.show()
 
     def _insert_completion(self, completion):
-        self.insert_tag(completion, replace_prefix=True)
+        self.insert_tag(completion)
 
-    def insert_tag(self, tag, replace_prefix=True):
+    def insert_tag(self, tag):
         if self.isReadOnly() or not self.isEnabled() or not isinstance(tag, str) or not tag.strip():
             return
-        tag = tag.strip().replace('_', ' ')
-        cursor = self.textCursor()
-        token = None
-        if replace_prefix and not cursor.hasSelection():
-            before_caret = QtGui.QTextCursor(cursor)
-            before_caret.movePosition(QtGui.QTextCursor.Start, QtGui.QTextCursor.KeepAnchor)
-            text = self.toPlainText()
-            token = completion_token(text, len(before_caret.selectedText()), syntax='nai')
-            if token is not None:
-                cursor.setPosition(len(text[:token.start].encode('utf-16-le')) // 2)
-                cursor.setPosition(len(text[:token.end].encode('utf-16-le')) // 2,
-                                   QtGui.QTextCursor.KeepAnchor)
-        before = QtGui.QTextCursor(cursor)
-        before.setPosition(cursor.selectionStart())
-        before.movePosition(QtGui.QTextCursor.Start, QtGui.QTextCursor.KeepAnchor)
-        after = QtGui.QTextCursor(cursor)
-        after.setPosition(cursor.selectionEnd())
-        after.movePosition(QtGui.QTextCursor.End, QtGui.QTextCursor.KeepAnchor)
-        previous, following = before.selectedText(), after.selectedText()
-        leading = ''
-        if token is None and not cursor.hasSelection() and previous and not previous.endswith(
-                (',', '，', ' ', '\n', '\u2029', '{', '[', '|', '::')):
-            leading = ', '
-        # Keep existing separators and closing emphasis delimiters outside the
-        # replacement. Never turn {tag} or 1.2::tag:: into a different weight.
-        trailing = completion_suffix(following, syntax='nai')
-        cursor.beginEditBlock()
-        cursor.insertText(leading + tag + trailing)
-        cursor.endEditBlock()
-        self.setTextCursor(cursor)
-        self._hide_popup()
-        self.setFocus(QtCore.Qt.OtherFocusReason)
+        self._insert_prompt_tag(tag.strip().replace('_', ' '))
 
     def request_tags(self):
         self.activated.emit(self)

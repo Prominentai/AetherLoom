@@ -237,6 +237,7 @@ class TaskPanel(QtWidgets.QFrame):
     taskSelected = QtCore.pyqtSignal(str)
     queueRequested = QtCore.pyqtSignal()
     copyRequested = QtCore.pyqtSignal(str)
+    deleteRequested = QtCore.pyqtSignal(str, bool)
     resultSelected = QtCore.pyqtSignal(dict)
     useImageRequested = QtCore.pyqtSignal(dict)
     reuseSettingsRequested = QtCore.pyqtSignal(dict)
@@ -269,6 +270,9 @@ class TaskPanel(QtWidgets.QFrame):
         self._thumbnail_timer = QtCore.QTimer(self)
         self._thumbnail_timer.setSingleShot(True)
         self._thumbnail_timer.timeout.connect(self._pump_thumbnails)
+        self._scroll_top_timer = QtCore.QTimer(self)
+        self._scroll_top_timer.setSingleShot(True)
+        self._scroll_top_timer.timeout.connect(self._scroll_to_top)
         self.setObjectName('novelaiTaskPanel')
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self.setMinimumWidth(210)
@@ -371,6 +375,11 @@ class TaskPanel(QtWidgets.QFrame):
                 heapq.heapreplace(latest, entry)
         visible = [entry[1] for entry in sorted(latest, key=lambda entry: entry[0], reverse=True)]
         identities = [task['id'] for task in visible]
+        newest = identities[0] if identities else None
+        reveal_newest = newest is not None and (
+            newest not in self._cards
+            or (_text(visible[0].get('state'), 32) == 'succeeded'
+                and self._states.get(newest) != 'succeeded'))
         identity_set = set(identities)
         for identity in set(self._cards) - identity_set:
             card = self._cards.pop(identity)
@@ -407,8 +416,11 @@ class TaskPanel(QtWidgets.QFrame):
                 self._thumbnail_keys[identity] = key
                 if key not in self._thumbnail_cache and key not in self._active_thumbnail_keys:
                     self._pending_thumbnails[key] = path
-            if state != 'running':
+            # Keep the last stream frame through saving and final-thumbnail
+            # decoding; only replace it once that task's file has been read.
+            if state not in ('running', 'saving', 'save_failed', 'succeeded'):
                 self._preview_cache.pop(identity, None)
+            if state != 'running':
                 self._preview_times.pop(identity, None)
             self._apply_thumbnail(identity)
         self._card_order = identities
@@ -428,6 +440,16 @@ class TaskPanel(QtWidgets.QFrame):
             self._preview_times.pop(identity, None)
         if self._pending_thumbnails and self._thumbnail_job is None:
             self._thumbnail_timer.start(0)
+        if reveal_newest:
+            # Compact cards settle their height after insertion. Scroll once
+            # after layout, without pulling users back on progress updates.
+            self._scroll_top_timer.start(0)
+
+    def _scroll_to_top(self):
+        if not self._closed and self._card_order:
+            self.cards_layout.activate()
+            bar = self.scroll.verticalScrollBar()
+            bar.setValue(bar.minimum())
 
     def _result_record(self, results):
         # Prefer the first result still available on disk, matching the main
@@ -476,6 +498,8 @@ class TaskPanel(QtWidgets.QFrame):
         if key in self._thumbnail_cache:
             pixmap = self._thumbnail_cache[key]
             self._thumbnail_cache.move_to_end(key)
+            self._preview_cache.pop(identity, None)
+            self._preview_times.pop(identity, None)
             card.set_thumbnail(pixmap, '图片不可用')
             return
         if identity in self._preview_cache:
@@ -569,10 +593,15 @@ class TaskPanel(QtWidgets.QFrame):
         self._apply_thumbnail(task_id)
 
     def select_task(self, identity):
-        """Keep the page's chosen identity without emitting or forcing scroll."""
+        """Reflect selection and reveal a newly selected latest result."""
+        previous = self.selected_task_id
         self.selected_task_id = identity if isinstance(identity, str) and identity else None
         for task_id, card in self._cards.items():
             card.set_selected(task_id == self.selected_task_id)
+        if (self.selected_task_id != previous and self._card_order
+                and self.selected_task_id == self._card_order[0]
+                and self._states.get(self.selected_task_id) == 'succeeded'):
+            self._scroll_top_timer.start(0)
 
     def _card_selected(self, identity):
         if identity in self._cards:
@@ -613,6 +642,8 @@ class TaskPanel(QtWidgets.QFrame):
             menu.addAction('作为底图', lambda: self.useImageRequested.emit(copy.deepcopy(record)))
         menu.addSeparator()
         menu.addAction('打开完整任务队列', self.queueRequested)
+        from .result_menu import append_task_removal
+        append_task_removal(menu, identity, getattr(self, 'can_remove_task', None), self.deleteRequested.emit)
         return menu
 
     def _show_menu(self, identity, position):
@@ -673,6 +704,7 @@ class TaskPanel(QtWidgets.QFrame):
         self._closed = True
         self._pending_thumbnails.clear()
         self._thumbnail_timer.stop()
+        self._scroll_top_timer.stop()
         if self._thumbnail_job is not None:
             self._thumbnail_job.cancel()
         self._thumbnail_cache.clear()

@@ -51,7 +51,7 @@ def _boundaries(text, syntax):
 def completion_token(text, cursor, *, syntax="sd"):
     """Return the complete tag around a caret, and its query before the caret.
 
-    Spaces and underscores belong to the same tag. Replacement excludes outer
+    Spaces and underscores belong to the same tag. The span excludes outer
     whitespace, emphasis wrappers and numeric weight fields. A caret inside a
     delimiter, at an empty tag, or in a numeric weight field returns ``None``.
     ``syntax='nai'`` keeps parentheses literal and understands ``1.2::tag::``.
@@ -101,3 +101,92 @@ def completion_suffix(following, *, syntax="sd"):
         return ""
     # Preserve existing trailing spaces instead of doubling the inserted space.
     return "," if following and not stripped else ", "
+
+
+def _skip_tag_spaces(text, index):
+    while (index < len(text) and text[index].isspace()
+           and text[index] not in _NEWLINES):
+        index += 1
+    return index
+
+
+def _closing_weight_end(following, syntax):
+    """Return the end of complete closing weight/schedule delimiters."""
+    end = 0
+    while True:
+        index = _skip_tag_spaces(following, end)
+        rest = following[index:]
+        closing = ("}", "]", "::") if syntax == "nai" else (")", "]")
+        marker = next((value for value in closing if rest.startswith(value)), None)
+        if marker:
+            end = index + len(marker)
+            continue
+        if syntax == "sd" and rest.startswith(":"):
+            number = _NUMBER.match(following, _skip_tag_spaces(following, index + 1))
+            finish = _skip_tag_spaces(following, number.end()) if number else len(following)
+            if number and following[finish:finish + 1] in (")", "]"):
+                end = finish + 1
+                continue
+        return end
+
+
+def completion_tail(following, *, syntax="sd"):
+    """Return (replacement tail, consumed characters) after a completed tag.
+
+    Keep closing weight syntax intact and put the separator after it. Reusing
+    an existing comma also consumes it so the editor's caret ends up ready for
+    the next tag, instead of still editing the tag that was just completed.
+    """
+    if syntax not in ("sd", "nai"):
+        raise ValueError("Unknown prompt syntax")
+
+    end = _closing_weight_end(following, syntax)
+    index = _skip_tag_spaces(following, end)
+    if following[index:index + 1] in (",", "，"):
+        finish = _skip_tag_spaces(following, index + 1)
+        tail = following[:finish]
+        if finish == len(following) and finish == index + 1:
+            tail += " "
+        return tail, finish
+    if not completion_suffix(following[end:], syntax=syntax):
+        return following[:end], end
+    # Preserve existing horizontal whitespace while placing the comma before
+    # it. Closing delimiters and the separator remain one undoable edit.
+    return following[:end] + "," + (following[end:index] or " "), index
+
+
+def completion_insertion(text, start, end, tag, *, syntax="sd"):
+    """Build an insertion without implicitly selecting the search query.
+
+    A caret inside a tag adds the new tag after that complete tag (and its
+    closing weight syntax). Only an explicit selection is replaced. Search
+    still uses the complete multiword query; it never determines deletion.
+    Returned offsets use Python characters, not Qt UTF-16 positions.
+    """
+    if syntax not in ("sd", "nai"):
+        raise ValueError("Unknown prompt syntax")
+    start, end = sorted((max(0, min(start, len(text))), max(0, min(end, len(text)))))
+    leading = ""
+    if start == end:
+        token = completion_token(text, start, syntax=syntax)
+        if token is not None:
+            start = end = token.end + _closing_weight_end(text[token.end:], syntax)
+            leading = ", "
+        else:
+            previous = text[:start]
+            stripped = previous.rstrip(" \t\u3000")
+            boundaries = list(_boundaries(stripped, syntax))
+            marker = boundaries[-1][2] if boundaries and boundaries[-1][1] == len(stripped) else ""
+            openings = ("{", "[") if syntax == "nai" else ("(", "[")
+            if syntax == "nai" and marker == "::":
+                begin = boundaries[-2][1] if len(boundaries) > 1 else 0
+                if _NUMBER.fullmatch(stripped[begin:-2].strip()):
+                    marker = "{"
+            if not stripped or marker in (*openings, "|", *_NEWLINES):
+                leading = ""
+            elif marker in (",", "，"):
+                leading = " " if previous == stripped else ""
+            else:
+                leading = ", "
+    tail, consumed = completion_tail(text[end:], syntax=syntax)
+    return start, end + consumed, leading + tag + tail

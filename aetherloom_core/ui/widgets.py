@@ -277,20 +277,32 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
             pass
 
     def _insert_completion(self, completion):
-        token = self._completion_token()
-        if token is None or self.isReadOnly() or not self.isEnabled():
+        if not isinstance(completion, str) or not completion.strip():
+            return
+        options = self._completion_options()
+        self._insert_prompt_tag(auto_complete.format_tag(completion.strip(),
+            escape_parentheses=options['escape_parentheses'], replace_spaces=options['replace_spaces']))
+
+    def _insert_prompt_tag(self, tag):
+        from aetherloom_core.prompt_tokens import completion_insertion
+        if self.isReadOnly() or not self.isEnabled():
             self._hide_popup()
             return
         cur = self.textCursor()
         text = self.toPlainText()
-        start = len(text[:token.start].encode('utf-16-le')) // 2
-        end = len(text[:token.end].encode('utf-16-le')) // 2
+        before = QtGui.QTextCursor(cur)
+        before.setPosition(0)
+        before.setPosition(cur.selectionStart(), QtGui.QTextCursor.KeepAnchor)
+        start = len(before.selectedText())
+        before.setPosition(0)
+        before.setPosition(cur.selectionEnd(), QtGui.QTextCursor.KeepAnchor)
+        end = len(before.selectedText())
+        start, end, replacement = completion_insertion(text, start, end, tag,
+                                                       syntax=self.prompt_weight_syntax)
         cur.beginEditBlock()
-        cur.setPosition(start, QtGui.QTextCursor.MoveAnchor)
-        cur.setPosition(end, QtGui.QTextCursor.KeepAnchor)
-        options = self._completion_options()
-        cur.insertText(auto_complete.format_completion(completion, text[token.end:],
-                       escape_parentheses=options['escape_parentheses'], replace_spaces=options['replace_spaces']))
+        cur.setPosition(len(text[:start].encode('utf-16-le')) // 2)
+        cur.setPosition(len(text[:end].encode('utf-16-le')) // 2, QtGui.QTextCursor.KeepAnchor)
+        cur.insertText(replacement)
         cur.endEditBlock()
         self.setTextCursor(cur)
         self._hide_popup()

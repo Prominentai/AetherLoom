@@ -97,6 +97,7 @@ class NovelAIPage(QtWidgets.QWidget):
         self._tag_suggestions = TagSuggestions(self)
         self.controls.tagSuggestionsRequested.connect(self.tags)
         self.controls.changed.connect(self._editor_changed)
+        self.controls.resetDefaultsRequested.connect(self.reset_drawing_defaults)
         self.controls.positionEditRequested.connect(self.toggle_position_editor)
         self.focused.toggled.connect(self._editor_changed)
         self.padding.valueChanged.connect(self._editor_changed)
@@ -269,9 +270,11 @@ class NovelAIPage(QtWidgets.QWidget):
         self.preview.setMinimumHeight(120)
         self.preview.filesDropped.connect(self.import_paths)
         self.preview.statusChanged.connect(self.status_message)
+        self.preview.menuRequested.connect(self._show_preview_menu)
         self.comparison = ImagePreview(self)
         self.comparison.setMinimumHeight(120)
         self.comparison.hide()
+        self.comparison.menuRequested.connect(lambda point: self._show_preview_menu(point, self.comparison))
         self.view_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.view_splitter.addWidget(self.preview)
         self.view_splitter.addWidget(self.comparison)
@@ -371,6 +374,8 @@ class NovelAIPage(QtWidgets.QWidget):
         self.task_panel.taskSelected.connect(self.select_task)
         self.task_panel.queueRequested.connect(self.show_queue)
         self.task_panel.copyRequested.connect(self.copy_task_to_page)
+        self.task_panel.can_remove_task = self._queue.can_remove_task
+        self.task_panel.deleteRequested.connect(self._remove_task)
         self.task_panel.resultSelected.connect(self.select_result)
         self.task_panel.useImageRequested.connect(lambda record: self.set_input(record.get('path', '')))
         for panel in (self.history, self.task_panel):
@@ -534,6 +539,25 @@ class NovelAIPage(QtWidgets.QWidget):
             self._billing_timer.start(120)
             if self._position_editing and not self._position_syncing:
                 self._sync_position_editor()
+
+    def reset_drawing_defaults(self):
+        if self._closing:
+            return
+        if self._position_editing:
+            self.finish_position_editor()
+        current = self._options()
+        defaults = catalog.default_options()
+        # Keep the current creation and its model's supported input modes.
+        # Reverting sampler settings must not erase an unsaved prompt or mask.
+        for key in ('model', 'action', 'dataset_mode', 'prompt', 'negative_prompt',
+                    'tool_prompt', 'characters', 'character_position_mode',
+                    'image_path', 'mask_path', 'references', 'reference_mode', 'chunks'):
+            if key in current:
+                defaults[key] = copy.deepcopy(current[key])
+        self._enhancement_options = {}
+        self._apply_settings(defaults)
+        self.task_count.setValue(1)
+        self.status_message('生成参数已恢复默认，已保留当前模型、模式、提示词和输入素材。')
 
     def _refresh_billing_hint(self):
         # Retain the former slot name for existing connections; no cost classification.
@@ -941,6 +965,16 @@ class NovelAIPage(QtWidgets.QWidget):
         if self._selected and not self._previewing_input:
             self.reuse_seed(self._selected)
 
+    def _show_preview_menu(self, point, preview=None):
+        from .result_menu import create_preview_menu
+        menu = create_preview_menu(self, preview)
+        menu.exec_(point)
+        menu.deleteLater()
+
+    def _remove_task(self, identity, delete_files=False):
+        from .result_menu import remove_task
+        return remove_task(self, identity, delete_files)
+
 
     def show_result(self):
         context = self._result_view_context if self._previewing_input else None
@@ -1035,14 +1069,15 @@ class NovelAIPage(QtWidgets.QWidget):
         self._update_result_navigation()
         self._display_record(record)
 
-    def _display_record(self, record):
+    def _display_record(self, record, *, keep_preview=False):
         self._selected = copy.deepcopy(record)
         self._previewing_input = False
         path = str(record.get('path', ''))
-        # Never leave another task's image visible while opening a missing result.
-        self.preview.set_empty('正在读取已保存结果…' if os.path.isfile(path) else '此结果文件已移动或删除，可选择此任务的其他结果。')
         if os.path.isfile(path):
-            self.preview.load_path(path)
+            self.preview.load_path(path, keep_preview=keep_preview)
+        else:
+            # Missing results must never leave another task's image visible.
+            self.preview.set_empty('此结果文件已移动或删除，可选择此任务的其他结果。')
         self.result_label.setText(f'{record.get("width", "?")} × {record.get("height", "?")}')
         self.result_label.setToolTip(path)
         self._sync_result_actions()
@@ -1067,6 +1102,9 @@ class NovelAIPage(QtWidgets.QWidget):
         task = self._queue.get_task(task_id)
         if not task or not task.get('accepted') or task['state'] in ('failed', 'cancelled'):
             return
+        same_task = (self._follow_queue_preview and not self._previewing_input
+                     and self._displayed_task_id == task_id)
+        keep_preview = same_task and not self.preview.snapshot_pixmap().isNull()
         self._result_view_context = None
         self._follow_queue_preview = True
         self._preview_task_id = self._displayed_task_id = task_id
@@ -1077,14 +1115,16 @@ class NovelAIPage(QtWidgets.QWidget):
         self._task_result_index = next((i for i, record in enumerate(self._task_results)
                                         if os.path.isfile(str(record.get('path', '')))), 0)
         if self._task_results:
-            self._display_record(self._task_results[self._task_result_index])
+            self._display_record(self._task_results[self._task_result_index], keep_preview=keep_preview)
         else:
             self._selected = None
             message = task.get('message') or '任务已受理，正在生成…'
-            self.preview.set_empty(message)
-            raw = self._stream_previews.get(task_id) if task['state'] == 'running' else None
-            if raw:
-                self.preview.set_bytes(raw)
+            stream_state = task['state'] in ('running', 'saving', 'save_failed')
+            if not (keep_preview and stream_state):
+                self.preview.set_empty(message)
+                raw = self._stream_previews.get(task_id) if stream_state else None
+                if raw:
+                    self.preview.set_bytes(raw)
             self.result_label.setText(f'任务 #{task["index"]} · {message}')
             self.result_label.setToolTip('')
         self._update_result_navigation()
@@ -1362,6 +1402,7 @@ class NovelAIPage(QtWidgets.QWidget):
                 mode=getattr(self.owner, '_theme_mode', 'dark'))
             self._queue_dialog.selected.connect(self.select_result)
             self._queue_dialog.copyRequested.connect(self.copy_task_to_page)
+            self._queue_dialog.deleteRequested.connect(self._remove_task)
             self._queue_dialog.configurationChanged.connect(self._queue_configuration_changed)
         self._queue_dialog.show()
         self._queue_dialog.raise_()
@@ -1442,7 +1483,7 @@ class NovelAIPage(QtWidgets.QWidget):
         self.task_panel.set_tasks(tasks)
         for identity in list(self._stream_previews):
             task = self._queue.get_task(identity)
-            if not task or task['state'] != 'running':
+            if not task or task['state'] not in ('running', 'saving', 'save_failed'):
                 self._stream_previews.pop(identity, None)
         # A clicked task remains selected after completion, even while others run.
         if self._follow_queue_preview:

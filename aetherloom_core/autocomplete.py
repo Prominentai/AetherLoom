@@ -19,15 +19,21 @@ def completion_options(settings=None):
             'visible_tags': rows}
 
 
-def format_completion(word, following_text, *, escape_parentheses=True, replace_spaces=False):
-    """Escape literal tag parentheses and reuse an adjacent existing comma."""
+def format_tag(word, *, escape_parentheses=True, replace_spaces=False):
+    """Format a tag independently of the editor's surrounding prompt syntax."""
     text = word.replace(' ', '_') if replace_spaces else word.replace('_', ' ')
     # An odd backslash run already escapes the parenthesis. Preserve it rather
     # than turning an already escaped tag back into weighting syntax.
     if escape_parentheses:
         text = re.sub(r'(\\*)([()])', lambda match: match[1] +
                       ('\\' if len(match[1]) % 2 == 0 else '') + match[2], text)
-    return text + completion_suffix(following_text)
+    return text
+
+
+def format_completion(word, following_text, *, escape_parentheses=True, replace_spaces=False):
+    """Escape literal tag parentheses and reuse an adjacent existing comma."""
+    return format_tag(word, escape_parentheses=escape_parentheses,
+                      replace_spaces=replace_spaces) + completion_suffix(following_text)
 
 
 class AutocompleteManager:

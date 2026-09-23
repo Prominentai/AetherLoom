@@ -62,6 +62,18 @@ def _prompt(parent, height, placeholder):
     return widget
 
 
+def _seed_reset_button(callback, *, compact=False):
+    button = QtWidgets.QToolButton()
+    button.setObjectName('novelaiSeedReset')
+    button.setText('↺')
+    button.setToolTip('重置为随机种子（-1）')
+    button.setAccessibleName('重置为随机种子')
+    button.setFocusPolicy(QtCore.Qt.NoFocus)
+    button.setFixedSize(24 if compact else 32, 28 if compact else 34)
+    button.clicked.connect(callback)
+    return button
+
+
 class _Section(QtWidgets.QWidget):
     def __init__(self, title, expanded=True, parent=None, *, vertical=False):
         super().__init__(parent)
@@ -456,7 +468,15 @@ class _QuickSettings(QtWidgets.QWidget):
             widget.setMinimumWidth(0)
             widget.setFixedHeight(28)
             widget.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
-            box.addWidget(widget)
+            if key == 'seed':
+                seed_row = QtWidgets.QHBoxLayout()
+                seed_row.setSpacing(3)
+                seed_row.addWidget(widget, 1)
+                self.seed_reset_button = _seed_reset_button(controls.reset_seed, compact=True)
+                seed_row.addWidget(self.seed_reset_button)
+                box.addLayout(seed_row)
+            else:
+                box.addWidget(widget)
             self.fields[key] = widget
             self._cells.append(cell)
         controls.seed.textChanged.connect(self.sync)
@@ -518,6 +538,7 @@ class _QuickSettings(QtWidgets.QWidget):
                         widget.setText(source.text())
                     widget.setToolTip(source.toolTip())
                 widget.setEnabled(source.isEnabled())
+        self.seed_reset_button.setEnabled(self.controls.seed.isEnabled())
 
     def apply_theme(self, mode):
         p = palette(mode)
@@ -535,12 +556,17 @@ class _QuickSettings(QtWidgets.QWidget):
             QWidget#novelaiQuickSettings QComboBox::drop-down {{width:14px;border:none;}}
             QWidget#novelaiQuickSettings QAbstractItemView {{background:{p['surface']};color:{p['text']};
                 selection-background-color:{p['accent_soft']};selection-color:{p['accent']};border:1px solid {p['border']};}}
+            QWidget#novelaiQuickSettings QToolButton#novelaiSeedReset {{background:{p['input']};color:{p['muted']};
+                border:1px solid {p['border']};border-radius:3px;padding:0;font-size:14px;}}
+            QWidget#novelaiQuickSettings QToolButton#novelaiSeedReset:hover {{background:{p['hover']};color:{p['accent']};}}
+            QWidget#novelaiQuickSettings QToolButton#novelaiSeedReset:disabled {{color:{p['border']};}}
         """)
 
 
 class DrawingControls(QtWidgets.QWidget):
     """GUI-only editor. ``settings()`` returns a detached, plain Python snapshot."""
     changed = QtCore.pyqtSignal()
+    resetDefaultsRequested = QtCore.pyqtSignal()
     positionEditRequested = QtCore.pyqtSignal()
     prompt_editor_activated = QtCore.pyqtSignal(object)
     tagSuggestionsRequested = QtCore.pyqtSignal(object)
@@ -567,6 +593,21 @@ class DrawingControls(QtWidgets.QWidget):
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(1, 1, 1, 1)
         root.setSpacing(0)
+        settings_header = QtWidgets.QHBoxLayout()
+        settings_header.setContentsMargins(12, 6, 12, 0)
+        settings_title = QtWidgets.QLabel('绘图参数')
+        settings_title.setObjectName('novelaiSettingsTitle')
+        settings_header.addWidget(settings_title)
+        settings_header.addStretch(1)
+        self.reset_defaults_button = QtWidgets.QPushButton('恢复默认参数')
+        self.reset_defaults_button.setObjectName('novelaiResetDefaults')
+        self.reset_defaults_button.setAccessibleName('恢复默认绘图参数')
+        self.reset_defaults_button.setToolTip(
+            '恢复尺寸、步数、引导、采样器、种子等生成参数；保留当前模型、模式、提示词、角色和输入素材。\n'
+            '不影响连接设置、任务队列和已有结果。')
+        self.reset_defaults_button.clicked.connect(self.resetDefaultsRequested)
+        settings_header.addWidget(self.reset_defaults_button)
+        root.addLayout(settings_header)
         self.scroll = QtWidgets.QScrollArea()
         self.scroll.setObjectName('novelaiControlsScroll')
         self.scroll.setWidgetResizable(True)
@@ -678,7 +719,16 @@ class DrawingControls(QtWidgets.QWidget):
         self.seed.setValidator(QtGui.QRegularExpressionValidator(QtCore.QRegularExpression(r'-1|[0-9]{1,10}'), self.seed))
         self.seed.setPlaceholderText('-1 为随机种子')
         self.seed.setToolTip('-1 为随机；固定种子范围 0–4294967295')
-        self._add(basic.form, '种子', 'seed', self.seed)
+        self._register('seed', self.seed)
+        seed_row = QtWidgets.QWidget()
+        seed_layout = QtWidgets.QHBoxLayout(seed_row)
+        seed_layout.setContentsMargins(0, 0, 0, 0)
+        seed_layout.setSpacing(5)
+        seed_layout.addWidget(self.seed, 1)
+        self.seed_reset_button = _seed_reset_button(self.reset_seed)
+        seed_layout.addWidget(self.seed_reset_button)
+        basic.form.addRow('种子', seed_row)
+        self._field_rows['seed'] = (basic.form, basic.form.labelForField(seed_row), seed_row)
         self._add(basic.form, '张数', 'n_samples', _integer(1, 8, 1))
         self.stream = self._add(basic.form, '', 'stream', QtWidgets.QCheckBox('实时预览（Streaming）'))
         self.stream.setToolTip('生成过程中在画布显示中间预览；完成后显示最终图片。')
@@ -893,6 +943,12 @@ class DrawingControls(QtWidgets.QWidget):
         if not self._loading:
             self._sync_quick_settings()
             self.changed.emit()
+
+    def reset_seed(self):
+        if self.seed.isEnabled() and self.seed.text() != '-1':
+            self.seed.setText('-1')
+            # Programmatic text changes do not emit editingFinished.
+            self._emit_changed()
 
     def _swap_size(self):
         width, height = self.width.value(), self.height.value()
@@ -1357,6 +1413,7 @@ class DrawingControls(QtWidgets.QWidget):
 
     def set_busy(self, busy):
         self._busy = bool(busy)
+        self.reset_defaults_button.setEnabled(not self._busy)
         self.tabs.setEnabled(not self._busy)
         if not busy:
             self._capabilities_changed()
@@ -1368,12 +1425,21 @@ class DrawingControls(QtWidgets.QWidget):
         self.setStyleSheet(app_stylesheet(mode).replace('#rhAppPage', '#novelaiControls') +
             editor_stylesheet(mode, 'novelaiControls') + f'''
             QWidget#novelaiControls {{background:{colors['surface']};border:none;border-radius:0;}}
+            QWidget#novelaiControls QLabel#novelaiSettingsTitle {{color:{colors['muted']};font-size:12px;font-weight:600;}}
+            QWidget#novelaiControls QPushButton#novelaiResetDefaults {{background:transparent;color:{colors['muted']};
+                border:1px solid {colors['border']};border-radius:4px;padding:4px 7px;font-size:11px;}}
+            QWidget#novelaiControls QPushButton#novelaiResetDefaults:hover {{background:{colors['hover']};color:{colors['accent']};}}
+            QWidget#novelaiControls QPushButton#novelaiResetDefaults:disabled {{color:{colors['border']};}}
             QWidget#novelaiControls QScrollArea#novelaiControlsScroll,
             QWidget#novelaiControls QWidget#novelaiContinuousControls {{background:{colors['surface']};border:none;}}
             QWidget#novelaiControls QToolButton#novelaiSectionTitle {{background:transparent;
                 border:none;border-bottom:1px solid {colors['border']};border-radius:0;
                 text-align:left;font-size:12px;font-weight:600;padding:7px 0;}}
             QWidget#novelaiControls QToolButton#novelaiSectionTitle:hover {{color:{colors['accent']};}}
+            QWidget#novelaiControls QToolButton#novelaiSeedReset {{background:{colors['input']};color:{colors['muted']};
+                border:1px solid {colors['border']};border-radius:4px;padding:0;font-size:16px;}}
+            QWidget#novelaiControls QToolButton#novelaiSeedReset:hover {{background:{colors['hover']};color:{colors['accent']};}}
+            QWidget#novelaiControls QToolButton#novelaiSeedReset:disabled {{color:{colors['border']};}}
             QWidget#novelaiControls QFrame#novelaiCharacterCard {{background:{colors['surface']};
                 border:1px solid {colors['border']};border-radius:4px;}}
             QWidget#novelaiControls QFrame#novelaiCharacterCard:hover {{border-color:{colors['muted']};}}

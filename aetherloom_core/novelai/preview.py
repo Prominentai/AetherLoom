@@ -67,6 +67,7 @@ class ImagePreview(QtWidgets.QGraphicsView):
     filesDropped = QtCore.pyqtSignal(list)
     statusChanged = QtCore.pyqtSignal(str)
     imageChanged = QtCore.pyqtSignal()
+    menuRequested = QtCore.pyqtSignal(QtCore.QPoint)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -104,6 +105,7 @@ class ImagePreview(QtWidgets.QGraphicsView):
             empty_layout.addWidget(label)
         empty_layout.addStretch(1)
         self._path = ''
+        self._requested_path = ''
         self._version = 0
         self._closing = False
         self._jobs = set()
@@ -125,6 +127,7 @@ class ImagePreview(QtWidgets.QGraphicsView):
         self.scene().clear()
         self._picture = None
         self._path = ''
+        self._requested_path = ''
         self.resetTransform()
         self.scene().setSceneRect(QtCore.QRectF())
         self._empty_text.setText(message)
@@ -139,26 +142,28 @@ class ImagePreview(QtWidgets.QGraphicsView):
         """Share the selected GUI image; never read or decode the file again."""
         return self._picture.pixmap() if self._picture is not None else QtGui.QPixmap()
 
-    def load_path(self, path, mask=None):
+    def load_path(self, path, mask=None, *, keep_preview=False):
         if self._closing:
             return
         path = os.fspath(path)
-        if self._picture is None or path != self._path:
+        keep_preview = bool(keep_preview and self._picture is not None)
+        if not keep_preview and (self._picture is None or path != self._path):
             self.set_empty('正在读取图片…')
         self._version += 1
-        self._pending_load = (self._version, path, mask)
+        self._requested_path = path
+        self._pending_load = (self._version, path, mask, keep_preview)
         self._debounce.start(60)
 
     def _load_next(self):
         if self._closing or self._jobs or self._pending_load is None:
             return
-        version, path, mask = self._pending_load
+        version, path, mask, keep_preview = self._pending_load
         self._pending_load = None
         job = Job(lambda unused: preview_image(path, mask), self)
         self._jobs.add(job)
         def done(image):
             if not self._closing and version == self._version:
-                self._set_image(image, path)
+                self._set_image(image, path, preserve_view=keep_preview)
         def failed(error):
             if not self._closing and version == self._version:
                 self.set_empty('无法读取图片，请选择其他图片。')
@@ -183,7 +188,7 @@ class ImagePreview(QtWidgets.QGraphicsView):
             return
         self._set_image(image, path)
 
-    def _set_image(self, image, path=''):
+    def _set_image(self, image, path='', *, preserve_view=False):
         if self._closing:
             return
         self._version += 1
@@ -191,7 +196,9 @@ class ImagePreview(QtWidgets.QGraphicsView):
         pixmap = QtGui.QPixmap.fromImage(image)
         # Empty-path frames are updates to the current stream. A new source or
         # the first image after set_empty starts with the whole image visible.
-        new_image = self._picture is None or path != self._path
+        new_image = self._picture is None or (path != self._path and not preserve_view)
+        old_size = self.sceneRect().size()
+        center = self.mapToScene(self.viewport().rect().center())
         if self._picture is None:
             self.scene().clear()
             self._picture = self.scene().addPixmap(pixmap)
@@ -200,11 +207,21 @@ class ImagePreview(QtWidgets.QGraphicsView):
         else:
             self._picture.setPixmap(pixmap)
         self._path = path
+        self._requested_path = path
         self._empty.hide()
         self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
         self.scene().setSceneRect(self._picture.boundingRect())
         if new_image or self._fit:
             self.fit()
+        elif preserve_view and not old_size.isEmpty() and old_size != self.sceneRect().size():
+            # Stream frames may be smaller than the original. Keep the same
+            # visible image region when replacing them with full resolution.
+            sx, sy = image.width() / old_size.width(), image.height() / old_size.height()
+            if abs(sx / sy - 1) < .01:
+                self.scale(1 / sx, 1 / sx)
+                self.centerOn(center.x() * sx, center.y() * sy)
+            else:
+                self.fit()
         self.imageChanged.emit()
 
     def fit(self):
@@ -258,6 +275,10 @@ class ImagePreview(QtWidgets.QGraphicsView):
             self.fit()
         event.accept()
 
+    def contextMenuEvent(self, event):
+        self.menuRequested.emit(event.globalPos())
+        event.accept()
+
     def apply_theme(self, mode):
         from .styles import workspace_palette as palette
         self._mode = mode
@@ -293,5 +314,6 @@ class ImagePreview(QtWidgets.QGraphicsView):
         self.scene().clear()
         self._picture = None
         self._path = ''
+        self._requested_path = ''
         for job in self._jobs:
             job.cancel()

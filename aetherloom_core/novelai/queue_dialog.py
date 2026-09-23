@@ -177,6 +177,7 @@ class QueueTableModel(QtCore.QAbstractTableModel):
 class QueueDialog(QtWidgets.QDialog):
     selected = QtCore.pyqtSignal(dict)
     copyRequested = QtCore.pyqtSignal(str)
+    deleteRequested = QtCore.pyqtSignal(str, bool)
     configurationChanged = QtCore.pyqtSignal(int)
 
     def __init__(self, service, parent=None, mode='dark'):
@@ -670,6 +671,8 @@ class QueueDialog(QtWidgets.QDialog):
                     name = ''
                 action = images.addAction(f'{number}. ' + (_text(name, 100) or '图片'))
                 action.triggered.connect(lambda unused=False, value=record: self._open_record(value))
+        from .result_menu import append_task_removal
+        append_task_removal(menu, identity, getattr(self.service, 'can_remove_task', None), self.deleteRequested.emit)
         return menu
 
     def _context_menu(self, position):

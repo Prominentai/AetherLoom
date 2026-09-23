@@ -245,7 +245,13 @@ class HistoryPanel(QtWidgets.QWidget):
                                     lambda message: QtWidgets.QMessageBox.warning(self, '无法定位文件', message))
 
     def remove_record(self, record):
-        self._items = [v for v in self._items if v.get('id') != record.get('id')]
+        self.remove_records([record])
+
+    def remove_records(self, records):
+        identities = {record.get('id') for record in records if record.get('id')}
+        paths = {os.path.normcase(os.path.abspath(record['path'])) for record in records if record.get('path')}
+        self._items = [v for v in self._items if v.get('id') not in identities
+                       and (not v.get('path') or os.path.normcase(os.path.abspath(v['path'])) not in paths)]
         self.turn(0)
         self.itemsChanged.emit(self.items())
 
