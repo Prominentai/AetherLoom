@@ -234,9 +234,9 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
                           QtCore.QEvent.NonClientAreaMouseButtonPress,
                           QtCore.QEvent.NonClientAreaMouseButtonDblClick,
                           QtCore.QEvent.TouchBegin, QtCore.QEvent.Wheel):
-                in_editor = receiver is self or isinstance(receiver, QtWidgets.QWidget) and self.isAncestorOf(receiver)
-                in_popup = (receiver is self._popup or isinstance(receiver, QtWidgets.QWidget)
-                            and self._popup.isAncestorOf(receiver))
+                from aetherloom_core.ui.completion_popup import contains_event_receiver
+                in_editor = contains_event_receiver(self, receiver)
+                in_popup = contains_event_receiver(self._popup, receiver)
                 if not in_editor and not in_popup:
                     self._cancel_suggestions()
             elif kind in (QtCore.QEvent.Move, QtCore.QEvent.Resize) and receiver is self.window():
@@ -349,8 +349,10 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
         if not isinstance(completion, str) or not completion.strip():
             return
         options = self._completion_options()
-        self._insert_prompt_tag(auto_complete.format_tag(completion.strip(),
-            escape_parentheses=options['escape_parentheses'], replace_spaces=options['replace_spaces']))
+        tag = auto_complete.format_tag(completion.strip(),
+            escape_parentheses=options['escape_parentheses'], replace_spaces=options['replace_spaces'])
+        if tag:
+            self._insert_prompt_tag(tag)
 
     def _insert_prompt_tag(self, tag):
         from aetherloom_core.prompt_tokens import completion_insertion

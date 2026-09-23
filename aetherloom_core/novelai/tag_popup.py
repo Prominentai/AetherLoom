@@ -1,6 +1,7 @@
 """Two independent, non-focus-stealing NovelAI tag suggestion columns."""
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from aetherloom_core.ui.completion_popup import contains_event_receiver
 from .styles import workspace_palette
 
 
@@ -354,7 +355,7 @@ class TagSuggestionsPopup(QtWidgets.QFrame):
     def eventFilter(self, receiver, event):
         if self.isVisible():
             kind = event.type()
-            inside = receiver is self or isinstance(receiver, QtWidgets.QWidget) and self.isAncestorOf(receiver)
+            inside = contains_event_receiver(self, receiver)
             if kind == QtCore.QEvent.ApplicationDeactivate:
                 self._dismiss()
             elif kind in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick,

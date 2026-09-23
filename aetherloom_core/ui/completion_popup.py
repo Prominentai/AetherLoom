@@ -9,6 +9,26 @@ from aetherloom_core.rh_ui import palette
 _WORDS = re.compile(r"[^\W_]+", re.UNICODE)
 
 
+def contains_event_receiver(widget, receiver):
+    """Recognize both widget events and their native-window delivery stage.
+
+    Windows first delivers pointer input to a QWidgetWindow, before forwarding
+    it to the list viewport. Treating that QWindow as outside dismisses the
+    popup before its candidate can receive the click or wheel event.
+    """
+    if receiver is widget or (isinstance(receiver, QtWidgets.QWidget)
+                              and widget.isAncestorOf(receiver)):
+        return True
+    if isinstance(receiver, QtGui.QWindow):
+        handle = widget.windowHandle()
+        while receiver is not None:
+            if receiver is handle:
+                return True
+            # Native child windows belong to us; transient owner windows do not.
+            receiver = receiver.parent()
+    return False
+
+
 def _display_tag(text):
     return str(text or '').replace('_', ' ')
 
@@ -244,7 +264,7 @@ class AutocompletePopup(QtWidgets.QListWidget):
     def eventFilter(self, receiver, event):
         if self.isVisible():
             kind = event.type()
-            inside = receiver is self or isinstance(receiver, QtWidgets.QWidget) and self.isAncestorOf(receiver)
+            inside = contains_event_receiver(self, receiver)
             if kind == QtCore.QEvent.ApplicationDeactivate:
                 self.dismiss()
             elif kind in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick,

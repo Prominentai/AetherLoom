@@ -121,7 +121,9 @@ def completion_suffix(following, *, syntax="sd"):
            and following[offset] not in _NEWLINES):
         offset += 1
     stripped = following[offset:]
-    endings = (",", "，", "|", *_NEWLINES)
+    if stripped.startswith(tuple(_NEWLINES)):
+        return ","
+    endings = (",", "，", "|")
     endings += ("}", "]", "::") if syntax == "nai" else (")", "]", ":")
     if stripped.startswith(endings):
         return ""
@@ -170,10 +172,15 @@ def completion_tail(following, *, syntax="sd"):
     index = _skip_tag_spaces(following, end)
     if following[index:index + 1] in (",", "，"):
         finish = _skip_tag_spaces(following, index + 1)
-        tail = following[:finish]
+        # Reuse the comma and its following spacing, not whitespace before it.
+        tail = following[:end] + following[index:finish]
         if finish == len(following) and finish == index + 1:
             tail += " "
         return tail, finish
+    if index < len(following) and following[index] in _NEWLINES:
+        # A line break still needs a tag separator. Keep existing horizontal
+        # spacing after the comma without consuming the next line or indent.
+        return following[:end] + "," + following[end:index], index
     if not completion_suffix(following[end:], syntax=syntax):
         return following[:end], end
     # Preserve existing horizontal whitespace while placing the comma before
@@ -254,5 +261,9 @@ def completion_insertion(text, start, end, tag, *, syntax="sd"):
                 leading = " " if previous == stripped else ""
             else:
                 leading = ", "
+                # At a boundary after a closed weight, put the new separator
+                # directly after the tag instead of retaining "tag) , ".
+                while start > 0 and text[start - 1].isspace() and text[start - 1] not in _NEWLINES:
+                    start -= 1
     tail, consumed = completion_tail(text[end:], syntax=syntax)
     return start, end + consumed, leading + tag + tail

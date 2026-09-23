@@ -27,7 +27,7 @@ def format_tag(word, *, escape_parentheses=True, replace_spaces=False):
     if escape_parentheses:
         text = re.sub(r'(\\*)([()])', lambda match: match[1] +
                       ('\\' if len(match[1]) % 2 == 0 else '') + match[2], text)
-    return text
+    return text.strip()
 
 
 def format_completion(word, following_text, *, escape_parentheses=True, replace_spaces=False):

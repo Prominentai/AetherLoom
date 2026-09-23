@@ -281,7 +281,9 @@ class NovelAIPromptEdit(CompletionTextEdit):
         if (self.isReadOnly() or not self.isEnabled() or self._ime_composing
                 or self._completion_editing or not isinstance(tag, str) or not tag.strip()):
             return
-        self._insert_prompt_tag(tag.strip().replace('_', ' '))
+        tag = tag.replace('_', ' ').strip()
+        if tag:
+            self._insert_prompt_tag(tag)
 
     def request_tags(self):
         self.activated.emit(self)
