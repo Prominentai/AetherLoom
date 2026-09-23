@@ -1,5 +1,4 @@
-"""Zoomable, bounded image preview with a half-opacity mask overlay."""
-import io
+"""Full-resolution selected images, bounded stream frames and mask overlays."""
 import os
 from pathlib import Path
 from PIL import Image, ImageOps
@@ -7,15 +6,44 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from .jobs import Job
 
 
-def preview_bytes(path, mask=None):
-    if Path(path).stat().st_size > 64 * 1024 * 1024:
+MAX_IMAGE_PIXELS = 40_000_000
+MAX_IMAGE_BYTES = 64 * 1024 * 1024
+MAX_STREAM_EDGE = 2200
+
+
+def _read_image(reader, *, stream=False):
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if not size.isValid() or size.isEmpty():
+        raise ValueError('无法读取图片：' + reader.errorString())
+    if size.width() * size.height() > MAX_IMAGE_PIXELS:
+        raise ValueError('图片超过 4000 万像素')
+    if stream and max(size.width(), size.height()) > MAX_STREAM_EDGE:
+        reader.setScaledSize(size.scaled(MAX_STREAM_EDGE, MAX_STREAM_EDGE, QtCore.Qt.KeepAspectRatio))
+    image = reader.read()
+    if image.isNull():
+        raise ValueError('无法读取图片：' + reader.errorString())
+    if image.width() * image.height() > MAX_IMAGE_PIXELS:
+        raise ValueError('图片超过 4000 万像素')
+    if stream and max(image.width(), image.height()) > MAX_STREAM_EDGE:
+        image = image.scaled(MAX_STREAM_EDGE, MAX_STREAM_EDGE, QtCore.Qt.KeepAspectRatio,
+                             QtCore.Qt.SmoothTransformation)
+    # File names such as artwork@2x.png must not change image pixel geometry.
+    image.setDevicePixelRatio(1)
+    return image
+
+
+def preview_image(path, mask=None):
+    """Decode the selected original off the GUI thread, without a thumbnail round trip."""
+    if Path(path).stat().st_size > MAX_IMAGE_BYTES:
         raise ValueError('图片超过 64 MB')
+    if not mask:
+        return _read_image(QtGui.QImageReader(os.fspath(path)))
     with Image.open(path) as source:
-        if source.width * source.height > 40_000_000:
+        if source.width * source.height > MAX_IMAGE_PIXELS:
             raise ValueError('图片超过 4000 万像素')
-        source.draft('RGB', (2200, 2200))
         image = ImageOps.exif_transpose(source).convert('RGBA')
-    if mask:
+    try:
         from aetherloom_core import mask_assets
         orientation = int(mask.get('orientation', 0))
         if orientation:
@@ -23,14 +51,16 @@ def preview_bytes(path, mask=None):
         paint = mask_assets.read_paint(mask, image.size)
         if paint is not None:
             image = Image.alpha_composite(image, paint)
-        selection = mask_assets.read(mask, image.size)
-        layer = Image.new('RGBA', image.size, (60, 171, 239, 0))
-        layer.putalpha(selection.point(lambda value: round(value * .5)))
-        image = Image.alpha_composite(image, layer)
-    image.thumbnail((2200, 2200), Image.Resampling.LANCZOS)
-    buffer = io.BytesIO()
-    image.save(buffer, format='PNG')
-    return buffer.getvalue()
+            paint.close()
+        with mask_assets.read(mask, image.size) as selection, Image.new('RGBA', image.size, (60, 171, 239, 0)) as layer:
+            layer.putalpha(selection.point(lambda value: round(value * .5)))
+            image = Image.alpha_composite(image, layer)
+        raw = image.tobytes('raw', 'RGBA')
+        # Detach from PIL/Python storage before the worker returns to Qt.
+        return QtGui.QImage(raw, image.width, image.height, image.width * 4,
+                            QtGui.QImage.Format_RGBA8888).copy()
+    finally:
+        image.close()
 
 
 class ImagePreview(QtWidgets.QGraphicsView):
@@ -106,7 +136,7 @@ class ImagePreview(QtWidgets.QGraphicsView):
         self.imageChanged.emit()
 
     def snapshot_pixmap(self):
-        """Share the already bounded GUI image; never read or decode the file again."""
+        """Share the selected GUI image; never read or decode the file again."""
         return self._picture.pixmap() if self._picture is not None else QtGui.QPixmap()
 
     def load_path(self, path, mask=None):
@@ -124,11 +154,11 @@ class ImagePreview(QtWidgets.QGraphicsView):
             return
         version, path, mask = self._pending_load
         self._pending_load = None
-        job = Job(lambda unused: preview_bytes(path, mask), self)
+        job = Job(lambda unused: preview_image(path, mask), self)
         self._jobs.add(job)
-        def done(raw):
+        def done(image):
             if not self._closing and version == self._version:
-                self.set_bytes(raw, path)
+                self._set_image(image, path)
         def failed(error):
             if not self._closing and version == self._version:
                 self.set_empty('无法读取图片，请选择其他图片。')
@@ -141,22 +171,23 @@ class ImagePreview(QtWidgets.QGraphicsView):
     def set_bytes(self, raw, path=''):
         if self._closing:
             return
-        self._version += 1
-        self._pending_load = None
+        if len(raw) > MAX_IMAGE_BYTES:
+            return
         buffer = QtCore.QBuffer()
         buffer.setData(raw)
         buffer.open(QtCore.QIODevice.ReadOnly)
         reader = QtGui.QImageReader(buffer)
-        size = reader.size()
-        if not size.isValid() or size.width() * size.height() > 40_000_000:
+        try:
+            image = _read_image(reader, stream=not path)
+        except ValueError:
             return
-        if max(size.width(), size.height()) > 2200:
-            reader.setScaledSize(size.scaled(2200, 2200, QtCore.Qt.KeepAspectRatio))
-        image = reader.read()
-        if image.isNull() or image.width() * image.height() > 40_000_000:
+        self._set_image(image, path)
+
+    def _set_image(self, image, path=''):
+        if self._closing:
             return
-        if max(image.width(), image.height()) > 2200:
-            image = image.scaled(2200, 2200, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        self._version += 1
+        self._pending_load = None
         pixmap = QtGui.QPixmap.fromImage(image)
         # Empty-path frames are updates to the current stream. A new source or
         # the first image after set_empty starts with the whole image visible.
@@ -164,6 +195,8 @@ class ImagePreview(QtWidgets.QGraphicsView):
         if self._picture is None:
             self.scene().clear()
             self._picture = self.scene().addPixmap(pixmap)
+            self._picture.setTransformationMode(QtCore.Qt.SmoothTransformation)
+            self._picture.setShapeMode(QtWidgets.QGraphicsPixmapItem.BoundingRectShape)
         else:
             self._picture.setPixmap(pixmap)
         self._path = path
