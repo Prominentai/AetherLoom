@@ -1,10 +1,10 @@
 """NovelAI prompt editing without changing the application's other editors."""
 import math
+import weakref
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 from aetherloom_core.ui.widgets import CompletionTextEdit
-from aetherloom_core.prompt_tokens import completion_token
 
 
 class NovelAIPromptEdit(CompletionTextEdit):
@@ -70,7 +70,15 @@ class NovelAIPromptEdit(CompletionTextEdit):
             owner = owner.parentWidget()
         return normalize_suggestion_preferences(None)
 
+    def _can_suggest(self):
+        return (self.hasFocus() and self.isEnabled() and not self.isReadOnly()
+                and not getattr(self, '_ime_composing', False)
+                and not getattr(self, '_completion_editing', False))
+
     def _refresh_candidates(self, prefix, *, reset=False):
+        if not self._can_suggest():
+            self._hide_popup()
+            return
         options = self._suggestion_options()
         self._popup.set_sources(options['online'], options['local'])
         context = self._query_context()
@@ -92,6 +100,7 @@ class NovelAIPromptEdit(CompletionTextEdit):
             self._local_tags = []
 
     def reset_tag_suggestions(self):
+        self._manual_selection_context = None
         self._dismissed_prefix = None
         self._dismissed_context = None
         self._candidate_prefix = None
@@ -105,6 +114,10 @@ class NovelAIPromptEdit(CompletionTextEdit):
 
     def show_suggestions(self):
         """Explicit invocation also works with online suggestions disabled."""
+        if (self.isReadOnly() or not self.isEnabled() or self._ime_composing
+                or self._completion_editing):
+            return
+        self._prepare_manual_completion()
         self._dismissed_prefix = None
         self._dismissed_context = None
         self.setFocus(QtCore.Qt.OtherFocusReason)
@@ -116,7 +129,7 @@ class NovelAIPromptEdit(CompletionTextEdit):
         prefix = self._get_prefix_before_cursor()
         options = self._suggestion_options()
         self._popup.set_sources(options['online'], options['local'])
-        if (not self.hasFocus() or self.isReadOnly() or not self.isEnabled()
+        if (not self._can_suggest()
                 or not prefix.strip() or len(prefix.strip()) > 200 or prefix == self._dismissed_prefix
                 or not self._popup.active_source):
             self._hide_popup()
@@ -124,24 +137,19 @@ class NovelAIPromptEdit(CompletionTextEdit):
         self._show_popup()
 
     def _get_prefix_before_cursor(self):
-        cursor = self.textCursor()
-        if cursor.hasSelection():
-            return ''
-        cursor.movePosition(QtGui.QTextCursor.Start, QtGui.QTextCursor.KeepAnchor)
-        token = completion_token(self.toPlainText(), len(cursor.selectedText()), syntax='nai')
-        return token.query if token is not None else ''
+        return super()._get_prefix_before_cursor()
 
     def _query_context(self):
-        return self.textCursor().position(), self.document().revision()
+        return self._completion_context()
 
     def _emit_prefix(self):
-        if self.hasFocus() and not self.isReadOnly():
+        if self._can_suggest():
             self.prefixChanged.emit(self, self._get_prefix_before_cursor())
 
     def _on_text_changed(self):
         self._dismissed_prefix = None
         self._dismissed_context = None
-        if self.hasFocus() and not self.isReadOnly():
+        if self._can_suggest():
             prefix = self._get_prefix_before_cursor()
             self._refresh_candidates(prefix, reset=True)
             self._render_suggestions()
@@ -153,7 +161,7 @@ class NovelAIPromptEdit(CompletionTextEdit):
 
     def _on_cursor_position_changed(self):
         super()._on_cursor_position_changed()
-        if hasattr(self, '_candidate_prefix') and self.hasFocus():
+        if hasattr(self, '_candidate_prefix') and self._can_suggest():
             if self._query_context() != self._dismissed_context:
                 self._dismissed_prefix = None
                 self._dismissed_context = None
@@ -169,7 +177,7 @@ class NovelAIPromptEdit(CompletionTextEdit):
         self._emit_prefix()
 
     def show_online_tags(self, tags, prefix):
-        if (self.hasFocus() and not self.isReadOnly() and self._suggestion_options()['online']
+        if (self._can_suggest() and self._suggestion_options()['online']
                 and prefix and prefix == self._get_prefix_before_cursor()
                 and prefix != self._dismissed_prefix):
             tags = [tag for tag in tags if isinstance(tag, str) and tag.strip()][:10]
@@ -180,7 +188,7 @@ class NovelAIPromptEdit(CompletionTextEdit):
                 self._render_suggestions()
 
     def show_local_tags(self, tags, prefix, revision):
-        if (self.hasFocus() and self._suggestion_options()['local'] and revision == self._local_revision
+        if (self._can_suggest() and self._suggestion_options()['local'] and revision == self._local_revision
                 and prefix == self._get_prefix_before_cursor() and prefix != self._dismissed_prefix):
             self._local_tags = [tag.strip().replace('_', ' ') for tag in tags
                                 if isinstance(tag, str) and tag.strip()][:10]
@@ -190,6 +198,7 @@ class NovelAIPromptEdit(CompletionTextEdit):
     def dismiss_tags(self):
         self._dismissed_prefix = self._get_prefix_before_cursor()
         self._dismissed_context = self._query_context()
+        self._manual_selection_context = None
         self._hide_popup()
 
     def _cancel_suggestions(self):
@@ -198,7 +207,7 @@ class NovelAIPromptEdit(CompletionTextEdit):
         self.dismiss_tags()
 
     def set_tag_suggestion_state(self, state, prefix):
-        if (not self.hasFocus() or self.isReadOnly() or not self.isEnabled()
+        if (not self._can_suggest()
                 or prefix != self._get_prefix_before_cursor() or prefix == self._dismissed_prefix):
             return
         if not prefix.strip() or len(prefix.strip()) > 200:
@@ -211,6 +220,9 @@ class NovelAIPromptEdit(CompletionTextEdit):
         self._render_suggestions()
 
     def keyPressEvent(self, event):
+        if self._ime_composing:
+            super().keyPressEvent(event)
+            return
         if (self._popup.isVisible() and event.modifiers() == QtCore.Qt.AltModifier
                 and event.key() in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right)):
             self._popup.switch_source(-1 if event.key() == QtCore.Qt.Key_Left else 1)
@@ -228,10 +240,12 @@ class NovelAIPromptEdit(CompletionTextEdit):
     def focusOutEvent(self, event):
         self._dismissed_prefix = self._get_prefix_before_cursor()
         self._dismissed_context = self._query_context()
+        self._manual_selection_context = None
         super().focusOutEvent(event)
 
     def _show_popup(self):
-        if self._get_prefix_before_cursor() == self._dismissed_prefix:
+        if not self._can_suggest() or self._get_prefix_before_cursor() == self._dismissed_prefix:
+            self._hide_popup()
             return
         self._popup.set_suggestions(self._local_tags, self._online_tags, self._get_prefix_before_cursor(),
                                    getattr(self.window(), '_theme_mode', 'dark'),
@@ -257,13 +271,15 @@ class NovelAIPromptEdit(CompletionTextEdit):
         self._popup.setFixedSize(width, height)
         self._popup.move(x, max(available.top(), min(y, available.bottom() + 1 - height)))
         self._popup_cursor_position = self.textCursor().position()
+        self._popup_context = self._completion_context()
         self._popup.show()
 
     def _insert_completion(self, completion):
         self.insert_tag(completion)
 
     def insert_tag(self, tag):
-        if self.isReadOnly() or not self.isEnabled() or not isinstance(tag, str) or not tag.strip():
+        if (self.isReadOnly() or not self.isEnabled() or self._ime_composing
+                or self._completion_editing or not isinstance(tag, str) or not tag.strip()):
             return
         self._insert_prompt_tag(tag.strip().replace('_', ' '))
 
@@ -340,9 +356,24 @@ class NovelAIPromptEdit(CompletionTextEdit):
                             + editor_stylesheet(mode, 'novelaiExpandedPrompt'))
         layout = QtWidgets.QVBoxLayout(dialog)
         editor = NovelAIPromptEdit(dialog, auto_height=False)
-        editor._suggestion_preferences_provider = self._suggestion_options
+        source_ref = weakref.ref(self)
+        preferences = self._suggestion_options()
+        def suggestion_preferences():
+            source = source_ref()
+            return source._suggestion_options() if source is not None and not sip.isdeleted(source) else preferences
+        editor._suggestion_preferences_provider = suggestion_preferences
         editor._expanded = True
-        editor.setDocument(self.document())
+        document = self.document()
+        document_parent = document.parent()
+        owner = document_parent
+        while owner is not None and owner is not self:
+            owner = owner.parent()
+        # QTextEdit's private text control normally owns the shared document.
+        # Keep it alive if a character card/source editor is removed mid-dialog.
+        moved_document = owner is self
+        if moved_document:
+            document.setParent(dialog)
+        editor.setDocument(document)
         editor.setReadOnly(self.isReadOnly())
         editor.setTextCursor(self.textCursor())
         editor.activated.connect(self.activated)
@@ -352,17 +383,23 @@ class NovelAIPromptEdit(CompletionTextEdit):
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
+        self.destroyed.connect(dialog.reject)
         self._expanded = True
         editor.setFocus(QtCore.Qt.OtherFocusReason)
         try:
             dialog.exec_()
-            self.setTextCursor(editor.textCursor())
+            if not sip.isdeleted(self) and not sip.isdeleted(editor) and self.document() is document:
+                self.setTextCursor(editor.textCursor())
         finally:
-            self._expanded = False
-            self.document().setTextWidth(self.viewport().width())
-            self.activated.emit(self)
-            self._schedule_height()
-            dialog.deleteLater()
+            if not sip.isdeleted(self):
+                self._expanded = False
+                if moved_document and not sip.isdeleted(document) and self.document() is document:
+                    document.setParent(document_parent)
+                self.document().setTextWidth(self.viewport().width())
+                self.activated.emit(self)
+                self._schedule_height()
+            if not sip.isdeleted(dialog):
+                dialog.deleteLater()
 
 
 class PromptNavigation:

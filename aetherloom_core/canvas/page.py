@@ -5,7 +5,7 @@ import os
 import uuid
 from pathlib import Path
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 from aetherloom_core.paths import current_dir, resource_path
 from aetherloom_core.prompt_history import TextSnapshot
@@ -1850,8 +1850,16 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
             for key, value in texts.items():
                 identity = (self.document['id'], node['id'], key)
                 entries = self.histories.setdefault(identity, [])
-                active = next((editor._prompt_history for editor in self.findChildren(QtWidgets.QTextEdit)
-                               if hasattr(editor, '_prompt_history') and editor._prompt_history.entries is entries), None)
+                editors = self.findChildren(QtWidgets.QTextEdit)
+                document = self.histories.get(('text_document',) + identity)
+                if isinstance(document, QtGui.QTextDocument) and not sip.isdeleted(document):
+                    # Graphics-proxy editors are not QWidget descendants of
+                    # this page, but they are registered on the shared text.
+                    editors.extend(getattr(document, '_canvas_editors', ()))
+                active = next((editor._prompt_history for editor in editors
+                               if not sip.isdeleted(editor) and hasattr(editor, '_prompt_history')
+                               and not editor._prompt_history.closed
+                               and editor._prompt_history.entries is entries), None)
                 if active:
                     active.record_run()
                 else:

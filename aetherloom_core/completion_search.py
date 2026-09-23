@@ -61,6 +61,7 @@ class CompletionSearch(QtCore.QObject):
         if (key != self._latest or editor is None or sip.isdeleted(editor)
                 or not editor.hasFocus() or not editor.isVisible() or editor.isReadOnly()
                 or not editor.isEnabled() or editor._manager is not manager
+                or editor._ime_composing or editor._completion_editing
                 or editor._get_prefix_before_cursor() != key[5]
                 or _key(editor, key[5], key[7]) != key):
             return None

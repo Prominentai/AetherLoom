@@ -1,7 +1,8 @@
 """Per-editor text snapshots for the current client session; no disk storage."""
 from dataclasses import dataclass
+import weakref
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 
 @dataclass(frozen=True)
@@ -20,8 +21,21 @@ class PromptHistory(QtCore.QObject):
         self.entries = entries if entries is not None else []
         if not self.entries:
             self.entries.append(TextSnapshot(editor.toPlainText(), 'initial'))
-        self.index = len(self.entries) - 1
+        current = editor.toPlainText()
+        self.index = next((index for index in range(len(self.entries) - 1, -1, -1)
+                           if self.entries[index].text == current), len(self.entries) - 1)
         self.closed = False
+        document = editor.document()
+        if not hasattr(document, '_prompt_histories'):
+            document._prompt_histories = weakref.WeakSet()
+        peers = [history for history in document._prompt_histories
+                 if not sip.isdeleted(history) and not history.closed
+                 and not sip.isdeleted(history.editor)
+                 and history.entries is self.entries
+                 and history.editor.document() is document]
+        if peers:
+            self.index = peers[0].index
+        document._prompt_histories.add(self)
         editor._prompt_history = self
         editor.textChanged.connect(self.update_buttons)
         back_button.clicked.connect(self.back)
@@ -29,6 +43,20 @@ class PromptHistory(QtCore.QObject):
         back_button.setToolTip('回退到上一个运行、翻译、扩写或润色文本（本次会话）')
         forward_button.setToolTip('前进到下一个文本快照（本次会话）')
         self.update_buttons()
+
+    def _sync_index(self, index):
+        # Inline and inspector views share one document. Their navigation
+        # position must move together without retaining destroyed editors.
+        document = self.editor.document()
+        peers = [history for history in getattr(document, '_prompt_histories', ())
+                 if not sip.isdeleted(history) and not sip.isdeleted(history.editor)
+                 and history.entries is self.entries
+                 and history.editor.document() is document]
+        if self not in peers:
+            peers.append(self)
+        for history in peers:
+            history.index = index
+            history.update_buttons()
 
     def record(self, text=None, source='edit', *, force=False):
         if self.closed:
@@ -39,8 +67,7 @@ class PromptHistory(QtCore.QObject):
             return
         # Preserve earlier run snapshots even after navigating back and editing.
         self.entries.append(TextSnapshot(text, source))
-        self.index = len(self.entries) - 1
-        self.update_buttons()
+        self._sync_index(len(self.entries) - 1)
 
     def record_run(self):
         self.record(source='run', force=True)
@@ -71,11 +98,11 @@ class PromptHistory(QtCore.QObject):
             # Save the current draft before leaving it; Forward can recover it.
             self.entries.append(TextSnapshot(current, 'draft'))
         elif self.index > 0:
-            self.index -= 1
+            self._sync_index(self.index - 1)
         else:
             return
         self._replace(self.entries[self.index].text)
-        self.update_buttons()
+        self._sync_index(self.index)
 
     def forward(self):
         if self.closed or self.index >= len(self.entries) - 1:
@@ -83,9 +110,9 @@ class PromptHistory(QtCore.QObject):
         current = self.editor.toPlainText()
         if current != self.entries[self.index].text:
             self.entries.append(TextSnapshot(current, 'draft'))
-        self.index += 1
+        self._sync_index(self.index + 1)
         self._replace(self.entries[self.index].text)
-        self.update_buttons()
+        self._sync_index(self.index)
 
     def update_buttons(self):
         active = not self.closed and bool(self.entries)
@@ -96,8 +123,7 @@ class PromptHistory(QtCore.QObject):
     def close(self):
         self.closed = True
         self.entries.clear()
-        self.index = -1
-        self.update_buttons()
+        self._sync_index(-1)
 
 
 def record_run_inputs(node_widgets):

@@ -41,6 +41,17 @@ def _terms(text):
     return [literal] if literal else []
 
 
+def matches_tag_query(query, tag):
+    """Whether every query word prefixes a tag word, as in local search.
+
+    Completion uses the same space/underscore, case and word-order rules to
+    recognize text already entered, without consuming unrelated tag content.
+    """
+    terms, words = _terms(query), _terms(tag)
+    return bool(terms and words) and all(
+        any(word.startswith(term) for word in words) for term in terms)
+
+
 def _word(entry):
     # Actual AutocompleteManager rows are (word, count), already sorted by
     # descending frequency. String rows make small standalone/mock lists useful.

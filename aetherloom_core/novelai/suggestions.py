@@ -56,7 +56,10 @@ class TagSuggestions(QtCore.QObject):
     def request(self, editor, prefix):
         self._pending = None
         self._timer.stop()
-        if self._closed or sip.isdeleted(editor) or not editor.hasFocus():
+        if (self._closed or sip.isdeleted(editor) or not editor.hasFocus()
+                or not editor.isVisible() or editor.isReadOnly() or not editor.isEnabled()
+                or editor._ime_composing or editor._completion_editing
+                or prefix == editor._dismissed_prefix):
             return
         if not self._preferences()['online']:
             return
@@ -65,7 +68,7 @@ class TagSuggestions(QtCore.QObject):
         model = self.page.controls.model.currentData()
         mode = self.page.controls.dataset_mode.currentData()
         key = (hashlib.sha256(token.encode()).hexdigest() if token else None, model, mode, prefix, self._revision)
-        request = (weakref.ref(editor), editor.textCursor().position(), key, token)
+        request = (weakref.ref(editor), editor._completion_context(), key, token)
         if not keys:
             self._set_state(request, 'missing_key')
             return  # Local completion remains available without a connection.
@@ -83,11 +86,14 @@ class TagSuggestions(QtCore.QObject):
             self._timer.start()
 
     def _valid_editor(self, request):
-        editor_ref, position, key, _ = request
+        editor_ref, context, key, _ = request
         editor = editor_ref()
         if (self._closed or not self._preferences()['online'] or key[4] != self._revision
                 or editor is None or sip.isdeleted(editor) or not editor.hasFocus()
-                or editor.textCursor().position() != position
+                or not editor.isVisible() or editor.isReadOnly() or not editor.isEnabled()
+                or editor._ime_composing or editor._completion_editing
+                or editor._dismissed_prefix == key[3]
+                or editor._completion_context() != context
                 or editor._get_prefix_before_cursor() != key[3]
                 or self.page.controls.model.currentData() != key[1]
                 or self.page.controls.dataset_mode.currentData() != key[2]):

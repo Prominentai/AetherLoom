@@ -22,7 +22,10 @@ class LocalSuggestions(QtCore.QObject):
         parent.aboutToQuit.connect(self.close)
 
     def request(self, editor, prefix):
-        if self._closed or not 1 <= len(prefix.strip()) <= 200 or editor._manager is None:
+        if (self._closed or not 1 <= len(prefix.strip()) <= 200 or editor._manager is None
+                or not editor.hasFocus() or not editor.isVisible() or editor.isReadOnly()
+                or not editor.isEnabled() or editor._ime_composing or editor._completion_editing
+                or editor._dismissed_prefix == prefix):
             return
         key = (id(editor), editor.textCursor().position(), prefix, editor._local_revision,
                id(editor._manager), vocabulary_version(editor._manager))
@@ -37,6 +40,7 @@ class LocalSuggestions(QtCore.QObject):
         editor = editor_ref()
         if (sip.isdeleted(self) or self._closed or key != self._latest_key or editor is None or sip.isdeleted(editor)
                 or not editor.hasFocus() or editor.isReadOnly() or not editor.isEnabled()
+                or not editor.isVisible() or editor._ime_composing or editor._completion_editing
                 or editor.textCursor().position() != key[1]
                 or editor._get_prefix_before_cursor() != key[2]
                 or editor._local_revision != key[3] or editor._manager is not manager
