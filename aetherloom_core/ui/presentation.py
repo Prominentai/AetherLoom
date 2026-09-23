@@ -656,6 +656,9 @@ class PresentationMixin:
         canvas = getattr(self, 'canvas_page', None)
         if canvas is not None:
             canvas.refresh_theme()
+        novelai = getattr(self, 'novelai_page', None)
+        if novelai is not None:
+            novelai.apply_theme()
         css = self._themes.get(mode)
         if css:
             self.setStyleSheet(css)

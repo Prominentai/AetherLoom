@@ -66,6 +66,10 @@ def persist_credentials(path, store, managed_keys):
         for name in ('runninghub_cn', 'runninghub_ai'):
             if name in updates or name in managed_keys:
                 updates[name] = _merge_rh_record(merged.get(name), updates.get(name))
+        # A single-key edit in API management must preserve the remaining NovelAI keys.
+        # An explicit api_keys list replaces the pool; omitting a managed record clears it.
+        if 'novelai' in updates:
+            updates['novelai'] = _merge_rh_record(merged.get('novelai'), updates['novelai'])
         for key in managed_keys:
             merged.pop(key, None)
         merged.update(updates)

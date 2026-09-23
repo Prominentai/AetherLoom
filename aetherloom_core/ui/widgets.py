@@ -7,9 +7,13 @@ from aetherloom_core.paths import current_dir
 
 class CompletionTextEdit(QtWidgets.QTextEdit):
     """QTextEdit 扩展：内置基于 `auto_complete` 的弹出补全列表。"""
+    uses_local_completion_service = True
+    prompt_weight_syntax = 'sd'
+
     def __init__(self, parent=None, current_dir=None, limit=50):
         super().__init__(parent)
         self.setCursorWidth(4)
+        self.setToolTip('选中文字后按 Ctrl＋↑ / Ctrl＋↓ 调整提示词权重，每次 0.05。')
         try:
             # manager will load autocomplete.txt from current_dir
             self._manager = auto_complete.get_manager(current_dir or globals().get('current_dir'))
@@ -17,8 +21,13 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
             self._manager = None
         self._limit = limit or 20
         self._popup = auto_complete.AutocompletePopup(self)
-        self._popup.setUniformItemSizes(True)
+        self._popup.setUniformItemSizes(False)
         self._popup_cursor_position = None
+        self._completion_revision = 0
+        self._completion_timer = QtCore.QTimer(self)
+        self._completion_timer.setSingleShot(True)
+        self._completion_timer.timeout.connect(self._request_completion)
+        self._popup.dismissed.connect(self._hide_popup)
         self._popup.itemClicked.connect(self._on_item_clicked)
         self.textChanged.connect(self._on_text_changed)
         self.cursorPositionChanged.connect(self._on_cursor_position_changed)
@@ -39,9 +48,75 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
 
     def createStandardContextMenu(self, *args):
         menu = super().createStandardContextMenu(*args)
+        menu.addSeparator()
+        enabled = self._can_adjust_prompt_weight()
+        example = '1.05::文本::' if self.prompt_weight_syntax == 'nai' else '(文本:1.05)'
+        for label, shortcut, direction in (('提高提示词权重', 'Ctrl+Up', 1),
+                                            ('降低提示词权重', 'Ctrl+Down', -1)):
+            action = menu.addAction(label)
+            action.setShortcut(QtGui.QKeySequence(shortcut))
+            action.setEnabled(enabled)
+            action.setToolTip('调整所选文本的权重，每次 0.05；格式：' + example)
+            action.triggered.connect(lambda _checked=False, delta=direction: self.adjust_prompt_weight(delta))
         from aetherloom_core.selection_text_tools import add_actions
         add_actions(self, menu)
         return menu
+
+    def _can_adjust_prompt_weight(self):
+        return (self.isEnabled() and not self.isReadOnly() and self.textCursor().hasSelection()
+                and bool(self.textCursor().selectedText().strip()))
+
+    @staticmethod
+    def _is_weight_shortcut(event):
+        modifiers = event.modifiers() & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier |
+                                         QtCore.Qt.AltModifier | QtCore.Qt.MetaModifier)
+        return (modifiers == QtCore.Qt.ControlModifier and
+                event.key() in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down))
+
+    def event(self, event):
+        # A selected prompt takes precedence over custom window/canvas actions.
+        if (event.type() == QtCore.QEvent.ShortcutOverride and self._is_weight_shortcut(event)
+                and self._can_adjust_prompt_weight()):
+            event.accept()
+            return True
+        return super().event(event)
+
+    def adjust_prompt_weight(self, direction):
+        if not self._can_adjust_prompt_weight():
+            return False
+        from aetherloom_core.prompt_weights import adjust_weight
+        cursor = self.textCursor()
+        reverse = cursor.position() < cursor.anchor()
+        text = self.toPlainText()
+        before = QtGui.QTextCursor(cursor)
+        before.setPosition(0)
+        before.setPosition(cursor.selectionStart(), QtGui.QTextCursor.KeepAnchor)
+        start = len(before.selectedText())
+        before.setPosition(0)
+        before.setPosition(cursor.selectionEnd(), QtGui.QTextCursor.KeepAnchor)
+        end = len(before.selectedText())
+        edit = adjust_weight(text, start, end, direction, syntax=self.prompt_weight_syntax)
+        self._cancel_suggestions()
+        if edit is None:
+            QtWidgets.QToolTip.showText(
+                self._completion_global_point(self.cursorRect().bottomLeft()),
+                '当前选区无法安全调整权重，请分别选择完整的权重组或其中的正文。',
+                self, QtCore.QRect(), 2500)
+            return False
+        begin = len(text[:edit.start].encode('utf-16-le')) // 2
+        finish = len(text[:edit.end].encode('utf-16-le')) // 2
+        selection_start = begin + len(edit.replacement[:edit.selection_start].encode('utf-16-le')) // 2
+        selection_end = begin + len(edit.replacement[:edit.selection_end].encode('utf-16-le')) // 2
+        cursor.beginEditBlock()
+        cursor.setPosition(begin)
+        cursor.setPosition(finish, QtGui.QTextCursor.KeepAnchor)
+        cursor.insertText(edit.replacement)
+        cursor.setPosition(selection_end if reverse else selection_start)
+        cursor.setPosition(selection_start if reverse else selection_end, QtGui.QTextCursor.KeepAnchor)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        self._cancel_suggestions()
+        return True
 
     def contextMenuEvent(self, event):
         self._hide_popup()
@@ -61,49 +136,86 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
             owner = owner.parentWidget()
         return auto_complete.completion_options()
 
-    def _get_prefix_before_cursor(self):
+    def _completion_token(self):
+        from aetherloom_core.prompt_tokens import completion_token
         cur = self.textCursor()
         if cur.hasSelection():
-            return ''
-        # QTextCursor positions count UTF-16 units, while Python indexes Unicode
-        # code points. Let Qt extract the text to avoid slicing at the wrong emoji.
-        cur.movePosition(QtGui.QTextCursor.StartOfBlock, QtGui.QTextCursor.KeepAnchor)
-        match = re.search(r'([^,，\s]+)$', cur.selectedText())
-        return match.group(1) if match else ''
+            return None
+        cur.movePosition(QtGui.QTextCursor.Start, QtGui.QTextCursor.KeepAnchor)
+        return completion_token(self.toPlainText(), len(cur.selectedText()), syntax='sd')
+
+    def _get_prefix_before_cursor(self):
+        token = self._completion_token()
+        return token.query if token else ''
 
     def _hide_popup(self, *args):
+        self._completion_revision += 1
+        self._completion_timer.stop()
         self._popup.hide()
         self._popup_cursor_position = None
+
+    def _cancel_suggestions(self):
+        self._hide_popup()
+
+    def eventFilter(self, receiver, event):
+        # Listen while the editor is focused, including the time before the
+        # asynchronous popup appears. A no-focus outside click must still
+        # cancel a pending query rather than letting it reopen the popup.
+        if self.hasFocus():
+            kind = event.type()
+            if kind == QtCore.QEvent.KeyPress and event.key() == QtCore.Qt.Key_Escape:
+                visible = self._popup.isVisible()
+                self._cancel_suggestions()
+                if visible:
+                    event.accept()
+                    return True
+            elif kind in (QtCore.QEvent.ApplicationDeactivate,):
+                self._cancel_suggestions()
+            elif kind in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick,
+                          QtCore.QEvent.NonClientAreaMouseButtonPress,
+                          QtCore.QEvent.NonClientAreaMouseButtonDblClick,
+                          QtCore.QEvent.TouchBegin, QtCore.QEvent.Wheel):
+                in_editor = receiver is self or isinstance(receiver, QtWidgets.QWidget) and self.isAncestorOf(receiver)
+                in_popup = (receiver is self._popup or isinstance(receiver, QtWidgets.QWidget)
+                            and self._popup.isAncestorOf(receiver))
+                if not in_editor and not in_popup:
+                    self._cancel_suggestions()
+            elif kind in (QtCore.QEvent.Move, QtCore.QEvent.Resize) and receiver is self.window():
+                self._cancel_suggestions()
+        return super().eventFilter(receiver, event)
 
     def _on_cursor_position_changed(self):
         cur = self.textCursor()
         if cur.hasSelection() or cur.position() != self._popup_cursor_position:
             self._hide_popup()
+        if self.uses_local_completion_service:
+            self._queue_completion()
 
     def _hide_popup_if_unfocused(self):
         if not self.hasFocus():
             self._hide_popup()
 
     def _on_text_changed(self):
-        # only show when widget has focus
-        try:
-            if not self.hasFocus() or self.isReadOnly():
-                self._hide_popup()
-                return
-            prefix = self._get_prefix_before_cursor()
-            if not prefix or not self._manager:
-                self._hide_popup()
-                return
-            matches = self._manager.get_matches(prefix, limit=max(self._limit, self._completion_options()['visible_tags']))
-            if not matches:
-                self._hide_popup()
-                return
-            self._show_popup(matches)
-        except Exception:
-            try:
-                self._hide_popup()
-            except Exception:
-                pass
+        self._queue_completion()
+
+    def _queue_completion(self):
+        self._hide_popup()
+        if (self.uses_local_completion_service and self.hasFocus() and not self.isReadOnly()
+                and self.isEnabled() and self._manager):
+            self._completion_timer.start(90)
+
+    def _request_completion(self):
+        if not self.hasFocus() or self.isReadOnly() or not self.isEnabled():
+            return
+        prefix = self._get_prefix_before_cursor()
+        if not 1 <= len(prefix) <= 200 or not self._manager:
+            return
+        from aetherloom_core.completion_search import request_matches
+        request_matches(self, prefix, max(self._limit, self._completion_options()['visible_tags']))
+
+    def show_suggestions(self):
+        self.setFocus(QtCore.Qt.OtherFocusReason)
+        self._queue_completion()
 
     def _show_popup(self, matches):
         if not matches:
@@ -115,20 +227,15 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
 
         # Cursor rectangles are relative to the viewport, not the editor frame.
         rect = self.cursorRect()
-        below = self.viewport().mapToGlobal(rect.bottomLeft()) + QtCore.QPoint(0, 1)
-        above = self.viewport().mapToGlobal(rect.topLeft())
+        below = self._completion_global_point(rect.bottomLeft()) + QtCore.QPoint(0, 1)
+        above = self._completion_global_point(rect.topLeft())
         screen = QtWidgets.QApplication.screenAt(below) or QtWidgets.QApplication.primaryScreen()
         if screen is None:
             self._hide_popup()
             return
         available = screen.availableGeometry()
-        frame = self._popup.frameWidth() * 2
-        scrollbar = self._popup.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent)
-        width = min(max(self._popup.sizeHintForColumn(0) + frame + scrollbar, 360),
-                    560, available.width())
-        row_height = max(1, self._popup.sizeHintForRow(0))
-        desired_height = (row_height * min(len(matches), self._completion_options()['visible_tags'])
-                          + frame + self._popup.extra_height)
+        width = min(max(self.width(), 360), 560, available.width())
+        desired_height = self._popup.layout_height(width, self._completion_options()['visible_tags'])
         below_space = max(0, available.bottom() + 1 - below.y())
         above_space = max(0, above.y() - available.top())
         if below_space >= desired_height or below_space >= above_space:
@@ -145,6 +252,22 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
         self._popup_cursor_position = self.textCursor().position()
         self._popup.show()
 
+    def _completion_global_point(self, point):
+        # Embedded canvas widgets need the view transform as well as the
+        # widget offset. QWidget.mapToGlobal alone drops part of that scaling.
+        owner = self
+        while owner is not None:
+            proxy = owner.graphicsProxyWidget()
+            if proxy is not None and proxy.scene() is not None:
+                views = [view for view in proxy.scene().views() if view.isVisible()]
+                if views:
+                    local = self.viewport().mapTo(owner, point)
+                    scene_point = proxy.mapToScene(QtCore.QPointF(local))
+                    view = views[0]
+                    return view.viewport().mapToGlobal(view.mapFromScene(scene_point))
+            owner = owner.parentWidget()
+        return self.viewport().mapToGlobal(point)
+
     def _on_item_clicked(self, item):
         try:
             if item is None:
@@ -154,20 +277,19 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
             pass
 
     def _insert_completion(self, completion):
-        prefix = self._get_prefix_before_cursor()
-        if not prefix or self.isReadOnly():
+        token = self._completion_token()
+        if token is None or self.isReadOnly() or not self.isEnabled():
             self._hide_popup()
             return
         cur = self.textCursor()
-        pos = cur.position()
-        prefix_length = len(prefix.encode('utf-16-le')) // 2
+        text = self.toPlainText()
+        start = len(text[:token.start].encode('utf-16-le')) // 2
+        end = len(text[:token.end].encode('utf-16-le')) // 2
         cur.beginEditBlock()
-        cur.setPosition(pos - prefix_length, QtGui.QTextCursor.MoveAnchor)
-        cur.setPosition(pos, QtGui.QTextCursor.KeepAnchor)
-        following = self.textCursor()
-        following.movePosition(QtGui.QTextCursor.End, QtGui.QTextCursor.KeepAnchor)
+        cur.setPosition(start, QtGui.QTextCursor.MoveAnchor)
+        cur.setPosition(end, QtGui.QTextCursor.KeepAnchor)
         options = self._completion_options()
-        cur.insertText(auto_complete.format_completion(completion, following.selectedText(),
+        cur.insertText(auto_complete.format_completion(completion, text[token.end:],
                        escape_parentheses=options['escape_parentheses'], replace_spaces=options['replace_spaces']))
         cur.endEditBlock()
         self.setTextCursor(cur)
@@ -175,6 +297,15 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
         self.setFocus()
 
     def keyPressEvent(self, event):
+        if self._is_weight_shortcut(event) and self._can_adjust_prompt_weight():
+            self.adjust_prompt_weight(1 if event.key() == QtCore.Qt.Key_Up else -1)
+            event.accept()
+            return
+        if (self.uses_local_completion_service and event.key() == QtCore.Qt.Key_Space
+                and event.modifiers() == QtCore.Qt.ControlModifier):
+            self.show_suggestions()
+            event.accept()
+            return
         try:
             modifiers = event.modifiers() & (QtCore.Qt.ShiftModifier | QtCore.Qt.ControlModifier |
                                              QtCore.Qt.AltModifier | QtCore.Qt.MetaModifier)
@@ -199,14 +330,19 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
         super().keyPressEvent(event)
 
     def focusOutEvent(self, event):
+        QtWidgets.QApplication.instance().removeEventFilter(self)
         self._focus_out_timer.start()
         super().focusOutEvent(event)
 
     def focusInEvent(self, event):
+        QtWidgets.QApplication.instance().installEventFilter(self)
         self._focus_out_timer.stop()
         super().focusInEvent(event)
+        if self.uses_local_completion_service:
+            self._queue_completion()
 
     def hideEvent(self, event):
+        QtWidgets.QApplication.instance().removeEventFilter(self)
         self._hide_popup()
         super().hideEvent(event)
 

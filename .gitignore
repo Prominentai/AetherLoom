@@ -62,3 +62,6 @@ docs/
 archives/
 .idea/
 .vscode/
+
+# Local NovelAI settings, references and history
+/novelai/

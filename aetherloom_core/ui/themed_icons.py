@@ -35,6 +35,7 @@ def refresh_navigation(owner, mode):
     colors = {key: colors[key] for key in ('muted', 'text', 'accent')}
     for name, file in [('home_btn', 'home_icon'), ('runninghub_btn', 'runninghub'),
                        ('rh_models_btn', 'rh_models'), ('canvas_btn', 'canvas'),
+                       ('novelai_btn', 'novelai'),
                        ('decode_btn', 'local_decoding'), ('local_btn', 'local_files'),
                        ('api_btn', 'api'), ('settings_btn', 'setting')]:
         button = getattr(owner, name, None)

@@ -93,6 +93,9 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
 
     def __init__(self):
         super().__init__()
+        # Release owned Qt widgets while QApplication is still alive. Leaving the
+        # full window tree for interpreter shutdown can crash native Qt teardown.
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         self.setWindowTitle(f'AetherLoom v{__version__}')
         # threadpool and thumbnail cache for background thumbnail generation
         try:
@@ -1966,6 +1969,10 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
 
 
     def closeEvent(self, event):
+        novelai = getattr(self, 'novelai_page', None)
+        if novelai is not None and not novelai.can_close():
+            event.ignore()
+            return
         connections = getattr(self, '_rh_connection_settings', None)
         if connections is not None:
             try:
@@ -1974,6 +1981,9 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
                 self._show_toast('连接设置未能保存，请检查 apikeys.json 是否可写。', 5000)
         clear_histories(self)
         self._closing = True
+        novelai = getattr(self, 'novelai_page', None)
+        if novelai is not None:
+            novelai.shutdown()
         cache_cleaner = getattr(self, '_canvas_cache_cleaner', None)
         if cache_cleaner is not None:cache_cleaner.close()
         home_page = getattr(self, 'home_page', None)
