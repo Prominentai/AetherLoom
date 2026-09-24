@@ -8,7 +8,7 @@ import os
 import re
 import uuid
 from pathlib import Path
-from . import collections, utility_nodes
+from . import collections, utility_nodes, novelai_nodes
 
 
 VERSION = 1
@@ -16,20 +16,21 @@ MODEL_KINDS = {'llm_model': 'llm', 'vision_model': 'vision', 'image_model': 'tex
 NODE_CATEGORIES = {'input': '素材输入', 'app': 'RH 应用', 'standard': 'RH 标准模型', 'rh_llm': 'RH LLM', 'api': 'API 节点', 'collection': 'List / Batch', 'output': '处理与输出'}
 MERGE_KINDS = frozenset({'merge_batch', 'merge_list'})
 DYNAMIC_INPUT_KINDS = MERGE_KINDS | {'list_select'}
-LIBRARY_KINDS = ('int', 'float', 'text', 'text_file', 'image', 'video', 'audio', *MODEL_KINDS, 'merge_list', 'list_select', 'list2batch', 'merge_batch', 'batch_select', 'rebatch', 'batch2list', 'select', 'filename', 'rename', 'preview', *utility_nodes.SCHEMAS)
+LIBRARY_KINDS = ('int', 'float', 'text', 'text_file', 'image', 'video', 'audio', *MODEL_KINDS, *novelai_nodes.KIND_ACTIONS, 'merge_list', 'list_select', 'list2batch', 'merge_batch', 'batch_select', 'rebatch', 'batch2list', 'select', 'filename', 'rename', 'preview', *utility_nodes.SCHEMAS)
 NODE_CATEGORIES.update(image_tools='图像处理', text_tools='文本处理', utility='画布辅助', mask_tools='遮罩', video_tools='视频处理')
 
 
 def node_category(kind):
     if kind in utility_nodes.KINDS:return utility_nodes.SCHEMAS[kind][1]
     if kind in collections.KINDS:return 'collection'
-    if kind in MODEL_KINDS:return 'api'
+    if kind in MODEL_KINDS or kind in novelai_nodes.KINDS:return 'api'
     if kind == 'app':return 'app'
     return 'output' if kind in DYNAMIC_INPUT_KINDS or kind in ('list2batch', 'batch2list', 'select', 'preview', 'filename', 'rename') else 'input'
 
 
 KINDS = frozenset({'app', 'image', 'video', 'audio', 'text', 'text_file', 'int', 'float', 'list2batch', 'batch2list', 'select', 'preview', 'filename', 'rename'} | set(MODEL_KINDS) | DYNAMIC_INPUT_KINDS | collections.KINDS)
 KINDS |= utility_nodes.KINDS
+KINDS |= novelai_nodes.KINDS
 NUMERIC_TYPES = frozenset({'int', 'float', 'number'})
 VALUE_TYPES = NUMERIC_TYPES | {'boolean', 'enum', 'scalar'}
 MEDIA = frozenset({'image', 'video', 'audio'})
@@ -40,7 +41,8 @@ MEDIA_SUFFIXES = {
 }
 TITLES = {'app': 'App', 'image': '图像导入', 'video': '视频导入',
           'audio': '音频导入', 'text': '文本', 'select': '内容过滤', 'preview': '预览 / 保存'}
-TITLES.update(llm_model='大语言模型', vision_model='视觉模型', image_model='图像生成', edit_model='图像编辑')
+TITLES.update(llm_model='文本处理 · LLM', vision_model='视觉模型', image_model='图像生成', edit_model='图像编辑')
+NODE_DESCRIPTIONS = {'llm_model': '大语言模型：翻译成中文或英文、润色、扩写，或使用自定义系统提示词处理文本。'}
 TITLES.update(int='整数 INT', float='浮点数 FLOAT')
 TITLES['text_file'] = '文本文件导入'
 TITLES.update(filename='读取文件名', rename='文件重命名')
@@ -49,6 +51,7 @@ TITLES['batch2list'] = 'Batch 转列表'
 TITLES.update(merge_batch='合成 Batch', merge_list='合成列表')
 TITLES['list_select'] = '列表取项'
 TITLES.update(collections.TITLES)
+TITLES.update(novelai_nodes.TITLES)
 TITLES.update({kind: schema[0] for kind, schema in utility_nodes.SCHEMAS.items()})
 RUNTIME_FIELDS = frozenset({'results', 'result_signatures', 'fingerprint', 'status', 'progress', 'node_progress',
                             'message', 'error', 'generation', 'cached', 'stale', 'activated', 'bypassed', 'selection_token', 'selection_round',
@@ -189,6 +192,8 @@ def new_node(kind, title=None, **values):
             'x': 0, 'y': 0, 'params': {}, 'filter_repeats': False,
             'decode_settings': {}, 'results': [], 'fingerprint': '', 'status': 'IDLE'}
     node.update(copy.deepcopy(values))
+    if kind in novelai_nodes.KINDS:
+        for key, value in novelai_nodes.default_params(kind).items():node['params'].setdefault(key, value)
     if kind in utility_nodes.KINDS:
         for key, value in utility_nodes.defaults(kind).items():node['params'].setdefault(key, value)
     if kind == 'app' and not supports_local_decode(node):node['decode_settings'] = {}
@@ -347,6 +352,7 @@ def _input_ports(node):
     if unknown_node(node):
         return [dict(key=key,label=key,type='any') for key in node.get('_ui_unknown_inputs', [])]
     if node.get('kind') in utility_nodes.KINDS:return utility_nodes.inputs(node)
+    if node.get('kind') in novelai_nodes.KINDS:return novelai_nodes.inputs(node)
     if node.get('kind') == 'text_file':
         return [dict(key='path', label='文件 / 文件夹路径', type='text')]
     if node.get('kind') in ('batch_select', 'rebatch'):
@@ -362,7 +368,7 @@ def _input_ports(node):
                       {'key': 'extension', 'label': '扩展名', 'type': 'text'}]
         return ports
     if node.get('kind') in MODEL_KINDS:
-        ports = [{'key': 'prompt', 'label': '提示词', 'type': 'text_input'}]
+        ports = [{'key': 'prompt', 'label': '文本' if node['kind'] == 'llm_model' else '提示词', 'type': 'text_input'}]
         if node['kind'] in ('vision_model', 'edit_model'):
             ports.append({'key': 'image', 'label': '图像', 'type': 'image_input'})
         return ports
@@ -506,7 +512,9 @@ def port_containers(document):
         if kind in ('rename', 'select', 'preview', 'batch_select', 'rebatch', 'list2batch', 'batch2list'):
             inherited = set(streams.get('value', unknown))
         selected = node.get('params', {}).get('type', 'any')
-        if node.get('bypass') and kind in ('image_untile', 'image_grid', 'edit_model'):
+        if node.get('bypass') and kind in novelai_nodes.KINDS:
+            shapes = set(streams.get('image', streams.get('references', unknown)))
+        elif node.get('bypass') and kind in ('image_untile', 'image_grid', 'edit_model'):
             shapes = set(streams.get('image' if kind == 'edit_model' else 'images', unknown))
         elif node.get('bypass') and kind in collections.KINDS | {'rename', 'select', 'preview', 'text_join'}:
             shapes = inherited
@@ -569,6 +577,7 @@ def port_colors(document):
 
 def output_types(node):
     kind = node.get('kind')
+    if kind in novelai_nodes.KINDS:return {'image'}
     module = utility_nodes.advanced_nodes.LOCAL_NODES.get(kind)
     if module is not None:
         types = getattr(module, 'OUTPUT_TYPES', {}).get(kind)
@@ -694,6 +703,7 @@ def validate_node(node):
         raise ValueError('忽略节点设置格式错误')
     if node['kind'] in ('int', 'float'):primitive_value(node)
     if node['kind'] in utility_nodes.KINDS:utility_nodes.validate(node)
+    if node['kind'] in novelai_nodes.KINDS:novelai_nodes.validate(node)
     if node['kind'] == 'text_file':
         from .text_files import validate_params
         validate_params(node.get('params', {}))
@@ -709,6 +719,9 @@ def validate_node(node):
             raise ValueError('模型节点开关格式错误')
         if any(not isinstance(node.get('params', {}).get(k, ''), str) for k in ('prompt', 'system_prompt', 'image')):
             raise ValueError('模型节点文本或图像路径格式错误')
+        if node['kind'] == 'llm_model':
+            from .text_processing import validate
+            validate(node.get('params', {}))
     if node['kind'] == 'app':
         if not isinstance(node.get('app', {}), dict):
             raise ValueError('App 定义格式错误')
@@ -805,7 +818,9 @@ def bypass_input_routes(node, connected):
         # first prompt socket must not claim the image socket's whole Batch.
         eligible.update('batch:' + content for content in content_types | {'any'}
                         if (port['type'] in ('any', 'batch') or port['type'] == content + '_input')
-                        and (produced & {'any', 'batch'} or kind in ('edit_model','image_untile','image_grid') and content == 'image'))
+                        and (produced & {'any', 'batch'} or
+                             (kind in ('edit_model','image_untile','image_grid') or kind in novelai_nodes.KINDS)
+                             and content == 'image'))
         eligible -= claimed
         if eligible:
             routes.append((port['key'], frozenset(eligible)))
@@ -847,7 +862,7 @@ def ancestors(document, target):
 
 
 def output_targets(document):
-    outputs = {'app', 'preview', 'mask_preview', 'image_compare', 'manual_select'} | set(MODEL_KINDS)
+    outputs = {'app', 'preview', 'mask_preview', 'image_compare', 'manual_select'} | set(MODEL_KINDS) | novelai_nodes.KINDS
     return [node['id'] for node in document['nodes'] if node['kind'] in outputs and not node.get('bypass')]
 
 
@@ -1459,6 +1474,8 @@ def fingerprint(node, inputs, edges=(), *, file_snapshots=None):
         # Cosmetic descriptions do not change generation semantics.
         field.pop('description', None)
     params = copy.deepcopy(node.get('params', {}))
+    if node['kind'] in novelai_nodes.KINDS:
+        params = novelai_nodes.fingerprint_params(node, inputs)
     if node['kind'] in utility_nodes.advanced_nodes.LOCAL_NODES or node['kind'] in utility_nodes.prompt_nodes.KINDS:
         for key in inputs:params.pop(key, None)
     if isinstance(params.get('_masks'),dict):
@@ -1467,6 +1484,9 @@ def fingerprint(node, inputs, edges=(), *, file_snapshots=None):
     if node['kind'] in MODEL_KINDS:
         for key in inputs:params.pop(key, None)
         if params.get('image'):params['image'] = file_hash(params['image'])
+        if node['kind'] == 'llm_model':
+            from .text_processing import fingerprint_params
+            params = fingerprint_params(params)
     if node['kind'] == 'text_file':
         if file_snapshots is None:
             raise ValueError('文本文件必须先冻结内容，再计算运行指纹')

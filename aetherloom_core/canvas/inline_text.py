@@ -37,6 +37,8 @@ def sync_documents(histories, canvas, *, reset=False):
         if node['kind'] == 'app':
             defaults = {model.parameter_key(field): field.get('fieldValue', '') for field in model.app_fields(node)}
         value = node.get('params', {}).get(key, defaults.get(key, ''))
+        if node['kind'].startswith('novelai_') and key.startswith('options.'):
+            value = node.get('params', {}).get('options', {}).get(key[8:], '')
         if node['kind'] == 'text_wildcards' and key == 'wildcards':
             from .prompt_nodes import wildcard_text
             value = wildcard_text(value)

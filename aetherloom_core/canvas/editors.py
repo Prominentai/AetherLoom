@@ -13,6 +13,7 @@ from .model import parameter_key, field_type, node_title
 from .model import MEDIA_SUFFIXES, MODEL_KINDS, MERGE_KINDS, RESULT_TYPES, ITEM_OUTPUT_TYPES
 from .media_inputs import accepts
 from . import collections, utility_nodes
+from .novelai_nodes import KINDS as NOVELAI_KINDS
 
 
 FILE_FILTERS = {kind: label + ' (' + ' '.join('*' + suffix for suffix in sorted(MEDIA_SUFFIXES[kind])) + ')'
@@ -146,7 +147,7 @@ class Inspector(QtWidgets.QWidget):
             self.form.addWidget(header)
         root_form = self.form
         from .model import MODEL_KINDS
-        if not embedded and node['kind'] not in MODEL_KINDS:
+        if not embedded and node['kind'] not in set(MODEL_KINDS) | set(NOVELAI_KINDS):
             root_form.setContentsMargins(14, 16, 14, 14)
             self.tabs = QtWidgets.QTabWidget()
             self.tabs.setObjectName('canvasNodeSettingsTabs')
@@ -224,6 +225,15 @@ class Inspector(QtWidgets.QWidget):
                 while self.tabs.count()>1:self.tabs.removeTab(self.tabs.count()-1)
             return
         from .model import MODEL_KINDS
+        if node['kind'] in NOVELAI_KINDS:
+            from .novelai_editor import build, build_inline
+            if embedded:
+                build_inline(self, node, doc_id, edges)
+            else:
+                build(self, node, doc_id, edges)
+                self._results(node)
+                self.form.addStretch(1)
+            return
         if node['kind'] in MODEL_KINDS:
             if embedded:
                 from .model_editor import build_inline

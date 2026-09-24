@@ -30,14 +30,25 @@ _TASK_FIELDS = frozenset(('id', 'index', 'state', 'title', 'model', 'action', 'c
     'received_results', 'saved_results', 'source', 'batch'))
 
 
-def clean(value, secrets=(), *, binary=False):
+def _is_text_chunks(value):
+    return (isinstance(value, dict) and len(value) <= 500
+            and all(isinstance(key, str) and isinstance(text, str) and len(text) <= 30000
+                    for key, text in value.items()))
+
+
+def clean(value, secrets=(), *, binary=False, _allow_chunks=True):
     """Redact full credentials before serialization; media is only a digest."""
     if isinstance(value, dict):
-        return {str(key): clean(item, secrets, binary=str(key).lower() in _BINARY_KEYS)
+        # Typed prompt chunks are text, not credential or image fields. Still
+        # redact actual credentials from both their user-supplied names and text.
+        return {str(key): ({clean(name, secrets): clean(text, secrets) for name, text in item.items()}
+                          if _allow_chunks and key == 'chunks' and _is_text_chunks(item)
+                          else clean(item, secrets, binary=str(key).lower() in _BINARY_KEYS,
+                                     _allow_chunks=_allow_chunks and key != 'chunks'))
                 for key, item in value.items() if str(key).lower() not in _SECRET_KEYS
                 and not str(key).startswith('_')}
     if isinstance(value, (list, tuple)):
-        return [clean(item, secrets, binary=binary) for item in value]
+        return [clean(item, secrets, binary=binary, _allow_chunks=_allow_chunks) for item in value]
     if isinstance(value, bytes) or binary and isinstance(value, str):
         raw = value if isinstance(value, bytes) else value.encode('utf-8')
         return {'omitted': 'binary', 'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}

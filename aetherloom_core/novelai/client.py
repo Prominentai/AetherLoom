@@ -27,6 +27,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from .catalog import capabilities, validate_options, active_references, director_size, DATASET_MODES
 from .prompts import build_prompts, resolve_options
 from . import task_records
+from .masks import upload_mask
 
 IMAGE_API = "https://image.novelai.net"
 # Persistent image tokens require the image service, including account queries.
@@ -254,18 +255,14 @@ def prepare_image(path, size=None, *, alpha=False):
 
 
 def prepare_mask(path, original_size, target_size):
-    """Input: L PNG, white=edit. API: binary latent-resolution L PNG."""
-    mask = _open_image(path)
-    if mask.size != tuple(original_size):
-        raise ValueError("蒙版尺寸必须与原输入图像一致")
-    if mask.mode not in ("1", "L", "RGB"):
-        raise ValueError("蒙版须为灰度图（白色编辑、黑色保留），请重新保存蒙版")
-    mask = mask.convert("L")
-    mask = mask.resize((target_size[0] // 8, target_size[1] // 8), Image.Resampling.NEAREST)
-    mask = mask.point(lambda p: 255 if p >= 155 else 0)
-    if mask.getextrema()[1] == 0:
-        raise ValueError("蒙版没有可编辑区域")
-    return _png(mask)
+    """Input: white=edit; upload: full output size, opaque binary RGBA PNG."""
+    with _open_image(path) as mask:
+        if mask.size != tuple(original_size):
+            raise ValueError("蒙版尺寸必须与原输入图像一致")
+        if mask.mode not in ("1", "L", "RGB"):
+            raise ValueError("蒙版须为灰度图（白色编辑、黑色保留），请重新保存蒙版")
+        with upload_mask(mask, target_size) as prepared:
+            return _png(prepared)
 
 
 def _precise_image(path):

@@ -255,7 +255,9 @@ def _record_saved(context, records, *, complete=False, message=''):
     combined = {item.get('id', item.get('path')): item for item in previous.get('results', [])}
     combined.update({item.get('id', item.get('path')): item for item in records})
     results = list(combined.values())
-    finished = complete and len(results) == previous.get('expected_results', 1)
+    expected = previous.get('expected_results', 1)
+    finished = (complete and isinstance(expected, int) and not isinstance(expected, bool)
+                and expected > 0 and len(results) == expected)
     task = {'results': results, 'saved_results': len(results),
             'state': 'succeeded' if finished else 'save_failed', 'result_unknown': False}
     if finished:
@@ -342,9 +344,18 @@ def execute(context, job):
             request_state=context.setdefault('request_state', {}),
             task_cache_dir=Path(context['frozen'].directory) / 'vibe-results',
             on_request=lambda value: _record_request(context, job, value, mask))
+        received = len(results)
+        if not received:
+            raise RuntimeError('NovelAI 未返回任何最终图片；未自动重新提交。')
+        counts = {'received_results': received}
+        if options['action'] == 'augment':
+            # Director tools may return multiple images. Fix the count once
+            # the complete response arrives, before saving or retrying a save.
+            context['expected_results'] = received
+            counts['expected_results'] = received
         if context.get('record') is not None:
-            context['record'].update(task={'state': 'saving', 'received_results': len(results), 'result_unknown': False})
-        job.emit_safe('progress', {'phase': 'saving', 'message': '已收到图片，正在本地处理并保存…', 'received_results': len(results)})
+            context['record'].update(task=dict(state='saving', result_unknown=False, **counts))
+        job.emit_safe('progress', dict(phase='saving', message='已收到图片，正在本地处理并保存…', **counts))
         # Once complete results arrive, cancellation must not discard their bytes.
         try:
             composed = composition.compose_focused(results, focused)

@@ -49,6 +49,7 @@ def canvas_palette(base):
 
 
 def kind_color(kind, colors):
+    if kind.startswith('novelai_'):kind = 'image_model'
     if kind.endswith('_input'):kind = kind[:-6]
     if kind not in _DARK:
         kind = 'image' if kind.startswith('image_') else 'mask' if kind.startswith('mask_') else 'text' if kind.startswith(('text_', 'prompt_')) else kind
@@ -64,6 +65,7 @@ def bypass_colors(colors):
 
 
 def draw_kind_icon(painter, rect, kind, color):
+    if kind.startswith('novelai_'):kind = 'image'
     kind = {'image_resize':'image', 'image_crop':'image', 'image_crop_mask':'image', 'image_paste_bounding':'image', 'image_pad':'image', 'image_compare':'preview',
             'media_info':'int', 'text_template':'text', 'text_split':'text', 'text_join':'text',
             'note':'text', 'text_file':'text', 'reroute':'select'}.get(kind, kind)

@@ -12,14 +12,18 @@ def build_inline(inspector, node, doc_id, edges):
     """Only request inputs live on the node; connection options stay in the inspector."""
     params = node.get('params', {})
     connected = {edge['input'] for edge in edges if edge['target'] == node['id']}
-    prompt_label = QtWidgets.QLabel('提示词')
+    category = MODEL_KINDS[node['kind']]
+    presets = None
+    if category == 'llm':
+        from .text_processing_editor import selector
+        presets = selector(inspector)
+    prompt_label = QtWidgets.QLabel('文本' if category == 'llm' else '提示词')
     inspector.form.addWidget(prompt_label)
     inspector.port_widgets['prompt'] = prompt_label
     prompt = inspector._text_editor(params.get('prompt', ''), (doc_id, node['id'], 'prompt'))
     prompt.setObjectName('canvasInlinePrompt')
     prompt.setEnabled('prompt' not in connected)
     prompt.textChanged.connect(lambda: inspector.changed.emit('params.prompt', prompt.toPlainText()))
-    category = MODEL_KINDS[node['kind']]
     protocol = node.get('model_config', {}).get('protocol', '')
     if category in ('llm', 'vision') or protocol in ('agent_codex', 'agent_grok'):
         from .node_form import FoldSection
@@ -31,6 +35,7 @@ def build_inline(inspector, node, doc_id, edges):
         system = inspector._text_editor(params.get('system_prompt', ''), (doc_id, node['id'], 'system_prompt'))
         system.textChanged.connect(lambda: inspector.changed.emit('params.system_prompt', system.toPlainText()))
         system.textChanged.connect(lambda: section.toggle.setText(title + (' · 已填写' if system.toPlainText() else ' · 可选')))
+        if presets is not None:presets.bind(prompt, system, section)
         inspector.form = main
     if category in ('vision', 'image_edit'):
         image_label = QtWidgets.QLabel('图像')
@@ -87,16 +92,30 @@ def build(inspector, node, doc_id, edges, owner):
     search = QtWidgets.QCheckBox('联网搜索 · 由 Agent 按需使用');form.addWidget(search)
     sync = QtWidgets.QPushButton('重新读取此连接配置');form.addWidget(sync)
     form = layouts[0];inspector.form = form
-    form.addWidget(QtWidgets.QLabel('提示词'))
+    presets = None
+    if category == 'llm':
+        from .text_processing_editor import selector
+        presets = selector(inspector)
+    form.addWidget(QtWidgets.QLabel('文本' if category == 'llm' else '提示词'))
     prompt = inspector._text_editor(node.get('params', {}).get('prompt', ''), (doc_id, node['id'], 'prompt'))
     prompt.setEnabled('prompt' not in inspector.connected_inputs)
     prompt.textChanged.connect(lambda:inspector.changed.emit('params.prompt', prompt.toPlainText()))
-    system_group = QtWidgets.QWidget();system_form = QtWidgets.QVBoxLayout(system_group)
-    system_form.setContentsMargins(0, 0, 0, 0);system_form.setSpacing(11)
+    if category == 'llm':
+        from .node_form import FoldSection
+        system_group = FoldSection('系统提示词', inspector, inspector.histories,
+                                   (doc_id, node['id'], 'system_prompt'))
+        system_form = system_group.body_layout
+    else:
+        system_group = QtWidgets.QWidget();system_form = QtWidgets.QVBoxLayout(system_group)
+        system_form.setContentsMargins(0, 0, 0, 0);system_form.setSpacing(11)
     form.addWidget(system_group);inspector.form = system_form
-    system_label = QtWidgets.QLabel('系统提示词 / Agent 图像要求');system_form.addWidget(system_label)
+    if category != 'llm':
+        system_label = QtWidgets.QLabel('系统提示词 / Agent 图像要求');system_form.addWidget(system_label)
     system = inspector._text_editor(node.get('params', {}).get('system_prompt', ''), (doc_id, node['id'], 'system_prompt'))
     system.textChanged.connect(lambda:inspector.changed.emit('params.system_prompt', system.toPlainText()))
+    if presets is not None:
+        presets.bind(prompt, system, system_group)
+        system.textChanged.connect(presets._refresh_caption)
     inspector.form = form
     compat = QtWidgets.QCheckBox('Agent 图像提示词兼容模式（合并到用户文本）')
     compat.setChecked(config.get('merge_system_prompt') is True);form.addWidget(compat)
@@ -125,8 +144,9 @@ def build(inspector, node, doc_id, edges, owner):
         with QtCore.QSignalBlocker(model_edit):
             model_edit.clear()
             names = api_manager.get_models_for_provider(category, combo.currentData())
-            if owner and config.get('provider') == (owner.api_config_fields[category]['provider'].currentData()):
-                current = owner.api_config_fields[category]['model']
+            owner_fields = (getattr(owner, 'api_config_fields', {}) or {}).get(category, {})
+            provider_field, current = owner_fields.get('provider'), owner_fields.get('model')
+            if provider_field is not None and current is not None and config.get('provider') == provider_field.currentData():
                 names = [current.itemText(i) for i in range(current.count())]
             model_edit.addItems(names);model_edit.setEditText(config.get('model', ''))
         with QtCore.QSignalBlocker(timeout):timeout.setValue(int(config.get('timeout') or 90))

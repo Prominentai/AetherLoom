@@ -225,6 +225,8 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         self.engine = self.workflow_queue.engine
         from .model_nodes import prepare as prepare_model
         self.engine.prepare_model = lambda node: prepare_model(owner, node)
+        from .novelai_runtime import ensure as ensure_novelai
+        self.engine.novelai = ensure_novelai(owner)
         self.engine.output_root = lambda: str(owner.output_dir)
         self.engine.input_root = lambda: str(owner.input_dir)
         self.store = self.engine.store
@@ -270,6 +272,9 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         self._workflow_cleanup.setInterval(180)
         self._workflow_cleanup.timeout.connect(self._prune_workflows)
         self.engine.changed.connect(self._runtime_changed)
+        from .novelai_preview import CanvasFrames
+        self._novelai_frames = CanvasFrames(self)
+        self.engine.novelai.preview.connect(self._novelai_frames.receive)
         self.workflow_queue.changed.connect(self._queue_changed)
         self.workflow_queue.error.connect(self._queue_error)
         self.refresh_apps()
@@ -589,7 +594,8 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         for kind in model.LIBRARY_KINDS:
             group = model.node_category(kind)
             self.library_list.add_choice(model.TITLES[kind], group, kind,
-                                         model.NODE_CATEGORIES[group] + ' · ' + model.TITLES[kind])
+                                         model.NODE_CATEGORIES[group] + ' · ' + model.TITLES[kind]
+                                         + ('\n' + model.NODE_DESCRIPTIONS[kind] if kind in model.NODE_DESCRIPTIONS else ''))
         for app_id, app in sorted(apps.items(), key=lambda pair: pair[1]['name'].lower()):
             from aetherloom_core.rh_model_apps import GROUPS, backend
             group = GROUPS[backend(app)]
@@ -833,7 +839,11 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
                                   params={model.parameter_key(field): copy.deepcopy(field.get('fieldValue', '')) for field in app['nodes']})
             model.normalize_app_urls({'nodes': [node]})
         else:
-            if value in model.MODEL_KINDS:
+            from .novelai_nodes import KINDS as NOVELAI_KINDS
+            if value in NOVELAI_KINDS:
+                from .novelai_runtime import create
+                node = create(self.owner, value)
+            elif value in model.MODEL_KINDS:
                 from .model_nodes import create
                 node = create(self.owner, value)
             else:
@@ -862,13 +872,14 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
                       'bounding_input': 'Bounding', 'mask_input': '遮罩'}
         for group, value, title, prototype in prototypes:
             prefix = model.NODE_CATEGORIES[group] + ' · '
+            keywords = ' ' + str(value) + ' ' + model.NODE_DESCRIPTIONS.get(prototype['kind'], '')
             choice = {'group': group, 'value': value, 'label': prefix + title,
-                      'search': prefix + title + ' ' + str(value)}
+                      'search': prefix + title + keywords}
             if anchor and anchor['output']:
                 for port in model.input_ports(prototype):
                     if any(model.types_compatible(kind, port['type']) for kind in model.connection_output_types(anchor_node, anchor.get('input', 'output'))):
                         label = prefix + title + ' → ' + port['label'] + ' · ' + type_names.get(port['type'], port['type'])
-                        choices.append(dict(choice, label=label, port=port['key'], search=label + ' ' + str(value)))
+                        choices.append(dict(choice, label=label, port=port['key'], search=label + keywords))
             elif anchor:
                 for port in model.output_ports(prototype):
                     if model.types_compatible(port['type'], accepted):
@@ -1176,7 +1187,7 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         self._mark_stale(edge['target'])
         self._edited(connections=True, select=edge['target'])
         target = next((node for node in self.document['nodes'] if node['id'] == edge['target']), {})
-        internal = target.get('kind') in {'app', 'text_file'} | set(model.MODEL_KINDS) or target.get('kind') == 'rename' and edge.get('input') in ('name', 'extension')
+        internal = target.get('kind') in {'app', 'text_file'} | set(model.MODEL_KINDS) | set(model.novelai_nodes.KINDS) or target.get('kind') == 'rename' and edge.get('input') in ('name', 'extension')
         self._message('连接已断开，输入恢复使用节点内部值。' if internal else '连接已断开，请连接上游结果后运行。')
 
     def _mark_stale(self, node_id):
@@ -1252,7 +1263,8 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
 
     def _model_settings(self, node_id):
         item = self.scene.nodes.get(node_id)
-        if item is None or item.node['kind'] not in model.MODEL_KINDS:return
+        from .novelai_nodes import KINDS as NOVELAI_KINDS
+        if item is None or item.node['kind'] not in set(model.MODEL_KINDS) | set(NOVELAI_KINDS):return
         # The explicit per-node entry must also work while several nodes are selected.
         with QtCore.QSignalBlocker(self.scene):
             self.scene.clearSelection();item.setSelected(True)
@@ -1260,7 +1272,7 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         inspector = self._inspector
         if isinstance(inspector, Inspector) and getattr(inspector, 'model_fields', None):
             inspector.tabs.setCurrentIndex(1)
-            key = 'model' if item.node.get('model_config', {}).get('provider') else 'provider'
+            key = 'model' if item.node['kind'] in NOVELAI_KINDS or item.node.get('model_config', {}).get('provider') else 'provider'
             inspector.model_fields[key].setFocus(QtCore.Qt.OtherFocusReason)
 
     def _close_settings(self):
@@ -1842,6 +1854,10 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
             texts = {'text': node.get('params', {}).get('text', '')} if node['kind'] == 'text' else {}
             if node['kind'] in model.MODEL_KINDS:
                 texts = {key: node.get('params', {}).get(key, '') for key in ('prompt', 'system_prompt')}
+            from .novelai_nodes import KINDS as NOVELAI_KINDS
+            if node['kind'] in NOVELAI_KINDS:
+                texts = {'options.' + key: node.get('params', {}).get('options', {}).get(key, '')
+                         for key in ('prompt', 'negative_prompt', 'tool_prompt')}
             if node['kind'] == 'app':
                 for field in node.get('app', {}).get('nodes', []):
                     if model.field_type(field) == 'text':
@@ -2238,6 +2254,8 @@ class CanvasPage(CanvasPreferencesMixin, QtWidgets.QWidget):
         # Editing stays in memory. Only Run and explicit Save commit it.
         self._prune_workflows()
         self._closed = True
+        self.engine.novelai.preview.disconnect(self._novelai_frames.receive)
+        self._novelai_frames.close()
         self._selection_timer.stop()
         if getattr(self.engine, '_view_canvas', None) == self.document['id']:
             self.engine.set_view_canvas('')

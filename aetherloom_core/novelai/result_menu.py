@@ -121,6 +121,7 @@ def remove_task(page, identity, delete_files=False):
         page._enqueued_revisions.pop(identity, None)
         page._refreshed_tasks.discard(identity)
         if page._preview_task_id == identity or page._displayed_task_id == identity:
+            page._pending_preview_task_id = None
             page._follow_queue_preview = False
             page._preview_task_id = page._displayed_task_id = page._displayed_task_state = None
             page.task_panel.select_task(None)

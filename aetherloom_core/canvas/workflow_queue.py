@@ -381,10 +381,12 @@ class WorkflowQueue(QtCore.QObject):
         scope = plan(document, target)['scope']
         by_id = {node['id']: node for node in document['nodes']}
         return [dict(id=node_id, title=by_id[node_id].get('title', 'App'),
+                     backend='novelai' if by_id[node_id]['kind'] in model.novelai_nodes.KINDS else 'rh',
                      webapp_id=(by_id[node_id].get('app') or {}).get('webapp_id', ''),
                      status='PENDING', progress=0, activated=False, cached=False,
                      task_ids=[], run_ids=[])
-                for node_id in order if node_id in scope and by_id[node_id]['kind'] in {'app'} | set(model.MODEL_KINDS)]
+                for node_id in order if node_id in scope and by_id[node_id]['kind'] in
+                {'app'} | set(model.MODEL_KINDS) | set(model.novelai_nodes.KINDS)]
 
     def enqueue(self, document, target=None, force=False, batch_count=None, prepare_app=None, *, document_saved=False):
         if self._closed:
@@ -492,7 +494,8 @@ class WorkflowQueue(QtCore.QObject):
         return errors
 
     def _task_records(self, job):
-        identities = {identity for node in job.get('nodes', []) for identity in node.get('run_ids', [])}
+        identities = {identity for node in job.get('nodes', []) if node.get('backend') != 'novelai'
+                      for identity in node.get('run_ids', [])}
         return [record for identity in identities if (record := self.service.get(identity)) is not None]
 
     def _sync_job(self, group, job, document):
@@ -512,10 +515,11 @@ class WorkflowQueue(QtCore.QObject):
                     node[key] = copy.deepcopy(state[key])
             node['task_ids'] = [item['task_id'] for item in state.get('items', []) if item.get('task_id')]
             node['run_ids'] = [item['run_id'] for item in state.get('items', []) if item.get('run_id')]
-            node['app_tasks'] = [{key: item[key] for key in ('run_id', 'task_id', 'task_document') if item.get(key)}
+            node['app_tasks'] = [{key: item[key] for key in ('run_id', 'task_id', 'task_document', 'backend') if item.get(key)}
                                  for item in state.get('items', []) if item.get('run_id')]
             changed |= previous != node
-        identities = {identity for node in job['nodes'] for identity in node.get('run_ids', [])}
+        identities = {identity for node in job['nodes'] if node.get('backend') != 'novelai'
+                      for identity in node.get('run_ids', [])}
         statuses = {record.get('status') for record in self.service.statuses(identities).values()}
         pending_records = any(status not in FINAL for status in statuses)
         running = self.engine.is_running(group['canvas_id'])

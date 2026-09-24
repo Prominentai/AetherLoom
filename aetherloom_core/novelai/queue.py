@@ -220,7 +220,8 @@ class QueueService(QtCore.QObject):
                     model=str(snapshot.get('model', '')), action=action, created=time.time(),
                     message='等待准备输入', progress=None, results=[], submitted=False, accepted=False,
                     attempts=0, key_index=1, key_count=len(tokens), next_retry=None,
-                    billing='serial', billing_info={}, expected_results=(1 if action in ('upscale', 'augment') else snapshot.get('n_samples', 1)),
+                    billing='serial', billing_info={}, expected_results=(None if action == 'augment'
+                        else 1 if action == 'upscale' else snapshot.get('n_samples', 1)),
                     received_results=0, saved_results=0, result_unknown=False,
                     batch=task_records.clean(batch or {}, tokens),
                     source=task_records.clean(source or {'type': 'novelai_page'}, tokens))
@@ -243,7 +244,18 @@ class QueueService(QtCore.QObject):
         self._schedule()
         return identity
 
+    def _sync_result_count(self, task):
+        context = self._contexts.get(task['id']) or {}
+        count = context.get('expected_results')
+        if (task.get('action') == 'augment' and isinstance(count, int)
+                and not isinstance(count, bool) and count > 0):
+            # Worker receipt can precede delivery of GUI progress. Never write
+            # the provisional count over its already-updated durable record.
+            task['expected_results'] = count
+            task['received_results'] = count
+
     def _persist(self, task, *, copy_value=None):
+        self._sync_result_count(task)
         state = self._record_states.get(task['id'])
         if state is None:
             return
@@ -435,6 +447,7 @@ class QueueService(QtCore.QObject):
         task, context = self._by_id.get(identity), self._contexts.get(identity)
         if self._closed or task is None or context is None:
             return
+        self._sync_result_count(task)
         if isinstance(value, dict):
             if value.get('phase') == 'request':
                 task['request'] = task_records.clean(value.get('request'), context.get('tokens', ()))
@@ -447,6 +460,7 @@ class QueueService(QtCore.QObject):
                 task['accepted'] = context['accepted'] = True
                 self._schedule()
             if phase == 'saving' and task['state'] == 'running':
+                self._sync_result_count(task)
                 task['state'] = 'saving'
                 task['received_results'] = value.get('received_results', task.get('expected_results', 0))
             message = self._safe_message(value.get('message', ''), context)
@@ -454,6 +468,9 @@ class QueueService(QtCore.QObject):
                 task['message'] = message
             fraction = value.get('progress')
             safe = {'phase': phase, 'message': message}
+            if phase == 'saving':
+                safe.update(expected_results=task.get('expected_results'),
+                            received_results=task.get('received_results', 0))
             if isinstance(fraction, (int, float)) and not isinstance(fraction, bool):
                 try:
                     if math.isfinite(fraction):
@@ -485,12 +502,14 @@ class QueueService(QtCore.QObject):
         task, context = self._by_id.get(identity), self._contexts.get(identity)
         if task is None or context is None:
             return
+        self._sync_result_count(task)
         records = list(task['results']) + list(value.get('records', []))
         unique = {record.get('id', record.get('path')): record for record in records}
         task['results'] = list(unique.values())
         expected = task.get('expected_results', 1)
         try:
-            complete = len(task['results']) == expected and all(
+            complete = (isinstance(expected, int) and not isinstance(expected, bool) and expected > 0
+                        and len(task['results']) == expected) and all(
                 Path(record['path']).is_file() and Path(record['path']).stat().st_size > 0
                 for record in task['results'])
         except (OSError, KeyError, TypeError):
@@ -565,7 +584,9 @@ class QueueService(QtCore.QObject):
             context.update(pending=error.pending, recovery_snapshot=error.snapshot,
                            mask=getattr(error, 'mask', None),
                            needs_composition=getattr(error, 'needs_composition', False))
-            task['results'].extend(error.saved)
+            self._sync_result_count(task)
+            records = list(task['results']) + list(error.saved)
+            task['results'] = list({record.get('id', record.get('path')): record for record in records}.values())
             task.update(state='save_failed', message=message, progress=None, result_unknown=False,
                         received_results=task.get('expected_results', 0))
             self._save_failed_ids.add(identity)

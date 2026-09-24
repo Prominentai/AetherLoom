@@ -27,12 +27,22 @@ PUBLIC_FIELDS = set(default_options()) | {
 }
 
 
-def public(value):
+def _is_text_chunks(value):
+    return (isinstance(value, dict) and len(value) <= 500
+            and all(isinstance(key, str) and isinstance(text, str) and len(text) <= 30000
+                    for key, text in value.items()))
+
+
+def public(value, *, _allow_chunks=True):
     if isinstance(value, dict):
-        return {str(k): public(v) for k, v in value.items()
+        # Chunk names are user text, including names such as "password".
+        # Invalid mappings retain structural cleaning throughout their subtree.
+        return {str(k): (dict(v) if _allow_chunks and k == 'chunks' and _is_text_chunks(v)
+                         else public(v, _allow_chunks=_allow_chunks and k != 'chunks'))
+                for k, v in value.items()
                 if str(k).lower() not in SECRET_FIELDS and not str(k).startswith('_')}
     if isinstance(value, (list, tuple)):
-        return [public(v) for v in value]
+        return [public(v, _allow_chunks=_allow_chunks) for v in value]
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return None
@@ -223,7 +233,7 @@ def import_options(data, *, trusted_paths=False):
         raise ValueError('参数文件必须是 JSON 对象')
     if isinstance(data.get('settings'), dict):
         data = data['settings']
-    result = {key: public(value) for key, value in data.items() if key in PUBLIC_FIELDS}
+    result = public({key: value for key, value in data.items() if key in PUBLIC_FIELDS})
     for old, current in (('transparent', 'transparent_background'), ('variety', 'variety_boost'),
                          ('req_type', 'augment_method')):
         if current not in result and old in result:

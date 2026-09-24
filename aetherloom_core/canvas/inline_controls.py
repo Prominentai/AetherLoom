@@ -21,7 +21,7 @@ class InlineControls(QtWidgets.QScrollArea):
         self.setMinimumSize(60, 50)
         self._refresh_timer = QtCore.QTimer(self)
         self._refresh_timer.setSingleShot(True)
-        self._refresh_timer.timeout.connect(self._build)
+        self._refresh_timer.timeout.connect(self._refresh_if_changed)
         self._panel_timer = QtCore.QTimer(self)
         self._panel_timer.setSingleShot(True)
         self._panel_timer.timeout.connect(self._sync_panel)
@@ -103,8 +103,20 @@ class InlineControls(QtWidgets.QScrollArea):
         finally:
             self._building = False
 
+    def _refresh_if_changed(self):
+        # Shared text documents can queue a refresh through the other inspector
+        # before this form finishes applying the same edit. Keep its live editor
+        # (and cursor/undo history) when that edit has already reconciled state.
+        if self.state() != self._state:
+            self._build()
+
     def _changed(self, path, value):
         if self._building:return
+        text_only = False
+        if self.item.node['kind'].startswith('novelai_') and path == 'params.options':
+            before = self.item.node.get('params', {}).get('options', {})
+            modified = {key for key in set(before) | set(value) if before.get(key) != value.get(key)}
+            text_only = bool(modified) and modified <= {'prompt', 'negative_prompt', 'tool_prompt'}
         self._changing = True
         try:
             self.page._node_changed(self.item.node['id'], path, value)
@@ -113,7 +125,7 @@ class InlineControls(QtWidgets.QScrollArea):
             # Text documents already synchronize both views without rebuilding
             # the editor (and therefore without disturbing its cursor/undo).
             text_keys = {editor.property('canvasTextKey') for editor in self.inspector.findChildren(QtWidgets.QTextEdit)}
-            if path not in {'params.' + key for key in text_keys if isinstance(key, str)}:
+            if not text_only and path not in {'params.' + key for key in text_keys if isinstance(key, str)}:
                 self._panel_timer.start(0)
         finally:
             self._changing = False
@@ -163,6 +175,10 @@ class InlineControls(QtWidgets.QScrollArea):
             parent = widget.parentWidget()
             while parent is not None and parent is not panel:
                 if isinstance(parent, FoldSection):
+                    # A single-field section may use its own title as the socket
+                    # anchor; duplicating it in the collapsed summary adds a row.
+                    if widget is parent.toggle:
+                        break
                     parent.add_port(key, port['label'])
                     self._port_sections[key] = parent
                     break

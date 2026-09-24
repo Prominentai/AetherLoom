@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from PyQt5 import QtCore
 
-from . import model
+from . import model, novelai_nodes
 
 
 TERMINAL = frozenset({'SUCCESS', 'FAILED', 'CANCELED', 'UNKNOWN', 'BLOCKED', 'SKIPPED', 'INTERRUPTED'})
@@ -47,6 +47,7 @@ class CanvasEngine(QtCore.QObject):
         from .cache_cleanup import run_files
         self.temporary = run_files(store.root.parent)
         self.prepare_model = None
+        self.novelai = None
         self.input_root = lambda: str(self.store.root.parent / 'input')
         self.output_root = lambda: str(self.store.root.parent / 'output')
         self._condition = threading.Condition(threading.RLock())
@@ -353,6 +354,12 @@ class CanvasEngine(QtCore.QObject):
             if node['id'] in scope and node.get('kind') == 'preview':
                 captured[node['id']] = self._prepare_save(document, node)
                 continue
+            if node['id'] in scope and node.get('kind') in novelai_nodes.KINDS:
+                try:
+                    captured[node['id']] = self.novelai.prepare(copy.deepcopy(node))
+                except Exception as error:
+                    captured[node['id']] = {'novelai_node': True, '_preparation_error': str(error)}
+                continue
             if node['id'] in scope and node.get('kind') in model.MODEL_KINDS:
                 try:
                     captured[node['id']] = copy.deepcopy(self.prepare_model(copy.deepcopy(node)))
@@ -484,6 +491,17 @@ class CanvasEngine(QtCore.QObject):
                 prepared[node_id] = (copy.deepcopy(prepared_snapshot.get(node_id, {})) if prepared_snapshot is not None
                                      else self._prepare_save(graph, nodes[node_id]))
         for node_id in order:
+            if node_id not in scope or nodes[node_id]['kind'] not in novelai_nodes.KINDS:continue
+            if nodes[node_id].get('bypass'):continue
+            try:
+                captured = (copy.deepcopy(prepared_snapshot.get(node_id, {})) if prepared_snapshot is not None
+                            else self.novelai.prepare(copy.deepcopy(nodes[node_id])))
+                prepared[node_id] = captured
+                from .storage import _remove_secrets
+                run.setdefault('prepared', {})[node_id] = _remove_secrets(captured)
+            except Exception as error:
+                prepared[node_id] = {'novelai_node': True, '_preparation_error': str(error)}
+        for node_id in order:
             if node_id not in scope or nodes[node_id]['kind'] not in model.MODEL_KINDS:continue
             if nodes[node_id].get('bypass'):continue
             try:
@@ -614,12 +632,17 @@ class CanvasEngine(QtCore.QObject):
 
     def _cancel_halted(self, document):
         with self._condition:
-            ids = {item['run_id'] for state in document.get('run', {}).get('nodes', {}).values()
+            ids = {(item['run_id'], item.get('backend','rh')) for state in document.get('run', {}).get('nodes', {}).values()
                    for item in state.get('items', []) if item.get('cancel_requested') and item.get('run_id')}
             pending = ids - self._halt_cancellations
             self._halt_cancellations.update(pending)
-        for run_id in pending:
-            self.service.cancel(run_id)
+        for run_id, backend in pending:
+            self._cancel_run(run_id, backend)
+
+    def _cancel_run(self, run_id, backend='rh'):
+        if backend == 'novelai':
+            if self.novelai is not None:self.novelai.cancel(run_id)
+        else:self.service.cancel(run_id)
 
     def _set_state(self, canvas_id, node_id, **values):
         with self._condition:
@@ -729,7 +752,8 @@ class CanvasEngine(QtCore.QObject):
                         except DetachedExecution:
                             return
                         except Exception as error:
-                            failure_status = ('CANCELED' if getattr(error, 'status', '') == 'canceled' else
+                            failure_status = ('UNKNOWN' if getattr(error, 'status', '') == 'unknown' else
+                                              'CANCELED' if getattr(error, 'status', '') == 'canceled' else
                                               'SKIPPED' if isinstance(error, (MissingHistoricalInput, MissingRuntimeInput)) else 'FAILED')
                             if self._fail_unsubmitted_items(canvas_id, node_id, str(error), status=failure_status):
                                 futures[node_id] = pool.submit(self._worker_call, self._wait_app, round_id, canvas_id, node_id, stop)
@@ -914,7 +938,8 @@ class CanvasEngine(QtCore.QObject):
         try:
             # Merge sockets concatenate independently sized streams; they are
             # not the parallel parameters of one App/API request.
-            batches = [{}] if kind in model.collections.KINDS else model.pair_inputs(inputs)
+            batches = (novelai_nodes.input_batches(node, inputs) if kind in novelai_nodes.KINDS else
+                       [{}] if kind in model.collections.KINDS else model.pair_inputs(inputs))
         except ValueError as error:
             if any(states[edge['source']].get('_restored_missing_results') for edge in edges):
                 raise MissingHistoricalInput('历史结果缺失导致输入无法配对，已跳过本分支') from error
@@ -943,7 +968,7 @@ class CanvasEngine(QtCore.QObject):
             raise
         with self._condition:
             cached = copy.deepcopy(self._document_locked(canvas_id)['run'].get('cache', {}).get(node_id) or node)
-        if (kind != 'manual_select' and (kind not in {'app'} | set(model.MODEL_KINDS) or node.get('filter_repeats', False)) and not force
+        if (kind != 'manual_select' and (kind not in {'app'} | set(model.MODEL_KINDS) | set(novelai_nodes.KINDS) or node.get('filter_repeats', False)) and not force
                 and not cached.get('bypassed') and not cached.get('_restored_missing_results')
                 and digest == cached.get('fingerprint')
                 and model.results_valid(cached.get('results', []), cached.get('result_signatures'))):
@@ -965,9 +990,18 @@ class CanvasEngine(QtCore.QObject):
                                                 previous=cached['results'], cached=True)
                 self._finish_node(canvas_id, node_id, results, digest, cached=True)
                 return
-        if kind != 'app':
+        if kind != 'app' and kind not in novelai_nodes.KINDS:
             self._set_state(canvas_id, node_id, status='RUNNING', activated=True, message='正在执行')
-        if kind in model.MODEL_KINDS:
+        if kind in novelai_nodes.KINDS:
+            with self._condition:
+                doc = self._document_locked(canvas_id)
+                source = dict(canvas_id=canvas_id, canvas_name=doc['name'], round_id=round_id,
+                              canvas_batch_index=doc['run'].get('batch_index', 0),
+                              **copy.deepcopy(doc['run'].get('workflow_queue') or {}))
+            if self.novelai is None:raise ValueError('NovelAI 执行服务尚未初始化')
+            results = self.novelai.execute(node, prepared, batches, source, stop,
+                lambda **values:self._set_state(canvas_id, node_id, **values), closing=self._closing)
+        elif kind in model.MODEL_KINDS:
             from .model_nodes import execute, _check_stop
             results = execute(node, prepared, batches, stop, temporary=self.temporary)
             _check_stop(stop)
@@ -1514,7 +1548,7 @@ class CanvasEngine(QtCore.QObject):
                 return
             if document.get('run'):
                 document['run']['user_stopped'] = True
-            run_ids = [item['run_id'] for state in document.get('run', {}).get('nodes', {}).values()
+            run_ids = [(item['run_id'], item.get('backend','rh')) for state in document.get('run', {}).get('nodes', {}).values()
                        for item in state.get('items', [])
                        if item.get('run_id') and item.get('status') in ACTIVE]
             if document.get('run'):
@@ -1525,9 +1559,9 @@ class CanvasEngine(QtCore.QObject):
             self._condition.notify_all()
         # Service callbacks acquire the canvas lock; never call cancellation while
         # holding it because another service worker may be publishing a result.
-        for run_id in run_ids:
+        for run_id, backend in run_ids:
             try:
-                self.service.cancel(run_id)
+                self._cancel_run(run_id, backend)
             except Exception as error:
                 errors.append('任务取消未确认：' + str(error))
         if errors:

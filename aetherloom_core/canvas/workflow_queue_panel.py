@@ -332,6 +332,9 @@ class WorkflowQueuePanel(QtWidgets.QDialog):
                 tooltip += '\nTask ID：' + ', '.join(map(str, task_ids[:10]))
             elif cached:
                 tooltip += '\n使用已有结果，本批未提交云端任务。'
+            elif node.get('backend') == 'novelai':
+                tooltip += ('\n本地任务：' + ', '.join(map(str, node['run_ids'][:10]))
+                            if node.get('run_ids') else '\n等待节点输入就绪后加入 NovelAI 队列。')
             else:
                 tooltip += '\n尚未返回 Task ID。'
             self._set_row(item, title, status, percent, tooltip, cached, dormant=dormant)

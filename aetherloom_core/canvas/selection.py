@@ -1,12 +1,12 @@
 """Shared bulk options, applied once to the compatible selected nodes."""
 from PyQt5 import QtCore,QtWidgets
-from . import model
+from . import model, novelai_nodes
 
 
 def options(nodes):
     for label,path,kinds,default in [
         ('忽略节点（旁路）','bypass',None,False),
-        ('过滤重复运行','filter_repeats',{'app'}|set(model.MODEL_KINDS),False),
+        ('过滤重复运行','filter_repeats',{'app'}|set(model.MODEL_KINDS)|set(novelai_nodes.KINDS),False),
         ('本地解码','decode_settings.enabled',{'app'},False),
         ('保存结果','params.save_enabled',{'preview'},False),
         ('重名覆盖','params.overwrite',{'preview'},False)]:

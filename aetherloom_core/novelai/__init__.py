@@ -4,6 +4,7 @@
 def install_page(owner):
     from PyQt5 import QtCore, QtWidgets
     from .page import NovelAIPage
+    from .service import can_close_service, shutdown_service
 
     class LazyPage(QtWidgets.QWidget):
         def __init__(self):
@@ -12,8 +13,7 @@ def install_page(owner):
             self.box = QtWidgets.QVBoxLayout(self)
             self.box.setContentsMargins(0, 0, 0, 0)
 
-        def showEvent(self, event):
-            super().showEvent(event)
+        def _ensure_workspace(self):
             if self.workspace is None:
                 self.workspace = NovelAIPage(owner, self)
                 self.box.addWidget(self.workspace)
@@ -23,17 +23,28 @@ def install_page(owner):
                 self._theme_ready.setSingleShot(True)
                 self._theme_ready.timeout.connect(self.workspace.apply_theme)
                 self._theme_ready.start(0)
+            return self.workspace
+
+        def showEvent(self, event):
+            super().showEvent(event)
+            self._ensure_workspace()
 
         def apply_theme(self):
             if self.workspace is not None:
                 self.workspace.apply_theme()
 
         def can_close(self):
-            return self.workspace is None or self.workspace.can_close()
+            if self.workspace is not None:
+                return self.workspace.can_close()
+            if can_close_service(owner, self):
+                return True
+            self._ensure_workspace().show_queue()
+            return False
 
         def shutdown(self):
             if self.workspace is not None:
                 self.workspace.shutdown()
+            shutdown_service(owner)
 
     owner.novelai_page = LazyPage()
     owner.pages.addWidget(owner.novelai_page)

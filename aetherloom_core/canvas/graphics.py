@@ -25,9 +25,10 @@ PREVIEW_PROFILES = {
 
 KIND_NAMES = {'app': 'APP', 'image': '图像', 'video': '视频', 'audio': '音频', 'text_file': '文本文件导入',
               'text': '文本', 'select': '内容过滤', 'preview': '预览 / 保存'}
-KIND_NAMES.update(llm_model='LLM · API / Agent', vision_model='VISION · API / Agent',
+KIND_NAMES.update(llm_model='TEXT · LLM / Agent', vision_model='VISION · API / Agent',
                   image_model='IMAGE · API / Agent', edit_model='EDIT · API / Agent')
 KIND_NAMES.update(filename='读取文件名', rename='文件重命名')
+KIND_NAMES.update(model.novelai_nodes.TITLES)
 KIND_NAMES['list2batch'] = 'LIST → BATCH'
 KIND_NAMES['batch2list'] = 'BATCH → LIST'
 KIND_NAMES.update(merge_batch='MERGE BATCH', merge_list='MERGE LIST')
@@ -512,8 +513,26 @@ class NodeItem(QtWidgets.QGraphicsObject):
         return QtCore.QRectF(self.run_rect().center().x() - 12, 4, 24, 24)
 
     def shows_progress(self):
-        return (self.node['kind'] in {'app'} | set(model.MODEL_KINDS) and node_is_active(self.node)
+        return (self.node['kind'] in {'app'} | set(model.MODEL_KINDS) | set(model.novelai_nodes.KINDS) and node_is_active(self.node)
                 and self.node.get('status') in RUNNING_STATES | WAITING_STATES)
+
+    def stream_frame(self):
+        frame = getattr(self, '_novelai_frame', None)
+        if frame is None:return None
+        run = (getattr(self.canvas_scene, '_document', {}) or {}).get('run', {})
+        valid = (getattr(self, '_novelai_frame_round', None) == run.get('id') and
+                 self.node.get('status') in {'RUNNING','DOWNLOADING','DOWNLOAD_FAILED','SUCCESS'})
+        if not valid:
+            self._novelai_frame = None
+            return None
+        if self.node.get('status') == 'SUCCESS' and self.result_count():
+            path = preview_data.path_of(self.result_at(0))
+            if path and self.node['id'] in self.canvas_scene.thumbnail_nodes:
+                thumb = self.canvas_scene.thumbnails.get(path, 'image')
+                if thumb is not None and not thumb.isNull():
+                    self._novelai_frame = None
+                    return None
+        return frame
 
     def itemChange(self, change, value):
         if change == self.ItemPositionHasChanged and hasattr(self, 'canvas_scene'):
@@ -558,7 +577,7 @@ class NodeItem(QtWidgets.QGraphicsObject):
         if self.node['kind'] in ('preview', 'mask_preview') and self.result_count():
             rect.setHeight(max(56, getattr(self, 'form_content_height', 100)))
             return rect
-        if self.node['kind'] != 'text' and self.result_count():
+        if self.node['kind'] != 'text' and (self.result_count() or self.stream_frame() is not None):
             rect.setHeight(max(80, rect.height() - max(100, min(220, rect.height() * .42)) - 8))
         return rect
 
@@ -766,7 +785,16 @@ class NodeItem(QtWidgets.QGraphicsObject):
         if ignored:
             painter.setOpacity(painter.opacity() * (.75 if selected else .5))
         if content.height() > 20:
-            if self.result_count():
+            stream = self.stream_frame()
+            if stream is not None:
+                painter.setPen(QtGui.QColor(p['muted']))
+                painter.drawText(content.adjusted(0,0,0,0), QtCore.Qt.AlignTop, 'NovelAI · 生成预览')
+                body = content.adjusted(0,22,0,0)
+                size = stream.size().scaled(body.size().toSize(), QtCore.Qt.KeepAspectRatio)
+                target = QtCore.QRectF(body.center().x()-size.width()/2, body.center().y()-size.height()/2,
+                                      size.width(),size.height())
+                painter.drawPixmap(target, stream, QtCore.QRectF(stream.rect()))
+            elif self.result_count():
                 self._paint_results(painter)
             else:
                 painter.setPen(QtGui.QPen(tint(p['border'],170),1,QtCore.Qt.DashLine))
@@ -1979,7 +2007,9 @@ class CanvasView(QtWidgets.QGraphicsView):
         else:
             center = self.mapToScene(self.viewport().rect().center())
             visible = [item for item in self.items(self.viewport().rect())
-                       if isinstance(item, NodeItem) and item.result_count()]
+                       if isinstance(item, NodeItem) and (item.result_count() or
+                           item.node['kind'] in model.novelai_nodes.KINDS and
+                           item.node.get('status') in RUNNING_STATES | {'DOWNLOAD_FAILED'})]
             visible.sort(key=lambda item: (item.scenePos() - center).manhattanLength())
             visible = visible[:self.scene().preview_profile['limit']]
             quota = max(1, self.scene().thumbnails.limit // max(1, len(visible)))

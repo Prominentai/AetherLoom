@@ -138,6 +138,19 @@ def _skip_tag_spaces(text, index):
     return index
 
 
+def _tag_space_start(text, index):
+    """Skip preceding horizontal whitespace without removing escaped spaces."""
+    while index > 0 and text[index - 1].isspace() and text[index - 1] not in _NEWLINES:
+        boundary = index - 1
+        escape_start = boundary
+        while escape_start > 0 and text[escape_start - 1] == "\\":
+            escape_start -= 1
+        if (boundary - escape_start) % 2:
+            break
+        index = boundary
+    return index
+
+
 def _closing_weight_end(following, syntax):
     """Return the end of complete closing weight/schedule delimiters."""
     end = 0
@@ -223,10 +236,10 @@ def _partial_tag_selection(text, start, end, syntax):
 def completion_insertion(text, start, end, tag, *, syntax="sd"):
     """Complete matching input without deleting unrelated tag content.
 
-    Replace a tag span only when its entire content matches the candidate,
-    including any text after the caret. Otherwise append after the existing
-    tag and its closing weight syntax. Explicit partial-tag selections are
-    replaced exactly; full-tag selections also receive a trailing separator.
+    Complete matching input before the caret without consuming the tag text
+    after it. Unrelated input is kept and the candidate is inserted at the
+    caret. Explicit partial-tag selections are replaced exactly; full-tag
+    selections also receive a trailing separator.
     Returned offsets use Python characters, not Qt UTF-16 positions.
     """
     if syntax not in ("sd", "nai"):
@@ -240,14 +253,13 @@ def completion_insertion(text, start, end, tag, *, syntax="sd"):
             return start, end, ''
         token = completion_token(text, start, syntax=syntax)
         if token is not None:
-            if _matches_typed_tag(text[token.start:token.end], tag):
-                start, end = token.start, token.end
+            if _matches_typed_tag(text[token.start:min(start, token.end)], tag):
+                start = token.start
             else:
-                start = end = token.end + _closing_weight_end(text[token.end:], syntax)
                 leading = ", "
         else:
             previous = text[:start]
-            stripped = previous.rstrip(" \t\u3000")
+            stripped = previous[:_tag_space_start(previous, len(previous))]
             boundaries = list(_boundaries(stripped, syntax))
             marker = boundaries[-1][2] if boundaries and boundaries[-1][1] == len(stripped) else ""
             openings = ("{", "[") if syntax == "nai" else ("(", "[", ":")
@@ -261,9 +273,9 @@ def completion_insertion(text, start, end, tag, *, syntax="sd"):
                 leading = " " if previous == stripped else ""
             else:
                 leading = ", "
-                # At a boundary after a closed weight, put the new separator
-                # directly after the tag instead of retaining "tag) , ".
-                while start > 0 and text[start - 1].isspace() and text[start - 1] not in _NEWLINES:
-                    start -= 1
+        if leading == ", ":
+            # Put the separator before trailing horizontal whitespace while
+            # leaving the insertion anchored at the caret, including in tags.
+            start = _tag_space_start(text, start)
     tail, consumed = completion_tail(text[end:], syntax=syntax)
     return start, end + consumed, leading + tag + tail

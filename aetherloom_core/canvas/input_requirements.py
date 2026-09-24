@@ -2,12 +2,13 @@
 
 
 def decorate(node, ports):
-    from . import model, utility_nodes
+    from . import model, utility_nodes, novelai_nodes
     kind = node['kind']
     editable = {field[0] for field in utility_nodes.SCHEMAS.get(kind, ('', '', []))[2]}
     if kind == 'rename':editable |= {'name', 'extension'}
     if kind == 'text_file':editable.add('path')
     if kind in model.MODEL_KINDS:editable |= {'prompt', 'image'}
+    if kind in novelai_nodes.KINDS:editable |= {port['key'] for port in ports}
     optional = {'image_composite': {'mask'}, 'image_mask_composite': {'mask'}, 'image_paste_bounding': {'mask'},
                 'video_assemble': {'audio'}}.get(kind, set())
     module = utility_nodes.advanced_nodes.LOCAL_NODES.get(kind)
@@ -27,7 +28,7 @@ def empty(value):
 
 
 def missing(node, connected):
-    from . import model
+    from . import model, novelai_nodes
     if node.get('bypass') or model.unknown_node(node):return []
     ports = model.input_ports(node)
     labels = {port['key']: port['label'] for port in ports}
@@ -56,6 +57,11 @@ def missing(node, connected):
             absent = not values(value) if model.field_type(field) in model.MEDIA else empty(value)
             if key not in connected and definition.get('required', field.get('required')) is True and absent:
                 issues.append(dict(ports=[key], message='请填写或连接：' + labels.get(key, key)))
+    elif node['kind'] in novelai_nodes.KINDS:
+        options = novelai_nodes.local_options(node)
+        for key in novelai_nodes.required_inputs(node):
+            if key not in connected and empty(options.get(novelai_nodes.option_key(node, key))):
+                issues.append(dict(ports=[key], message='请导入或连接：' + labels.get(key, key)))
     elif node['kind'] in ('vision_model', 'edit_model') and 'image' not in connected and empty(params.get('image')):
         issues.append(dict(ports=['image'], message='请导入图像或连接图像输入'))
     elif node['kind'] in model.MEDIA and empty(params.get('files')):

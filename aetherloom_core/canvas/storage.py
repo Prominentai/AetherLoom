@@ -62,8 +62,8 @@ def _read_json(path):
 def _opaque_text_routes(value, prefix=()):
     """Locate typed prompt dictionaries whose keys are words, not field names.
 
-    Only the text_wildcards node's params.wildcards mapping qualifies, and only
-    with the string / list-of-strings shape accepted by that node. Nested objects
+    Only typed wildcard/chunk dictionaries qualify, with their accepted string
+    value shapes. Nested objects
     cannot use this exception to bypass credential stripping or path checks.
     The traversal also covers frozen graph snapshots in queued workflow records.
     """
@@ -73,6 +73,13 @@ def _opaque_text_routes(value, prefix=()):
             for index, child in enumerate(item):visit(child, route + (index,))
         elif isinstance(item, dict):
             params = item.get('params')
+            if item.get('kind') in canvas_model.novelai_nodes.KINDS and isinstance(params, dict):
+                options = params.get('options')
+                chunks = options.get('chunks') if isinstance(options, dict) else None
+                if (isinstance(chunks, dict) and len(chunks) <= 500 and all(
+                        isinstance(key, str) and isinstance(text, str) and len(text) <= 30000
+                        for key, text in chunks.items())):
+                    opaque.add(route + ('params', 'options', 'chunks'))
             if item.get('kind') == 'text_wildcards' and isinstance(params, dict):
                 words = params.get('wildcards')
                 if isinstance(words, dict) and all(
@@ -168,6 +175,14 @@ def _visit_paths(document, transform, include_results=True):
     for nodes in _node_sets(document):
         for node in nodes:
             params = node.get('params') or {}
+            if node.get('kind') in canvas_model.novelai_nodes.KINDS:
+                options = params.get('options') or {}
+                if options.get('image_path'):
+                    options['image_path'] = transform(options['image_path'], required=True)
+                # mask_path is already visited by masks() above.
+                for reference in options.get('references') or []:
+                    if isinstance(reference, dict) and reference.get('path'):
+                        reference['path'] = transform(reference['path'], required=True)
             if node.get('kind') in canvas_model.MODEL_KINDS and params.get('image'):
                 params['image'] = transform(params['image'], required=True)
             if isinstance(params.get('files'), list):

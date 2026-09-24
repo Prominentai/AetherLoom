@@ -138,6 +138,33 @@ def prepare(snapshot, draft_mask, input_dir, temporary):
     return options, persistent_mask, focused
 
 
+def _compose_focused_patch(patch, original, mask):
+    if patch.mode != 'RGBA' or (patch.getextrema()[3] == (255, 255)
+                                and original.getextrema()[3] == (255, 255)):
+        return Image.composite(patch, original, mask)
+    import numpy as np
+    # Interpolate premultiplied colors, then restore straight RGBA. Keeping
+    # integer alpha weights avoids quantizing low-alpha colors to 8-bit RGBa.
+    composed = Image.new('RGBA', patch.size)
+    rows = max(1, min(256, 262144 // patch.width))
+    for top in range(0, patch.height, rows):
+        region = (0, top, patch.width, min(top + rows, patch.height))
+        with patch.crop(region) as part, original.crop(region) as old, mask.crop(region) as selection:
+            incoming = np.asarray(part, dtype=np.uint32)
+            previous = np.asarray(old, dtype=np.uint32)
+            weight = np.asarray(selection, dtype=np.uint32)[..., None]
+        incoming_alpha = incoming[..., 3:] * weight
+        previous_alpha = previous[..., 3:] * (255 - weight)
+        alpha = incoming_alpha + previous_alpha
+        colors = incoming[..., :3] * incoming_alpha + previous[..., :3] * previous_alpha
+        colors = (colors + alpha // 2) // np.maximum(alpha, 1)
+        rgba = np.concatenate((colors, (alpha + 127) // 255), axis=2).astype(np.uint8)
+        rgba[rgba[..., 3] == 0, :3] = 0
+        with Image.fromarray(rgba) as part:
+            composed.paste(part, (0, top))
+    return composed
+
+
 def compose_focused(results, context):
     if context is None:
         return results
@@ -149,7 +176,8 @@ def compose_focused(results, context):
             patch = image.convert(base.mode).resize((box[2] - box[0], box[3] - box[1]), Image.Resampling.LANCZOS)
         image = base.copy()
         original = base.crop(box)
-        image.paste(Image.composite(patch, original, mask.crop(box)), box[:2])
+        with mask.crop(box) as selection, _compose_focused_patch(patch, original, selection) as composed:
+            image.paste(composed, box[:2])
         metadata = PngImagePlugin.PngInfo()
         for key, value in info.items():
             if isinstance(value, str) and len(value) <= 1024 * 1024:

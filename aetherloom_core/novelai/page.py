@@ -15,7 +15,7 @@ from .dialogs import AccountDialog, TagsDialog, ChunksDialog, token_for
 from .credentials import tokens_for, tokens_from_record
 from .history import HistoryPanel
 from .task_panel import TaskPanel
-from .queue import QueueService
+from .service import get_service, can_close_service
 from .queue_dialog import QueueDialog
 from .preview import ImagePreview
 from .account_status import AccountMonitor, AccountStrip
@@ -44,7 +44,8 @@ class NovelAIPage(QtWidgets.QWidget):
     def __init__(self, owner, parent=None, *, data_dir=None):
         super().__init__(parent)
         self.owner = owner
-        self.data_dir = str(data_dir or current_dir)
+        self._queue = get_service(owner, data_dir=data_dir)
+        self.data_dir = self._queue.data_dir
         saved = storage.load_settings(self.data_dir)
         self._saved_settings = copy.deepcopy(saved)
         self.prompt_suggestion_preferences = normalize_suggestion_preferences(saved.get('prompt_suggestions'))
@@ -62,13 +63,13 @@ class NovelAIPage(QtWidgets.QWidget):
         self._submit_cooldown.setTimerType(QtCore.Qt.PreciseTimer)
         self._submit_cooldown.setInterval(500)
         self._submit_cooldown.timeout.connect(self._update_submit_button)
-        self._queue = QueueService(self)
         self._queue_dialog = None
         self._editor_revision = 0
         self._enqueued_revisions = {}
         self._refreshed_tasks = set()
         self._follow_queue_preview = True
         self._preview_task_id = None
+        self._pending_preview_task_id = None
         self._displayed_task_id = None
         self._displayed_task_state = None
         self._stream_previews = OrderedDict()
@@ -106,17 +107,6 @@ class NovelAIPage(QtWidgets.QWidget):
         self._queue.preview.connect(self._queue_preview)
         self._queue.completed.connect(self._queue_completed)
         self._queue.failed.connect(self._queue_failed)
-        queue_settings = saved.get('queue')
-        queue_settings = queue_settings if isinstance(queue_settings, dict) else {}
-        # The old paid-only limit does not define the new unified request policy.
-        try:
-            self._queue.set_concurrency(queue_settings.get('concurrency', 3))
-        except (ValueError, TypeError, OverflowError):
-            self._queue.set_concurrency(3)
-        try:
-            self._queue.set_retry_interval(queue_settings.get('retry_interval', 5))
-        except (ValueError, TypeError, OverflowError):
-            self._queue.set_retry_interval(5)
         try:
             self._apply_settings(saved.get('options', catalog.default_options()))
             self._mask = self._saved_mask = saved.get('mask') if isinstance(saved.get('mask'), dict) else None
@@ -406,7 +396,7 @@ class NovelAIPage(QtWidgets.QWidget):
         self.stop_btn.setObjectName('novelaiStop')
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop)
-        self.stop_btn.setToolTip('取消等待任务并停止本地等待；已提交的云端请求仍可能执行和计费。')
+        self.stop_btn.setToolTip('停止此页面发起的任务，不影响画布任务；已提交的云端请求仍可能执行和计费。')
         utilities.addWidget(self.stop_btn)
         footer.addLayout(utilities)
         self.status = QtWidgets.QLabel('输入提示词后生成。' if token_for(self.owner) else '请先在连接设置中添加 API Token。')
@@ -601,6 +591,18 @@ class NovelAIPage(QtWidgets.QWidget):
             self._history_ids = current
         except (OSError, ValueError) as error:
             self.status_message('历史索引未能保存：' + str(error))
+
+    def _add_task_history(self, records):
+        # Execution already persisted these results. Views only merge their
+        # local index; opening another subscriber must not save them again.
+        merged, seen = [], set()
+        for record in list(records) + self.history.items():
+            identity = record.get('id') or record.get('path')
+            if identity and identity not in seen:
+                seen.add(identity)
+                merged.append(record)
+        self.history.set_items(merged)
+        self._history_ids = {(v.get('id') or v.get('path')) for v in self.history.items()}
 
     def _queue_configuration_changed(self, *_):
         try:
@@ -864,6 +866,7 @@ class NovelAIPage(QtWidgets.QWidget):
         self._history_dialog.activateWindow()
 
     def show_input(self):
+        self._pending_preview_task_id = None
         if not self._previewing_input:
             self._result_view_context = {
                 'record': copy.deepcopy(self._selected), 'results': copy.deepcopy(self._task_results),
@@ -977,6 +980,7 @@ class NovelAIPage(QtWidgets.QWidget):
 
 
     def show_result(self):
+        self._pending_preview_task_id = None
         context = self._result_view_context if self._previewing_input else None
         if context:
             task = self._queue.get_task(context.get('task_id')) if context.get('task_id') else None
@@ -1062,6 +1066,7 @@ class NovelAIPage(QtWidgets.QWidget):
             self.status_message(str(error))
 
     def select_result(self, record):
+        self._pending_preview_task_id = None
         self._result_view_context = None
         self._follow_queue_preview = False
         self.task_panel.select_task(None)
@@ -1094,14 +1099,17 @@ class NovelAIPage(QtWidgets.QWidget):
     def _turn_task_result(self, direction):
         if not self._task_results:
             return
+        self._pending_preview_task_id = None
         self._task_result_index = max(0, min(self._task_result_index + direction, len(self._task_results) - 1))
         self._display_record(self._task_results[self._task_result_index])
         self._update_result_navigation()
 
-    def select_task(self, task_id):
+    def select_task(self, task_id, *, keep_pending=False):
         task = self._queue.get_task(task_id)
         if not task or not task.get('accepted') or task['state'] in ('failed', 'cancelled'):
             return
+        if not keep_pending:
+            self._pending_preview_task_id = None
         same_task = (self._follow_queue_preview and not self._previewing_input
                      and self._displayed_task_id == task_id)
         keep_preview = same_task and not self.preview.snapshot_pixmap().isNull()
@@ -1378,8 +1386,9 @@ class NovelAIPage(QtWidgets.QWidget):
             if not submitted:
                 self.status_message('未能加入队列：' + error_text)
                 return
-            self._follow_queue_preview = True
-            self._preview_task_id = submitted[0]
+            # Keep the visible task receiving frames and its final result
+            # until the new request is accepted and has a card to select.
+            self._pending_preview_task_id = submitted[0]
             self._queue_changed()
             first = self._queue.get_task(submitted[0])['index']
             last = self._queue.get_task(submitted[-1])['index']
@@ -1419,6 +1428,7 @@ class NovelAIPage(QtWidgets.QWidget):
             self._saved_mask = (copy.deepcopy(self._mask) if isinstance(self._mask, dict)
                                 and not any(self._mask.get(key) for key in ('png', 'paint_png')) else None)
             self.task_count.setValue(1)
+            self._pending_preview_task_id = None
             self._follow_queue_preview = False
             self.task_panel.select_task(None)
             self._task_results = []
@@ -1471,7 +1481,8 @@ class NovelAIPage(QtWidgets.QWidget):
                       or (t['state'] == 'running' and not t.get('accepted')) for t in active)
         self.queue_btn.setText(f'任务队列 · {len(active)}' if active else '任务队列')
         self.queue_btn.setToolTip(f'执行 {self._queue.active_count} 项 · 等待 {waiting} 项 · 共 {len(tasks)} 项；点击查看轮试状态或设置并发')
-        self.stop_btn.setEnabled(any(t['state'] not in ('save_failed', 'saving', 'canceling') for t in active))
+        self.stop_btn.setEnabled(any(self._is_page_task(t)
+            and t['state'] not in ('save_failed', 'saving', 'canceling') for t in active))
         self.progress.setVisible(self._queue.active_job is not None or any(t['state'] == 'preparing' for t in tasks))
         self.resave_btn.setVisible(self._queue.has_unsaved)
         self.resave_btn.setEnabled(self._queue.active_job is None)
@@ -1485,17 +1496,25 @@ class NovelAIPage(QtWidgets.QWidget):
             task = self._queue.get_task(identity)
             if not task or task['state'] not in ('running', 'saving', 'save_failed'):
                 self._stream_previews.pop(identity, None)
+        # Enqueueing alone must not redirect events away from the visible
+        # stream. An explicit user selection cancels this pending handoff.
+        if self._pending_preview_task_id is not None:
+            pending = self._queue.get_task(self._pending_preview_task_id)
+            if not pending or pending['state'] in ('failed', 'cancelled'):
+                self._pending_preview_task_id = None
+            elif pending.get('accepted'):
+                self.select_task(pending['id'])
         # A clicked task remains selected after completion, even while others run.
         if self._follow_queue_preview:
-            if self._preview_task_id is None:
+            if self._preview_task_id is None and self._pending_preview_task_id is None:
                 self._preview_task_id = next((t['id'] for t in tasks
                     if t.get('accepted') and t['state'] in ('running', 'saving')), None)
             task = self._queue.get_task(self._preview_task_id)
             if task and task.get('accepted') and task['state'] not in ('failed', 'cancelled'):
                 if (self._displayed_task_id != task['id']
                         or (self._displayed_task_state != task['state']
-                            and task['state'] in ('saving', 'save_failed', 'canceling'))):
-                    self.select_task(task['id'])
+                            and task['state'] in ('saving', 'save_failed', 'canceling', 'succeeded'))):
+                    self.select_task(task['id'], keep_pending=True)
             elif task and task['state'] in ('failed', 'cancelled'):
                 if self._displayed_task_id != task['id'] or self._displayed_task_state != task['state']:
                     self._displayed_task_id, self._displayed_task_state = task['id'], task['state']
@@ -1560,9 +1579,9 @@ class NovelAIPage(QtWidgets.QWidget):
             except (OSError, ValueError) as error:
                 warning = (warning + '\n' if warning else '') + '图片已保存，但遮罩设置未能保存：' + str(error)
         records = value.get('records', [])
-        self.history.add_items(records)
+        self._add_task_history(records)
         if records and self._follow_queue_preview and self._preview_task_id in (None, task_id):
-            self.select_task(task_id)
+            self.select_task(task_id, keep_pending=True)
         task = self._queue.get_task(task_id)
         self.status_message(warning or f'任务 #{task["index"]} 已保存 {len(records)} 张图片。')
         self._refresh_after_task(task_id)
@@ -1571,18 +1590,25 @@ class NovelAIPage(QtWidgets.QWidget):
         if self._closing:
             return
         if isinstance(error, storage.SaveError):
-            self.history.add_items(error.saved)
+            self._add_task_history(error.saved)
             if self._follow_queue_preview and self._preview_task_id == task_id:
-                self.select_task(task_id)
+                self.select_task(task_id, keep_pending=True)
             self.status_message('图片保存失败，队列已暂停；请重新保存结果：' + str(error))
         else:
             task = self._queue.get_task(task_id)
             self.status_message(f'任务 #{task["index"]} · {error}')
         self._refresh_after_task(task_id)
 
+    @staticmethod
+    def _is_page_task(task):
+        source = task.get('source')
+        return isinstance(source, dict) and source.get('type') == 'novelai_page'
+
     def stop(self):
-        self._queue.cancel_all()
-        self.status_message('已取消等待任务，并请求停止当前本地等待；已提交的云端任务仍可能执行和计费。')
+        for task in list(self._queue.tasks):
+            if self._is_page_task(task):
+                self._queue.cancel(task['id'])
+        self.status_message('已请求停止此页面发起的任务，画布任务不受影响。已提交的云端任务仍可能执行和计费。')
 
     def resave(self):
         task = next((t for t in self._queue.tasks if t['state'] == 'save_failed'), None)
@@ -1610,24 +1636,16 @@ class NovelAIPage(QtWidgets.QWidget):
             self._queue_dialog.apply_theme(mode)
 
     def can_close(self):
-        if not self._queue.has_unsaved:
-            return True
-        prompt = QtWidgets.QMessageBox(self)
-        prompt.setWindowTitle('还有尚未保存的 NovelAI 图片')
-        prompt.setIcon(QtWidgets.QMessageBox.Warning)
-        prompt.setText('部分图片已生成，但尚未成功保存。')
-        prompt.setInformativeText('退出会丢失这些图片。可以返回任务队列，重新选择目录保存，无需再次生成。')
-        keep = prompt.addButton('返回保存', QtWidgets.QMessageBox.RejectRole)
-        discard = prompt.addButton('放弃图片并退出', QtWidgets.QMessageBox.DestructiveRole)
-        prompt.setDefaultButton(keep)
-        prompt.exec_()
-        if prompt.clickedButton() is discard:
+        if can_close_service(self.owner, self):
             return True
         self.show_queue()
         return False
 
     def shutdown(self):
+        if self._closing:
+            return
         self._closing = True
+        self._pending_preview_task_id = None
         self._tag_suggestions.close()
         self._position_editing = False
         self._position_baseline = self._position_state = None
@@ -1637,7 +1655,12 @@ class NovelAIPage(QtWidgets.QWidget):
         self._quota_timer.stop()
         self._account_monitor.shutdown()
         self._billing_timer.stop()
-        self._queue.shutdown()
+        for signal, slot in ((self._queue.changed, self._queue_changed),
+                             (self._queue.progress, self._queue_progress),
+                             (self._queue.preview, self._queue_preview),
+                             (self._queue.completed, self._queue_completed),
+                             (self._queue.failed, self._queue_failed)):
+            signal.disconnect(slot)
         try:
             self._save_settings()
         except (OSError, ValueError):
