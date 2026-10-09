@@ -1,5 +1,7 @@
 import os
 import re
+import threading
+from PyQt5 import QtCore, QtWidgets, sip
 from aetherloom_core.ui.completion_popup import AutocompletePopup
 from aetherloom_core.prompt_tokens import completion_suffix
 
@@ -75,12 +77,73 @@ class AutocompleteManager:
 # 全局单例管理器（基于当前目录的 autocomplete.txt）
 _manager = None
 _manager_path = None
+_manager_lock = threading.Lock()
+
+
+def _dictionary_path(current_dir):
+    return os.path.normcase(os.path.abspath(os.path.join(current_dir or os.getcwd(), 'autocomplete.txt')))
 
 
 def get_manager(current_dir):
+    """Synchronous API for workers; editors use request_manager instead."""
     global _manager, _manager_path
-    path = os.path.normcase(os.path.abspath(os.path.join(current_dir or os.getcwd(), 'autocomplete.txt')))
-    if _manager is None or _manager_path != path:
-        _manager = AutocompleteManager(path)
-        _manager_path = path
-    return _manager
+    path = _dictionary_path(current_dir)
+    with _manager_lock:
+        if _manager is None or _manager_path != path:
+            _manager = AutocompleteManager(path)
+            _manager_path = path
+        return _manager
+
+
+class _ManagerLoad(QtCore.QObject):
+    """One shared read/sort per dictionary, publishing only on the GUI thread."""
+    loaded = QtCore.pyqtSignal(object)
+    _completed = QtCore.pyqtSignal(object)
+
+    def __init__(self, path, parent):
+        super().__init__(parent)
+        self.path = path
+        self.manager = None
+        self.finished = False
+        self._completed.connect(self._finish, QtCore.Qt.QueuedConnection)
+
+    @QtCore.pyqtSlot()
+    def start(self):
+        threading.Thread(target=self._load, name='Prompt vocabulary load', daemon=True).start()
+
+    def _load(self):
+        try:
+            manager = get_manager(os.path.dirname(self.path))
+        except Exception:
+            manager = None
+        try:
+            self._completed.emit(manager)
+        except RuntimeError:
+            pass  # QApplication may be deleted while the file is still loading.
+
+    @QtCore.pyqtSlot(object)
+    def _finish(self, manager):
+        self.manager = manager
+        self.finished = True
+        self.loaded.emit(manager)
+
+
+def request_manager(current_dir, loaded):
+    """Return cached data or notify an editor's QObject slot after a shared load."""
+    app = QtWidgets.QApplication.instance()
+    loads = getattr(app, '_prompt_vocabulary_loads', None)
+    if loads is None:
+        loads = app._prompt_vocabulary_loads = {}
+    path = _dictionary_path(current_dir)
+    job = loads.get(path)
+    if job is not None and not sip.isdeleted(job):
+        if job.finished:
+            return job.manager
+        job.loaded.connect(loaded, QtCore.Qt.QueuedConnection)
+    else:
+        job = loads[path] = _ManagerLoad(path, app)
+        job.loaded.connect(loaded, QtCore.Qt.QueuedConnection)
+        # Let synchronous page construction finish before cold parsing and
+        # sorting begin competing for the Python interpreter.
+        QtCore.QTimer.singleShot(0, job.start)
+    return None

@@ -4,10 +4,12 @@ from copy import deepcopy
 from pathlib import Path
 import hashlib
 import math
+import threading
+import weakref
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 from aetherloom_core.image_import import ImageDropFilter, import_mime
 from .styles import workspace_stylesheet as app_stylesheet, workspace_palette as palette
@@ -15,6 +17,7 @@ from aetherloom_core.ui.design import CONTROL
 from aetherloom_core.ui.widgets import _ComboWheelBlocker
 from .catalog import reference_defaults
 from .client import MAX_INPUT, MAX_PIXELS
+from .jobs import Job
 
 
 def editor_stylesheet(mode, scope):
@@ -86,35 +89,151 @@ def decimal(minimum=0., maximum=1., value=0., step=.05, decimals=2):
 
 
 _THUMBNAILS = OrderedDict()
+_THUMBNAIL_LOCK = threading.Lock()
+_THUMBNAIL_LOADER = None
 
 
-def thumbnail(path):
-    """Cache only small decoded images, with file revision in the key."""
+def _read_thumbnail(path):
+    """Read a small QImage off the GUI thread; never cache full-size images."""
     try:
         source = Path(path)
         stat = source.stat()
+        if not source.is_file() or stat.st_size > MAX_INPUT:
+            return QtGui.QImage()
         key = (str(source.resolve()), stat.st_mtime_ns, stat.st_size)
-        if key in _THUMBNAILS:
-            _THUMBNAILS.move_to_end(key)
-            return _THUMBNAILS[key]
+        with _THUMBNAIL_LOCK:
+            if key in _THUMBNAILS:
+                _THUMBNAILS.move_to_end(key)
+                return _THUMBNAILS[key]
         reader = QtGui.QImageReader(str(source))
         reader.setAutoTransform(True)
         size = reader.size()
-        if size.width() * size.height() > 32_000_000:
-            return QtGui.QPixmap()
-        if size.isValid():
-            reader.setScaledSize(size.scaled(112, 112, QtCore.Qt.KeepAspectRatio))
+        if not size.isValid() or size.width() * size.height() > 32_000_000:
+            return QtGui.QImage()
+        reader.setScaledSize(size.scaled(112, 112, QtCore.Qt.KeepAspectRatio))
         image = reader.read()
-        if image.isNull():
-            return QtGui.QPixmap()
-        pixmap = QtGui.QPixmap.fromImage(image).scaled(
-            112, 112, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-        _THUMBNAILS[key] = pixmap
-        while len(_THUMBNAILS) > 96:
-            _THUMBNAILS.popitem(last=False)
-        return pixmap
+        if not image.isNull():
+            image = image.scaled(112, 112, QtCore.Qt.KeepAspectRatio,
+                                 QtCore.Qt.SmoothTransformation)
+        with _THUMBNAIL_LOCK:
+            _THUMBNAILS[key] = image
+            while len(_THUMBNAILS) > 96:
+                _THUMBNAILS.popitem(last=False)
+        return image
     except (OSError, ValueError):
-        return QtGui.QPixmap()
+        return QtGui.QImage()
+
+
+def thumbnail(path):
+    """Compatibility helper for GUI callers; cards use the background loader."""
+    return QtGui.QPixmap.fromImage(_read_thumbnail(path))
+
+
+class _ThumbnailLoader(QtCore.QObject):
+    """One shared worker, with cancellable weak references to visible cards."""
+
+    def __init__(self, app):
+        super().__init__(app)
+        self._pending = []
+        self._active = []
+        self._job = None
+        self._finished = False
+        self._closed = False
+        self._stop = threading.Event()
+        closed = self._stop
+        self.destroyed.connect(lambda *_: closed.set())
+        self._timer = QtCore.QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._pump)
+        app.aboutToQuit.connect(self.close)
+
+    def request(self, card):
+        if self._closed or card._thumbnail_request is not None:
+            return
+        stop = card._thumbnail_request = threading.Event()
+        card._thumbnail_cancel_state[0] = stop
+        self._pending.append((weakref.ref(card), stop, str(card._raw.get('path', ''))))
+        self._timer.start(0)
+
+    def _pump(self):
+        if self._closed:
+            return
+        if self._job is not None:
+            if not self._finished:
+                return
+            if self._job.thread.is_alive():
+                self._timer.start(10)
+                return
+            self._job.deleteLater()
+            self._job = None
+            self._active = []
+        tasks, self._pending = self._pending, []
+        active = []
+        for reference, stop, path in tasks:
+            card = reference()
+            if stop.is_set() or card is None or sip.isdeleted(card):
+                continue
+            if not card._thumbnail_visible():
+                card._cancel_thumbnail()
+                continue
+            if len(active) < 4:
+                active.append((reference, stop, path))
+            else:
+                self._pending.append((reference, stop, path))
+        if not active:
+            return
+        self._active = active
+        closed = self._stop
+
+        def operation(job):
+            for reference, stop, path in active:
+                if closed.is_set() or job.stop.is_set():
+                    break
+                if not stop.is_set():
+                    image = _read_thumbnail(path)
+                    if not stop.is_set():
+                        job.emit_safe('progress', [(reference, stop, image)])
+
+        self._finished = False
+        self._job = Job(operation, self)
+        self._job.progress.connect(self._loaded)
+        self._job.failed.connect(self._failed)
+        self._job.finished.connect(self._complete)
+        self._job.start()
+
+    def _loaded(self, results):
+        if self._closed:
+            return
+        for reference, stop, image in results:
+            card = reference()
+            if card is not None and not sip.isdeleted(card) and card._thumbnail_request is stop:
+                if stop.is_set() or not card._thumbnail_visible():
+                    card._cancel_thumbnail()
+                else:
+                    card._set_thumbnail(image)
+
+    def _failed(self, unused):
+        self._loaded([(reference, stop, QtGui.QImage())
+                      for reference, stop, path in self._active])
+
+    def _complete(self):
+        self._finished = True
+        self._timer.start(0)
+
+    def close(self):
+        self._closed = True
+        self._stop.set()
+        self._pending.clear()
+        self._timer.stop()
+        if self._job is not None:
+            self._job.cancel()
+
+
+def _thumbnail_loader():
+    global _THUMBNAIL_LOADER
+    if _THUMBNAIL_LOADER is None or sip.isdeleted(_THUMBNAIL_LOADER):
+        _THUMBNAIL_LOADER = _ThumbnailLoader(QtWidgets.QApplication.instance())
+    return _THUMBNAIL_LOADER
 
 
 def prepare_reference_image(path, directory):
@@ -185,6 +304,14 @@ class _ReferenceCard(QtWidgets.QFrame):
         super().__init__(parent)
         self.setObjectName('novelaiReferenceCard')
         self._raw = deepcopy(value)
+        self._thumbnail_request = None
+        self._thumbnail_ready = False
+        self._thumbnail_cancel_state = [None]
+        cancel_state = self._thumbnail_cancel_state
+        self.destroyed.connect(lambda *_: cancel_state[0].set() if cancel_state[0] is not None else None)
+        self._thumbnail_timer = QtCore.QTimer(self)
+        self._thumbnail_timer.setSingleShot(True)
+        self._thumbnail_timer.timeout.connect(self._ensure_thumbnail)
         self._kind = str(value.get('kind', 'vibe'))
         self._precise_kind = (self._kind if self._kind != 'vibe' else
                               value.get('ui_precise_kind', 'character&style'))
@@ -203,16 +330,12 @@ class _ReferenceCard(QtWidgets.QFrame):
         layout.setContentsMargins(11, 11, 11, 11)
         layout.setSpacing(9)
         head = QtWidgets.QHBoxLayout()
-        preview = QtWidgets.QLabel()
+        preview = self.preview = QtWidgets.QLabel()
         preview.setFixedSize(64, 64)
         preview.setAlignment(QtCore.Qt.AlignCenter)
-        pixmap = thumbnail(value.get('path', ''))
-        if pixmap.isNull():
-            preview.setText('无法预览')
-        else:
-            preview.setPixmap(pixmap.scaled(64, 64, QtCore.Qt.KeepAspectRatio,
-                                           QtCore.Qt.SmoothTransformation))
+        preview.setText('等待预览')
         preview.setObjectName('novelaiReferencePreview')
+        preview.installEventFilter(self)
         head.addWidget(preview)
         title = QtWidgets.QLabel(Path(str(value.get('path', ''))).name or '参考图')
         title.setObjectName('novelaiCardTitle')
@@ -275,6 +398,56 @@ class _ReferenceCard(QtWidgets.QFrame):
         self.enabled.toggled.connect(self._enabled_changed)
         self.set_family('vibe' if self._kind == 'vibe' else 'precise', emit=False)
         self._enabled_changed(self.enabled.isChecked(), emit=False)
+
+    def _thumbnail_visible(self):
+        return (self.isVisible() and self.preview.isVisible()
+                and not self.preview.visibleRegion().isEmpty())
+
+    def _ensure_thumbnail(self):
+        if not self._thumbnail_ready and self._thumbnail_visible():
+            _thumbnail_loader().request(self)
+
+    def _cancel_thumbnail(self):
+        if self._thumbnail_request is not None:
+            self._thumbnail_request.set()
+        self._thumbnail_request = None
+        self._thumbnail_cancel_state[0] = None
+
+    def _set_thumbnail(self, image):
+        self._thumbnail_ready = True
+        self._thumbnail_request = None
+        self._thumbnail_cancel_state[0] = None
+        if image.isNull():
+            self.preview.setText('无法预览')
+        else:
+            pixmap = QtGui.QPixmap.fromImage(image)
+            self.preview.setPixmap(pixmap.scaled(64, 64, QtCore.Qt.KeepAspectRatio,
+                                                QtCore.Qt.SmoothTransformation))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._thumbnail_timer.start(0)
+
+    def hideEvent(self, event):
+        self._thumbnail_timer.stop()
+        self._cancel_thumbnail()
+        # A missing/replaced file may become available while the panel is closed.
+        # Keep the current pixels, but recheck its revision off-thread on reopen.
+        self._thumbnail_ready = False
+        super().hideEvent(event)
+
+    def eventFilter(self, watched, event):
+        if (watched is self.preview and event.type() in (QtCore.QEvent.Paint, QtCore.QEvent.Show)
+                and not self._thumbnail_ready and self._thumbnail_request is None):
+            self._thumbnail_timer.start(0)
+        return super().eventFilter(watched, event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        # Scrolling exposes cards without a Show event. Only enqueue here; all
+        # file access and decoding happens after painting, in the shared worker.
+        if not self._thumbnail_ready and self._thumbnail_request is None:
+            self._thumbnail_timer.start(0)
 
     def _enabled_changed(self, enabled, emit=True):
         self.options.setEnabled(enabled)

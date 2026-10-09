@@ -112,6 +112,23 @@ class NovelAIPromptEdit(CompletionTextEdit):
         self._suggestion_state = 'idle'
         self._hide_popup()
 
+    def _on_vocabulary_ready(self):
+        # A late local dictionary must not clear online results or reissue their
+        # prefix request. Resume only the still-current local candidate search.
+        if not self.isVisible() or not self._can_suggest():
+            # A later focus event must not reuse the empty pre-load candidates.
+            self._candidate_context = None
+            return
+        prefix = self._get_prefix_before_cursor()
+        if (not self._suggestion_options()['local']
+                or not 1 <= len(prefix.strip()) <= 200 or prefix == self._dismissed_prefix):
+            return
+        self._local_revision += 1
+        self._local_state = 'loading'
+        from .local_suggestions import request_local_tags
+        request_local_tags(self, prefix)
+        self._render_suggestions()
+
     def show_suggestions(self):
         """Explicit invocation also works with online suggestions disabled."""
         if (self.isReadOnly() or not self.isEnabled() or self._ime_composing

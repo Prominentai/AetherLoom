@@ -2,13 +2,34 @@
 import copy
 import os
 import math
+import stat
 import time
 import zipfile
 from pathlib import Path
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 from .jobs import Job
 from .storage import MAX_IMAGES, bounded_history
+
+
+def _read_history_thumbnail(path, previous_revision):
+    """Only file metadata and QImages cross the worker/GUI boundary."""
+    try:
+        info = os.stat(path)
+        if not stat.S_ISREG(info.st_mode):
+            return path, None, QtGui.QImage(), True
+        revision = (info.st_mtime_ns, info.st_size)
+        if revision == previous_revision:
+            return path, revision, None, False
+        reader = QtGui.QImageReader(path)
+        size = reader.size()
+        image = QtGui.QImage()
+        if size.isValid() and size.width() * size.height() <= 40_000_000:
+            reader.setScaledSize(size.scaled(152, 152, QtCore.Qt.KeepAspectRatio))
+            image = reader.read()
+        return path, revision, image, False
+    except (OSError, ValueError):
+        return path, None, QtGui.QImage(), True
 
 
 class _HistoryList(QtWidgets.QListWidget):
@@ -55,6 +76,15 @@ class HistoryPanel(QtWidgets.QWidget):
         super().__init__(parent)
         self.owner, self._items, self._page = owner, [], 0
         self._export_job = None
+        self._closed = False
+        self._thumbnail_revision = 0
+        self._thumbnail_job = None
+        self._thumbnail_cache = {}
+        self._thumbnail_rows = []
+        self._pending_thumbnails = {}
+        self._thumbnail_timer = QtCore.QTimer(self)
+        self._thumbnail_timer.setSingleShot(True)
+        self._thumbnail_timer.timeout.connect(self._pump_thumbnails)
         self.setMinimumWidth(180)
         self.setObjectName('novelaiHistory')
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
@@ -154,7 +184,9 @@ class HistoryPanel(QtWidgets.QWidget):
         self.render()
 
     def render(self):
+        self._invalidate_thumbnails()
         self.list.clear()
+        self._thumbnail_rows = []
         start = self._page * self.PAGE_SIZE
         for record in self._items[start:start + self.PAGE_SIZE]:
             path = str(record.get('path', ''))
@@ -172,16 +204,13 @@ class HistoryPanel(QtWidgets.QWidget):
             seed = record.get('seed')
             seed_label = '服务未返回' if seed is None else str(seed)
             item.setToolTip(f'{Path(path).name}\n种子：{seed_label}\n单击预览 · 双击打开 · 右键更多\nCtrl＋点击：复用参数（保留当前种子和输入素材）\nShift＋点击：回填种子\nCtrl＋Shift＋点击：复用参数与种子')
-            reader = QtGui.QImageReader(path)
-            size = reader.size()
-            if size.isValid() and size.width() * size.height() <= 40_000_000:
-                reader.setScaledSize(size.scaled(152, 152, QtCore.Qt.KeepAspectRatio))
-                image = reader.read()
-                if not image.isNull():
-                    item.setIcon(QtGui.QIcon(QtGui.QPixmap.fromImage(image)))
-            if not os.path.isfile(path):
-                item.setText(stamp + '\n文件已移除')
             self.list.addItem(item)
+            self._thumbnail_rows.append((item, path, stamp, item.text()))
+        # Keep at most this page's 32 icons; no hidden-window filesystem work.
+        paths = {path for _, path, _, _ in self._thumbnail_rows}
+        self._thumbnail_cache = {path: value for path, value in self._thumbnail_cache.items()
+                                 if path in paths}
+        self._apply_thumbnail_cache()
         count = (len(self._items) + self.PAGE_SIZE - 1) // self.PAGE_SIZE
         self.pages.setText(f'{self._page + 1 if count else 0} / {count}')
         self.previous.setEnabled(self._page > 0)
@@ -192,6 +221,104 @@ class HistoryPanel(QtWidgets.QWidget):
         self.stack.setCurrentIndex(0 if self._items else 1)
         self.hint.setVisible(bool(self._items))
         self.export_btn.setEnabled(bool(self._items) and self._export_job is None)
+        self._request_visible_thumbnails()
+
+    def _invalidate_thumbnails(self):
+        self._thumbnail_revision += 1
+        self._pending_thumbnails.clear()
+        self._thumbnail_timer.stop()
+        if self._thumbnail_job is not None:
+            self._thumbnail_job.cancel()
+
+    def _request_visible_thumbnails(self):
+        if self._closed or not self.isVisible():
+            return
+        self._pending_thumbnails = {
+            path: self._thumbnail_cache.get(path, (None,))[0]
+            for _, path, _, _ in self._thumbnail_rows
+        }
+        if self._pending_thumbnails:
+            self._thumbnail_timer.start(0)
+
+    def _apply_thumbnail_cache(self):
+        for item, path, stamp, normal_text in self._thumbnail_rows:
+            cached = self._thumbnail_cache.get(path)
+            if cached is not None:
+                _, icon, missing = cached
+                item.setIcon(icon)
+                item.setText(stamp + '\n文件已移除' if missing else normal_text)
+
+    def _pump_thumbnails(self):
+        if sip.isdeleted(self):
+            return
+        previous = self._thumbnail_job
+        if previous is not None:
+            if not getattr(previous, '_history_finished', False):
+                return
+            if previous.thread is not None and previous.thread.is_alive():
+                self._thumbnail_timer.start(10)
+                return
+            self._thumbnail_job = None
+            previous.deleteLater()
+        if self._closed or not self.isVisible() or not self._pending_thumbnails:
+            return
+        batch = list(self._pending_thumbnails.items())[:8]
+        for path, _ in batch:
+            self._pending_thumbnails.pop(path)
+        revision = self._thumbnail_revision
+
+        def operation(current):
+            values = []
+            for path, cached_revision in batch:
+                if current.stop.is_set():
+                    break
+                value = _read_history_thumbnail(path, cached_revision)
+                if current.stop.is_set():
+                    break
+                values.append(value)
+            return revision, values
+
+        job = self._thumbnail_job = Job(operation, self)
+        # Cancellation remains safe even when destruction happens during read().
+        job.destroyed.connect(job.stop.set)
+        job.succeeded.connect(self._thumbnails_loaded)
+        job.finished.connect(self._thumbnails_finished)
+        job.start()
+
+    @QtCore.pyqtSlot(object)
+    def _thumbnails_loaded(self, result):
+        if sip.isdeleted(self) or self._closed or not self.isVisible():
+            return
+        revision, values = result
+        if revision != self._thumbnail_revision or self.sender() is not self._thumbnail_job:
+            return
+        wanted = {path for _, path, _, _ in self._thumbnail_rows}
+        for path, file_revision, image, missing in values:
+            if path not in wanted:
+                continue
+            if image is None:
+                continue  # The worker confirmed the cached file revision.
+            icon = QtGui.QIcon(QtGui.QPixmap.fromImage(image)) if not image.isNull() else QtGui.QIcon()
+            self._thumbnail_cache[path] = (file_revision, icon, missing)
+        self._apply_thumbnail_cache()
+
+    @QtCore.pyqtSlot()
+    def _thumbnails_finished(self):
+        if sip.isdeleted(self):
+            return
+        job = self.sender()
+        if job is self._thumbnail_job:
+            job._history_finished = True
+            self._thumbnail_timer.start(0)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._invalidate_thumbnails()
+        self._request_visible_thumbnails()
+
+    def hideEvent(self, event):
+        self._invalidate_thumbnails()
+        super().hideEvent(event)
 
     def open(self, record):
         path = record.get('path', '')
@@ -293,5 +420,8 @@ class HistoryPanel(QtWidgets.QWidget):
         pass  # All controls inherit the workspace's scoped theme.
 
     def shutdown(self):
+        self._closed = True
+        self._invalidate_thumbnails()
+        self._thumbnail_cache.clear()
         if self._export_job is not None:
             self._export_job.cancel()

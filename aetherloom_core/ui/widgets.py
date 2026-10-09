@@ -14,11 +14,7 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
         super().__init__(parent)
         self.setCursorWidth(4)
         self.setToolTip('选中文字后按 Ctrl＋↑ / Ctrl＋↓ 调整提示词权重，每次 0.05。')
-        try:
-            # manager will load autocomplete.txt from current_dir
-            self._manager = auto_complete.get_manager(current_dir or globals().get('current_dir'))
-        except Exception:
-            self._manager = None
+        self._manager = None
         self._limit = limit or 20
         self._popup = auto_complete.AutocompletePopup(self)
         self._popup.setUniformItemSizes(False)
@@ -28,6 +24,7 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
         self._ime_composing = False
         self._completion_editing = False
         self._completion_revision = 0
+        self._vocabulary_completion_context = None
         self._completion_timer = QtCore.QTimer(self)
         self._completion_timer.setSingleShot(True)
         self._completion_timer.timeout.connect(self._request_completion)
@@ -42,6 +39,22 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
         self._focus_out_timer.setSingleShot(True)
         self._focus_out_timer.setInterval(120)
         self._focus_out_timer.timeout.connect(self._hide_popup_if_unfocused)
+        try:
+            self._manager = auto_complete.request_manager(
+                current_dir or globals().get('current_dir'), self._manager_loaded)
+        except Exception:
+            pass
+
+    @QtCore.pyqtSlot(object)
+    def _manager_loaded(self, manager):
+        self._manager = manager
+        if manager is not None:
+            self._on_vocabulary_ready()
+
+    def _on_vocabulary_ready(self):
+        if (self.isVisible() and self.hasFocus()
+                and self._vocabulary_completion_context == self._completion_context()):
+            self._queue_completion()
 
     def insertFromMimeData(self, source):
         if source.hasText():
@@ -206,6 +219,7 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
 
     def _hide_popup(self, *args):
         self._completion_revision += 1
+        self._vocabulary_completion_context = None
         self._completion_timer.stop()
         self._popup.hide()
         self._popup_cursor_position = None
@@ -262,9 +276,12 @@ class CompletionTextEdit(QtWidgets.QTextEdit):
     def _queue_completion(self):
         self._hide_popup()
         if (self.uses_local_completion_service and self.hasFocus() and not self.isReadOnly()
-                and self.isEnabled() and self._manager and not self._ime_composing
+                and self.isEnabled() and not self._ime_composing
                 and not self._completion_editing):
-            self._completion_timer.start(90)
+            if self._manager is None:
+                self._vocabulary_completion_context = self._completion_context()
+            else:
+                self._completion_timer.start(90)
 
     def _request_completion(self):
         if (not self.hasFocus() or self.isReadOnly() or not self.isEnabled()
