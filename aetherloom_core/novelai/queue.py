@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from collections import OrderedDict
 
-from PyQt5 import QtCore
+from PyQt5 import QtCore, sip
 from . import client, execution, storage, task_records
 from .jobs import Job
 
@@ -622,6 +622,10 @@ class QueueService(QtCore.QObject):
         self.changed.emit()
 
     def _finished(self, kind, identity, job):
+        # A pending singleShot lambda can outlive the queue's QObject parent.
+        # Worker-safe emit guards cannot protect this later GUI callback.
+        if sip.isdeleted(self) or sip.isdeleted(job):
+            return
         # Job emits finished immediately before its thread returns. Wait without
         # blocking Qt so the next worker cannot overlap that thread's lifetime.
         if job.thread is not None and job.thread.is_alive():
@@ -640,8 +644,11 @@ class QueueService(QtCore.QObject):
                 self._persist(task)
                 self._release(identity)
         job.deleteLater()
-        self.changed.emit()
-        self._schedule()
+        if self._closed:
+            self._release(identity, persist=False)
+        else:
+            self.changed.emit()
+            self._schedule()
 
     def _release(self, identity, *, persist=True):
         task = self._by_id.get(identity)

@@ -78,14 +78,21 @@ class _ElidedLabel(QtWidgets.QLabel):
     def set_full_text(self, text):
         if text != self._full_text:
             self._full_text = text
-            self._elide()
+            self.setText(text)
 
-    def _elide(self):
-        self.setText(self.fontMetrics().elidedText(self._full_text, QtCore.Qt.ElideRight, max(1, self.width())))
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._elide()
+    def paintEvent(self, event):
+        # QLabel.setText changes its size hint. Calling it from resizeEvent can
+        # recursively relayout compact result cards until native Qt overflows.
+        # Elision only changes pixels; the underlying text/geometry stay stable.
+        painter = QtWidgets.QStylePainter(self)
+        option = QtWidgets.QStyleOptionFrame()
+        self.initStyleOption(option)
+        painter.drawControl(QtWidgets.QStyle.CE_ShapedFrame, option)
+        margin = self.margin()
+        rect = self.contentsRect().adjusted(margin, margin, -margin, -margin)
+        text = self.fontMetrics().elidedText(self._full_text, QtCore.Qt.ElideRight, max(0, rect.width()))
+        painter.drawItemText(rect, int(self.alignment()) | QtCore.Qt.TextSingleLine,
+                             self.palette(), self.isEnabled(), text, QtGui.QPalette.WindowText)
 
 
 class _TaskCard(QtWidgets.QFrame):
@@ -101,6 +108,9 @@ class _TaskCard(QtWidgets.QFrame):
         self._source_pixmap = QtGui.QPixmap()
         self._placeholder = '暂无图片'
         self._compact = False
+        self._resize_timer = QtCore.QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._resize_thumbnail)
         self.setObjectName('naiTaskCard')
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self.setProperty('naiTaskSelected', False)
@@ -170,7 +180,7 @@ class _TaskCard(QtWidgets.QFrame):
                                      QtWidgets.QSizePolicy.Fixed)
         self.thumbnail.setMinimumWidth(0 if compact else 58)
         self.thumbnail.setMaximumWidth(16777215 if compact else 58)
-        self._resize_thumbnail()
+        self._resize_timer.start(0)
 
     def _resize_thumbnail(self):
         side = max(44, self.width() - 12) if self._compact else 58
@@ -183,7 +193,10 @@ class _TaskCard(QtWidgets.QFrame):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, 'thumbnail'):
-            self._resize_thumbnail()
+            # A square thumbnail changes card height when its width changes.
+            # Do not resize a scroll-area child inside its resize callback:
+            # scrollbar/layout updates may synchronously enter this handler.
+            self._resize_timer.start(0)
 
     def set_thumbnail(self, pixmap=None, placeholder='暂无图片'):
         self._source_pixmap = QtGui.QPixmap(pixmap) if pixmap is not None else QtGui.QPixmap()
@@ -299,6 +312,9 @@ class TaskPanel(QtWidgets.QFrame):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        # Reserve the scrollbar gutter: otherwise square cards can alternately
+        # need/not need scrolling as the scrollbar itself changes their width.
+        self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
         self.scroll.viewport().setObjectName('naiTaskViewport')
         self.cards_widget = QtWidgets.QWidget()
         self.cards_widget.setObjectName('naiTaskList')
@@ -698,7 +714,7 @@ class TaskPanel(QtWidgets.QFrame):
         """)
         for card in self._cards.values():
             for label in (card.state_label, card.title_label, card.meta_label):
-                label._elide()
+                label.update()
 
     def shutdown(self):
         self._closed = True
