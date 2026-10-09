@@ -2,7 +2,7 @@
 from copy import deepcopy
 import secrets
 import re
-from .catalog import active_characters
+from .catalog import active_characters, capabilities
 
 _HEAVY = "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page"
 _CURATED = "blurry, lowres, upscaled, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, halftone, multiple views, logo, too many watermarks, negative space, blank page"
@@ -70,26 +70,48 @@ def negative_text(model, preset):
     return "lowres, artistic error, scan artifacts, worst quality, bad quality, jpeg artifacts, multiple views, very displeasing, too many watermarks, negative space, blank page"
 
 
+def _character_prompts(options):
+    """Split resolved shorthand only when no character cards exist.
+
+    Randomizers and chunks have already been expanded by resolve_options.
+    Disabled cards still count as cards: their presence disables the web
+    shorthand, while their saved prompts remain untouched local drafts.
+    """
+    positive, negative = options["prompt"], options["negative_prompt"]
+    if options.get("characters"):
+        return positive, negative, active_characters(options)
+    positives, negatives = positive.split("|"), negative.split("|")
+    count = max(len(positives), len(negatives)) - 1
+    maximum = capabilities(options["model"])["max_characters"]
+    if count > maximum:
+        raise ValueError(f"当前模型最多支持 {maximum} 个角色，请减少 | 分隔的角色提示词")
+    characters = [dict(prompt=positives[index].strip() if index < len(positives) else "",
+                       negative_prompt=negatives[index].strip() if index < len(negatives) else "",
+                       x=.5, y=.5, use_coords=False)
+                  for index in range(1, count + 1)]
+    return positives[0], negatives[0], characters
+
+
 def build_prompts(options):
     """Return API prompt fields without mutating the user's text or snapshot."""
     model = options["model"]
+    base_positive, base_negative, characters = _character_prompts(options)
     suffix = quality_text(model, options["quality_preset"])
     # The web app applies transparency at the start of the quality suffix.
     if options.get("transparent_background") and not any(
-            tag.strip() == "transparent background" for tag in options["prompt"].split(",")):
+            tag.strip() == "transparent background" for tag in base_positive.split(",")):
         suffix = _join("transparent background", suffix)
-    positive = _append_before_text(options["prompt"], suffix)
+    positive = _append_before_text(base_positive, suffix)
     if (options.get("enhancement") and not options.get("upscaled_enhance")
             and "upscaled, blurry" not in positive):
         positive = _append_before_text(positive, "-2::upscaled, blurry::")
     positive = _dataset_prompt(positive, options.get("dataset_mode", "anime"))
     preset = negative_text(model, options["uc_preset"])
-    negative = _join(preset, options["negative_prompt"])
+    negative = _join(preset, base_negative)
     # Full models prepend this UC guard only while a UC preset is selected and
     # the actual positive prompt has not explicitly requested that tag.
-    if model.endswith("-full") and preset and "nsfw" not in options["prompt"].lower():
+    if model.endswith("-full") and preset and "nsfw" not in base_positive.lower():
         negative = _join("nsfw", negative)
-    characters = active_characters(options)
     use_coords = bool(characters and characters[0]["use_coords"])
     pos_chars, neg_chars = [], []
     for ch in characters:

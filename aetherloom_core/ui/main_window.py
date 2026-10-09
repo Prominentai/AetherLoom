@@ -91,13 +91,27 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         self._save_settings()
         return True
 
-    def __init__(self):
+    def __init__(self, startup_progress=None):
         super().__init__()
+        self._startup_progress = startup_progress
+        try:
+            self._initialize_main_window()
+        finally:
+            # Do not retain the temporary splash/controller after startup.
+            self._startup_progress = None
+
+    def _report_startup(self, message):
+        callback = getattr(self, '_startup_progress', None)
+        if callback is not None:
+            callback(message)
+
+    def _initialize_main_window(self):
         # Release owned Qt widgets while QApplication is still alive. Leaving the
         # full window tree for interpreter shutdown can crash native Qt teardown.
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         self.setWindowTitle(f'AetherLoom v{__version__}')
         # threadpool and thumbnail cache for background thumbnail generation
+        self._report_startup('正在准备本地缓存')
         try:
             self._thumb_pool = QtCore.QThreadPool.globalInstance()
             # limit concurrency to avoid saturating CPU / IO on large folders
@@ -182,6 +196,7 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         default_output = os.path.join(current_dir, 'output')
 
         # load settings if exist
+        self._report_startup('正在读取用户配置')
         self.settings = self._load_settings() or {}
         try:
             self.rh_local_decode_settings = self.settings.get('rh_local_decode_settings', {}) if isinstance(self.settings, dict) else {}
@@ -432,7 +447,9 @@ class MainWindow(MainLayoutMixin, LocalBrowserMixin, PresentationMixin, Settings
         self._play_icon_px_base = 100
         self._suppress_play_hide_once = False
 
+        self._report_startup('正在构建工作区界面')
         self._setup_ui()
+        self._report_startup('正在恢复窗口与主题')
         from aetherloom_core.rh_progress import ProgressMonitor
         self._rh_progress_monitor = ProgressMonitor(self)
         self._restore_window_geometry(initial=True)

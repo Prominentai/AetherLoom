@@ -1818,6 +1818,7 @@ class MainLayoutMixin:
         self.pages.addWidget(api_page)
 
         # --- Page: Runninghub 应用 (placeholder empty page) ---
+        self._report_startup('正在加载 RH 应用列表')
         from aetherloom_core.rh_dashboard import Dashboard, AppCard
         self._rh_dashboard = Dashboard(self)
         runninghub_page = QtWidgets.QWidget()
@@ -8522,6 +8523,7 @@ class MainLayoutMixin:
         except Exception:
             pass
 
+        self._report_startup('正在初始化画布工作区')
         from aetherloom_core.rh_execution_ui import install_canvas_page
         install_canvas_page(self)
         from aetherloom_core.rh_model_library import install_model_library

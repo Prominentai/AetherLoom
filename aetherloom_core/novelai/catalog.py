@@ -235,8 +235,8 @@ def validate_options(options):
             continue
         ch["prompt"] = _text(ch.get("prompt", ""), "角色提示词")
         ch["negative_prompt"] = _text(ch.get("negative_prompt", ""), "角色负面提示词")
-        if not ch["prompt"].strip():
-            raise ValueError("角色提示词不能为空")
+        # Blank positive captions still reserve the matching negative/position
+        # slot, as in an empty "Other" character card in the web editor.
         ch.setdefault("use_coords", False)
         if not isinstance(ch["use_coords"], bool):
             raise ValueError("角色定位开关无效")

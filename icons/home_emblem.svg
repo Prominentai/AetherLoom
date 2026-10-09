@@ -25,6 +25,4 @@
         <!-- woven detail -->
         <path d="M95 120 L110 80 L125 120" fill="none" stroke="#0b1220" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" opacity="0.18"/>
     </g>
-    <!-- subtle highlight triangle to suggest play/loom -->
-    <path d="M104 98 L104 132 L136 115 Z" fill="#ffffff" fill-opacity="0.06"/>
 </svg>

@@ -355,9 +355,13 @@ class HomePage(QtWidgets.QWidget):
         version = QtWidgets.QLabel('v' + __version__)
         version.setObjectName('homeVersion')
         self.hero.addWidget(version, 0, QtCore.Qt.AlignTop)
-        layout.addWidget(design.header(self.hero))
+        hero_frame = design.header(self.hero)
+        layout.addWidget(hero_frame)
+        from .decorations import BrandGlow
+        self.brand_glow = BrandGlow(hero_frame, self.logo)
         self.actions = QtWidgets.QHBoxLayout()
         self.actions.setSpacing(10)
+        self._action_buttons = []
         for label, description, attr in (
                 ('RunningHub', '添加与运行应用', 'runninghub_btn'),
                 ('画布', '连接节点，编排工作流', 'canvas_btn'),
@@ -368,7 +372,9 @@ class HomePage(QtWidgets.QWidget):
             button.setMinimumHeight(58)
             button.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
             button.setCursor(QtCore.Qt.PointingHandCursor)
+            button.setIconSize(QtCore.QSize(24, 24))
             button.clicked.connect(lambda checked=False, name=attr: getattr(owner, name).click())
+            self._action_buttons.append((button, attr))
             self.actions.addWidget(button, 1)
         layout.addLayout(self.actions)
         panel = QtWidgets.QFrame()
@@ -416,12 +422,21 @@ class HomePage(QtWidgets.QWidget):
         light = mode == 'light'
         text, muted, surface, border, accent = (('#172b46', '#586d87', '#ffffff', '#d8e3ef', '#146eac') if light
                                                else ('#e5edf9', '#9aadc7', '#182235', '#2d3d54', '#8bceef'))
+        self.brand_glow.set_theme(mode, accent)
+        from .themed_icons import StrokeIcon
+        files = {'runninghub_btn': 'runninghub', 'canvas_btn': 'canvas', 'local_btn': 'local_files'}
+        for button, name in self._action_buttons:
+            try:
+                source = Path(resource_path('icons', files[name] + '.svg')).read_text(encoding='utf-8')
+                button.setIcon(QtGui.QIcon(StrokeIcon(source, dict(muted=muted, text=accent, accent=accent))))
+            except (OSError, UnicodeError):
+                button.setIcon(QtGui.QIcon())
         self.setStyleSheet('''
             QWidget#aetherHome, QWidget#homeContent { background: %s; }
             QWidget#aetherHome QLabel { color: %s; background: transparent; }
             QLabel#homeHeading { font-size: 34px; font-weight: 700; }
             QWidget#aetherHome QLabel#homeMuted { color: %s; font-size: 12px; }
-            QLabel#homeVersion { color: %s; border: 1px solid %s; border-radius: 8px; padding: 4px 9px; }
+            QLabel#homeVersion { color: %s; border: none; border-radius: 8px; padding: 4px 0; }
             QLabel#homeSection { font-size: 16px; font-weight: 600; }
             QFrame#homeDocument { background: %s; border: 1px solid %s; border-radius: 12px; }
             QWidget#aetherHome QPushButton { background: %s; color: %s; border: 1px solid %s; border-radius: 8px; padding: 6px 12px; }
@@ -429,7 +444,7 @@ class HomePage(QtWidgets.QWidget):
             QWidget#aetherHome QPushButton:disabled { color: %s; }
             QPushButton#homeAction { font-size: 13px; text-align: left; padding: 10px 14px; }
             QTextBrowser#homeReadme { background: transparent; color: %s; border: none; font-size: 13px; selection-background-color: #386b9c; }
-        ''' % ('#f3f6fb' if light else '#101827', text, muted, accent, border, surface, border, surface, text, border, accent, muted, text))
+        ''' % ('#f3f6fb' if light else '#101827', text, muted, muted, surface, border, surface, text, border, accent, muted, text))
         self.readme.verticalScrollBar().setStyleSheet('''
             QScrollBar:vertical { background: transparent; width: 9px; margin: 0; }
             QScrollBar::handle:vertical { background: %s; min-height: 30px; border-radius: 4px; }

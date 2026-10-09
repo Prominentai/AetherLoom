@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import time
 import re
+import struct
 from pathlib import Path
 if __package__:
     from .release_product import assemble_product, product_resources, bundled_icon_resources, check_product_destination
@@ -56,11 +57,11 @@ CORE_MODULE_FILES = (
     'hover_preview.py', 'image_input_preview.py', 'video_compat.py', 'video_preview.py',
     'prompt_history.py', 'selection_text_tools.py', 'rh_outputs.py', 'rh_parameters.py', 'rh_result_actions.py',
     'rh_storage.py', 'rh_submission_queue.py', 'rh_tasks.py', 'rh_ui.py',
-    'thumbnail_resources.py', 'autocomplete.py', 'application.py',
+    'thumbnail_resources.py', 'autocomplete.py', 'application.py', 'startup.py',
     'paths.py', 'resources.py', 'platform_utils.py',
-    'ui/__init__.py', 'ui/widgets.py', 'ui/compare.py', 'ui/main_window.py',
+    'ui/__init__.py', 'ui/widgets.py', 'ui/compare.py', 'ui/main_window.py', 'ui/startup_splash.py',
     'ui/layout.py', 'ui/presentation.py', 'ui/menus.py', 'ui/local_browser.py', 'ui/settings.py', 'ui/preferences.py', 'ui/home.py', 'ui/decode.py',
-    'rh_progress.py', 'rh_dashboard.py', 'ui/design.py', 'ui/popups.py', 'ui/responsive.py', 'ui/navigation.py', 'ui/themed_icons.py', 'tasks/__init__.py', 'tasks/media.py', 'tasks/decoding.py',
+    'rh_progress.py', 'rh_dashboard.py', 'ui/design.py', 'ui/decorations.py', 'ui/popups.py', 'ui/responsive.py', 'ui/navigation.py', 'ui/themed_icons.py', 'tasks/__init__.py', 'tasks/media.py', 'tasks/decoding.py',
     'services/__init__.py', 'services/decoding.py',
     'rh_execution.py', 'rh_execution_ui.py', 'rh_output_groups.py', 'rh_connections.py', 'rh_connection_panel.py', 'rh_app_install.py',
     'rh_app_add_dialog.py', 'rh_app_reference.py', 'rh_app_thumbnails.py',
@@ -143,6 +144,49 @@ def ensure_pyinstaller(python_exe):
     except Exception as e:
         print("Failed to install PyInstaller:", e)
         return False
+
+
+def prepare_startup_splash(python_exe):
+    """Render this version's branding before building, without installing tools."""
+    env = dict(os.environ, PYTHONIOENCODING='utf-8')
+    support = subprocess.run(
+        [str(python_exe), '-B', '-m', 'PyInstaller', '--help'],
+        cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding='utf-8', errors='replace', timeout=30, env=env,
+    )
+    help_text = support.stdout or ''
+    if (support.returncode != 0 or not re.search(r'--splash(?:\s|=)', help_text)
+            or '--splash-center' not in help_text):
+        raise ValueError(
+            'Startup splash requires PyInstaller with --splash and --splash-center support. '
+            'Manually upgrade the selected build interpreter to PyInstaller 6.22.2 or a '
+            'compatible newer version; no automatic upgrade was attempted.'
+        )
+
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    splash_path = (BUILD_DIR / 'startup-splash.png').resolve()
+    # Never accept a previous version's image if rendering fails or produces no file.
+    splash_path.unlink(missing_ok=True)
+    env['QT_QPA_PLATFORM'] = 'offscreen'
+    rendered = subprocess.run(
+        [str(python_exe), '-B', '-m', 'aetherloom_core.ui.startup_splash',
+         '--render', str(splash_path)],
+        cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding='utf-8', errors='replace', timeout=30, env=env,
+    )
+    if rendered.returncode != 0:
+        raise ValueError('Startup splash rendering failed: ' + (rendered.stdout or '').strip()[-2000:])
+    if not splash_path.is_file() or splash_path.stat().st_size < 45:
+        raise ValueError('Startup splash renderer did not produce a nonempty PNG: ' + str(splash_path))
+    with splash_path.open('rb') as image:
+        header = image.read(33)
+        image.seek(-12, os.SEEK_END)
+        trailer = image.read(12)
+    if (header[:16] != b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR'
+            or struct.unpack('>II', header[16:24]) != (640, 360)
+            or trailer != b'\x00\x00\x00\x00IEND\xaeB`\x82'):
+        raise ValueError('Startup splash renderer must produce a complete 640x360 PNG: ' + str(splash_path))
+    return splash_path
 
 
 def audit_built_bundle(python_exe, executable):
@@ -239,6 +283,12 @@ def run_packaging(python_exe, attempts=MAX_RETRIES, output_dir=None):
             venv_python = None
     # choose python executable to run PyInstaller (prefer isolated venv if prepared)
     python_for_pyi = str(venv_python) if venv_python else python_exe
+    try:
+        splash_path = prepare_startup_splash(python_for_pyi)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print('Startup splash preparation failed; product will not be replaced:', exc)
+        return False
+    pyinst_opts.extend([f'--splash={splash_path}', '--splash-center=active'])
     base_cmd = [python_for_pyi, "-m", "PyInstaller"]
     cmd = base_cmd + pyinst_opts + add_data_opts + [str(ENTRY_SCRIPT)]
     # write full command to log

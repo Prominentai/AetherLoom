@@ -188,6 +188,36 @@ class _SectionNavigator:
         return self.scroll.widget().isEnabled()
 
 
+class _CharacterSummaryButton(QtWidgets.QPushButton):
+    """One elided line; painting never changes the surrounding layout."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName('novelaiCharacterSummary')
+        self.setAutoDefault(False)
+        self.setFlat(True)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        self.setFixedHeight(24)
+
+    def sizeHint(self):
+        return QtCore.QSize(0, 24)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def paintEvent(self, event):
+        painter = QtWidgets.QStylePainter(self)
+        rect = self.contentsRect().adjusted(4, 0, -4, 0)
+        text = self.fontMetrics().elidedText(self.text(), QtCore.Qt.ElideRight, max(0, rect.width()))
+        painter.setPen(self.palette().color(QtGui.QPalette.ButtonText))
+        painter.drawText(rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, text)
+        if self.hasFocus():
+            option = QtWidgets.QStyleOptionFocusRect()
+            option.initFrom(self)
+            option.rect = self.contentsRect()
+            painter.drawPrimitive(QtWidgets.QStyle.PE_FrameFocusRect, option)
+
+
 class _CharacterCard(QtWidgets.QFrame):
     changed = QtCore.pyqtSignal()
     remove_requested = QtCore.pyqtSignal(object)
@@ -206,25 +236,27 @@ class _CharacterCard(QtWidgets.QFrame):
         head = QtWidgets.QHBoxLayout()
         head.setSpacing(4)
         self.title = QtWidgets.QToolButton()
-        self.title.setText('角色')
+        self.title.setText('')
         self.title.setObjectName('novelaiCharacterTitle')
         self.title.setCheckable(True)
         self.title.setChecked(True)
         self.title.setArrowType(QtCore.Qt.DownArrow)
-        self.title.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-        self.title.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.title.setToolButtonStyle(QtCore.Qt.ToolButtonIconOnly)
+        self.title.setFixedSize(20, 28)
+        self.title.setToolTip('展开或收起角色提示词')
         head.addWidget(self.title)
         self.name = QtWidgets.QLineEdit(str(value.get('name', '') or ''))
         self.name.setObjectName('novelaiCharacterName')
-        self.name.setPlaceholderText('名称（可选）')
+        self.name.setPlaceholderText('角色')
         self.name.setAccessibleName('角色名称')
         self.name.setMinimumWidth(0)
         self.name.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         self.name.textChanged.connect(self.changed)
         head.addWidget(self.name, 1)
-        self.placement_badge = QtWidgets.QLabel()
+        # Keep the old metadata widget for callers; placement already has a shared control.
+        self.placement_badge = QtWidgets.QLabel(self)
         self.placement_badge.setObjectName('novelaiPositionBadge')
-        head.addWidget(self.placement_badge)
+        self.placement_badge.hide()
         self.enabled = QtWidgets.QCheckBox()
         self.enabled.setObjectName('novelaiCharacterEnabled')
         self.enabled.setCheckable(True)
@@ -233,6 +265,7 @@ class _CharacterCard(QtWidgets.QFrame):
         self.enabled.setAccessibleName('启用角色')
         self.enabled.toggled.connect(self._enabled_changed)
         head.addWidget(self.enabled)
+        self.move_buttons = {}
         for label, tooltip, direction in [('↑', '向前移动', -1), ('↓', '向后移动', 1)]:
             button = QtWidgets.QToolButton()
             button.setText(label)
@@ -240,6 +273,7 @@ class _CharacterCard(QtWidgets.QFrame):
             button.setToolTip(tooltip)
             button.setFixedSize(22, 28)
             button.clicked.connect(lambda checked=False, d=direction: self.move_requested.emit(self, d))
+            self.move_buttons[direction] = button
             head.addWidget(button)
         remove = QtWidgets.QToolButton()
         remove.setText('×')
@@ -250,6 +284,9 @@ class _CharacterCard(QtWidgets.QFrame):
         remove.clicked.connect(lambda: self.remove_requested.emit(self))
         head.addWidget(remove)
         layout.addLayout(head)
+        self.summary = _CharacterSummaryButton(self)
+        self.summary.clicked.connect(self._expand_summary)
+        layout.addWidget(self.summary)
         self.body = QtWidgets.QWidget()
         layout.addWidget(self.body)
         layout = QtWidgets.QVBoxLayout(self.body)
@@ -323,8 +360,12 @@ class _CharacterCard(QtWidgets.QFrame):
         self.snap_button.clicked.connect(self.snap_to_grid)
         layout.addWidget(self.snap_button)
         self._update_position_display()
+        self.prompt.textChanged.connect(self._update_summary)
+        self.negative.textChanged.connect(self._update_summary)
         self.prompt.textChanged.connect(self.changed)
         self.negative.textChanged.connect(self.changed)
+        self._update_summary()
+        self._toggle_body(self.title.isChecked())
         self._enabled_changed(self.enabled.isChecked(), emit=False)
 
     def _enabled_changed(self, enabled, emit=True):
@@ -340,7 +381,21 @@ class _CharacterCard(QtWidgets.QFrame):
 
     def _toggle_body(self, expanded):
         self.body.setVisible(expanded)
+        self.summary.setVisible(not expanded)
         self.title.setArrowType(QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
+
+    def _update_summary(self):
+        prompt, negative = self.prompt.toPlainText(), self.negative.toPlainText()
+        text = ' '.join(prompt.split())
+        if not text and negative.strip():
+            text = '不期望：' + ' '.join(negative.split())
+        self.summary.setText(text or '尚未填写角色提示词')
+        self.summary.setToolTip(prompt or negative or '点击展开角色提示词')
+        self.summary.setAccessibleName('展开角色提示词：' + self.summary.text()[:200])
+
+    def _expand_summary(self):
+        self.title.setChecked(True)
+        self.prompt_tabs.currentWidget().setFocus(QtCore.Qt.OtherFocusReason)
 
     def _fit_prompt_tab(self, *_):
         self.prompt_tabs.setFixedHeight(self.prompt_tabs.currentWidget().height()
@@ -585,6 +640,12 @@ class DrawingControls(QtWidgets.QWidget):
         self._fields = {}
         self._field_rows = {}
         self._characters = []
+        self._character_focus_target = None
+        self._character_focus_prompt = False
+        self._character_focus_passes = 0
+        self._character_focus_timer = QtCore.QTimer(self)
+        self._character_focus_timer.setSingleShot(True)
+        self._character_focus_timer.timeout.connect(self._reveal_character)
         self._active_prompt = None
         self._caps = {}
         self.setObjectName('novelaiControls')
@@ -813,13 +874,29 @@ class DrawingControls(QtWidgets.QWidget):
         self.position_canvas_button.setAccessibleName('在主画面调整角色位置')
         self.position_canvas_button.clicked.connect(self._edit_character_positions)
         characters_layout.addWidget(self.position_canvas_button)
-        self.add_character_button = QtWidgets.QPushButton('＋ 添加角色')
+        self.add_character_button = QtWidgets.QPushButton('＋')
         self.add_character_button.setObjectName('novelaiAddButton')
-        self.add_character_button.clicked.connect(lambda: self._add_character())
+        self.add_character_button.setProperty('characterAdd', True)
+        self.add_character_button.setFixedSize(28, 28)
+        self.add_character_button.setToolTip('添加角色')
+        self.add_character_button.setAccessibleName('添加角色')
+        self.character_menu = QtWidgets.QMenu(self.add_character_button)
+        for label, prefix in (('Female', 'girl, '), ('Male', 'boy, '), ('Other', '')):
+            action = self.character_menu.addAction(label)
+            action.setData(prefix)
+            action.triggered.connect(lambda checked=False, prompt=prefix: self._add_character_type(prompt))
+        self.add_character_button.clicked.connect(self._show_character_menu)
+        section_layout = self.character_section.layout()
+        section_layout.removeWidget(self.character_section.toggle)
+        self.character_header = QtWidgets.QHBoxLayout()
+        self.character_header.setContentsMargins(0, 0, 0, 0)
+        self.character_header.setSpacing(6)
+        self.character_header.addWidget(self.character_section.toggle, 1)
+        self.character_header.addWidget(self.add_character_button)
+        section_layout.insertLayout(0, self.character_header)
         self.characters_layout = QtWidgets.QVBoxLayout()
         self.characters_layout.setSpacing(8)
         characters_layout.addLayout(self.characters_layout)
-        characters_layout.addWidget(self.add_character_button)
 
         self.references_section = _Section('参考图', expanded=False, vertical=True)
         references_layout = self.references_section.form
@@ -968,10 +1045,63 @@ class DrawingControls(QtWidgets.QWidget):
             self._loading = False
             self._emit_changed()
 
+    def _show_character_menu(self):
+        if self.add_character_button.isEnabled():
+            self.character_menu.popup(self.add_character_button.mapToGlobal(
+                QtCore.QPoint(0, self.add_character_button.height())))
+
+    def _add_character_type(self, prompt):
+        if self._busy or not self.add_character_button.isEnabled():
+            return
+        self._add_character({'prompt': prompt, 'negative_prompt': '', 'x': .5, 'y': .5,
+                             'use_coords': self.position_mode.mode() is True})
+
+    def _scroll_to_character(self, card, *, focus_prompt=False):
+        if card not in self._characters:
+            return
+        self.tabs.cancel_pending_focus()
+        self.character_section.toggle.setChecked(True)
+        self._character_focus_target = card
+        self._character_focus_prompt = focus_prompt
+        # A prompt's auto-height can post one more layout request after expansion.
+        self._character_focus_passes = 2
+        self._character_focus_timer.start(0)
+
+    def _reveal_character(self):
+        card = self._character_focus_target
+        if card not in self._characters or not card.isVisible():
+            self._character_focus_target = None
+            return
+        if self._character_focus_prompt:
+            self._character_focus_prompt = False
+            card.prompt_tabs.setCurrentIndex(0)
+            card.prompt.setFocus(QtCore.Qt.OtherFocusReason)
+            cursor = card.prompt.textCursor()
+            cursor.movePosition(QtGui.QTextCursor.End)
+            card.prompt.setTextCursor(cursor)
+        # Canvas inspectors reparent this content out of controls.scroll.
+        scroll = card.parentWidget()
+        while scroll is not None and not isinstance(scroll, QtWidgets.QScrollArea):
+            scroll = scroll.parentWidget()
+        content = scroll.widget() if scroll is not None else None
+        if content is not None and content.isAncestorOf(card):
+            if content.layout() is not None:
+                content.layout().activate()
+            y = card.mapTo(content, QtCore.QPoint(0, 0)).y()
+            scroll.verticalScrollBar().setValue(max(0, y - 8))
+        self._character_focus_passes -= 1
+        if self._character_focus_passes:
+            self._character_focus_timer.start(0)
+        else:
+            self._character_focus_target = None
+
     def _add_character(self, value=None, emit=True):
         if value is None:
             value = {'prompt': '', 'negative_prompt': '', 'x': .5, 'y': .5,
                      'use_coords': self.position_mode.mode() is True}
+        if emit:
+            for existing in self._characters:
+                existing.title.setChecked(False)
         card = _CharacterCard(value, self)
         self._bind_prompt_editor(card.prompt)
         self._bind_prompt_editor(card.negative)
@@ -985,8 +1115,14 @@ class DrawingControls(QtWidgets.QWidget):
         self._action_changed()
         if emit:
             self._emit_changed()
+            self._scroll_to_character(card, focus_prompt=True)
 
     def _remove_character(self, card):
+        if card not in self._characters:
+            return
+        if self._character_focus_target is card:
+            self._character_focus_timer.stop()
+            self._character_focus_target = None
         if self._active_prompt in (card.prompt, card.negative):
             self._active_prompt = self.prompt
         self._characters.remove(card)
@@ -998,6 +1134,8 @@ class DrawingControls(QtWidgets.QWidget):
         self._emit_changed()
 
     def _move_character(self, card, direction):
+        if card not in self._characters:
+            return
         index = self._characters.index(card)
         target = index + direction
         if 0 <= target < len(self._characters):
@@ -1006,6 +1144,7 @@ class DrawingControls(QtWidgets.QWidget):
             self.characters_layout.insertWidget(target, card)
             self._update_character_count()
             self._emit_changed()
+            self._scroll_to_character(card)
 
     def _update_character_count(self):
         count = len(self._characters)
@@ -1015,12 +1154,16 @@ class DrawingControls(QtWidgets.QWidget):
         self.add_character_button.setEnabled(not self._busy and len(active) < maximum
                                              and count < 256 and self._caps.get('characters', True))
         for index, card in enumerate(self._characters, 1):
-            card.title.setText(f'角色 {index}')
+            card.name.setPlaceholderText(f'角色 {index}')
+            card.title.setAccessibleName(f'展开或收起角色 {index}')
+            card.move_buttons[-1].setEnabled(not self._busy and index > 1)
+            card.move_buttons[1].setEnabled(not self._busy and index < count)
         if not self._loading and active:
             states = {card._use_coords for card in active}
             self.position_mode.set_mode(None if len(states) > 1 else next(iter(states)))
         self.position_mode.set_free_coordinates(bool(self._caps.get('free_coordinates')))
-        self.position_canvas_button.setVisible(self.position_mode.mode() is True)
+        self.position_mode.setVisible(bool(count))
+        self.position_canvas_button.setVisible(bool(count) and self.position_mode.mode() is True)
         self.position_canvas_button.setEnabled(self._position_edit_enabled())
         self.position_canvas_button.setToolTip('在中间主画面按生成尺寸比例拖动角色编号；再次点击结束定位。' if count else '请先添加角色。')
         self.character_section.toggle.setToolTip(f'最多 {maximum} 个角色。人数写在主提示词，角色特征分别填写。')
@@ -1362,6 +1505,8 @@ class DrawingControls(QtWidgets.QWidget):
 
     def set_settings(self, settings):
         self.tabs.cancel_pending_focus()
+        self._character_focus_timer.stop()
+        self._character_focus_target = None
         merged = deepcopy(self._catalog.default_options())
         merged.update(deepcopy(settings or {}))
         if (isinstance(settings, dict) and settings.get('action') == 'augment'
@@ -1445,6 +1590,14 @@ class DrawingControls(QtWidgets.QWidget):
             QWidget#novelaiControls QFrame#novelaiCharacterCard:hover {{border-color:{colors['muted']};}}
             QWidget#novelaiControls QToolButton#novelaiCharacterTitle {{background:transparent;color:{colors['text']};border:none;padding:4px 0;text-align:left;font-size:12px;font-weight:600;}}
             QWidget#novelaiControls QToolButton#novelaiCharacterTitle:hover {{color:{colors['accent']};}}
+            QWidget#novelaiControls QPushButton#novelaiCharacterSummary {{background:transparent;color:{colors['muted']};
+                border:none;padding:0;min-height:0;min-width:0;text-align:left;font-size:12px;}}
+            QWidget#novelaiControls QPushButton#novelaiCharacterSummary:hover {{color:{colors['accent']};}}
+            QWidget#novelaiControls QPushButton#novelaiAddButton[characterAdd="true"] {{padding:0;min-width:0;min-height:0;font-size:18px;}}
+            QWidget#novelaiControls QMenu {{background:{colors['surface']};color:{colors['text']};
+                border:1px solid {colors['border']};padding:4px;}}
+            QWidget#novelaiControls QMenu::item {{padding:6px 18px;}}
+            QWidget#novelaiControls QMenu::item:selected {{background:{colors['accent_soft']};}}
             QWidget#novelaiControls QCheckBox#novelaiCharacterEnabled {{padding:0;spacing:0;}}
             QWidget#novelaiControls QLineEdit#novelaiCharacterName {{border:none;border-bottom:1px solid {colors['border']};
                 border-radius:0;background:transparent;padding:2px 3px;min-height:20px;font-size:11px;}}

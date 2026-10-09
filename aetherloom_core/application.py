@@ -1,12 +1,10 @@
 """Application initialization; imported by the stable root launcher."""
-import os
 import sys
 from PyQt5 import QtCore, QtGui, QtWidgets
 from aetherloom_core import __version__
 from aetherloom_core.paths import resource_path
-from aetherloom_core.resources import PLAY_BUTTON_SVG
-from aetherloom_core.platform_utils import _svg_to_icon
-from aetherloom_core.ui.main_window import MainWindow
+from aetherloom_core.startup import close_boot_splash, report_startup_failure, startup_theme
+from aetherloom_core.ui.startup_splash import StartupSplash
 
 try:
     from PyQt5.QtGui import QTextCursor
@@ -25,45 +23,43 @@ def main():
     QtGui.QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
         QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName('AetherLoom')
     app.setApplicationVersion(__version__)
-
-    # Prefer an explicit app icon so Windows taskbar shows the correct icon.
+    app.setQuitOnLastWindowClosed(False)
+    splash = None
+    w = None
     try:
-        icon_candidates = [resource_path('app_icon.ico')]
+        splash = StartupSplash(startup_theme())
+        splash.show()
+        # At this point only the splash exists. Flush its first native frame before
+        # heavy imports; never pump events from MainWindow's stage callbacks.
+        app.processEvents(QtCore.QEventLoop.ExcludeUserInputEvents)
+        close_boot_splash()
+        splash.set_status('正在加载界面组件')
+        from aetherloom_core.ui.main_window import MainWindow
 
-        set_icon = False
-        for p in icon_candidates:
-            try:
-                if p and os.path.exists(p):
-                    app.setWindowIcon(QtGui.QIcon(p))
-                    set_icon = True
-                    break
-            except Exception:
-                pass
+        icon = QtGui.QIcon(resource_path('app_icon.ico'))
+        if icon.isNull():
+            icon = QtGui.QIcon(resource_path('icons', 'home_emblem.svg'))
+        app.setWindowIcon(icon)
+        w = MainWindow(startup_progress=splash.set_status)
+        w.setWindowIcon(icon)
+        splash.set_status('正在打开工作区')
+        splash.finish(w)
+        w.show()
+        app.setQuitOnLastWindowClosed(True)
+    except Exception as error:
+        if splash is not None:
+            splash.close()
+        close_boot_splash()
+        report_startup_failure(error)
+        return 1
 
-        # fallback to embedded SVG icon if no file found
-        if not set_icon:
-            ico = _svg_to_icon(PLAY_BUTTON_SVG, 256)
-            if ico:
-                app.setWindowIcon(ico)
-    except Exception:
-        pass
-
-    w = MainWindow()
     try:
-        # ensure main window also carries the icon
-        try:
-            win_icon = QtWidgets.QApplication.windowIcon()
-            if not win_icon.isNull():
-                w.setWindowIcon(win_icon)
-        except Exception:
-            pass
-    except Exception:
-        pass
-    w.show()
-    try:
-        sys.exit(app.exec_())
+        return app.exec_()
     finally:
+        splash.close()
+        close_boot_splash()
         # ensure settings saved on exit
         try:
             w._save_settings()
